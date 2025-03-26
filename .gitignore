@@ -1,0 +1,9 @@
+
+.vs/
+x64/
+Meshes/
+
+*.sln
+*.vcxproj
+*.vcxproj.user
+*.vcxproj.filters
