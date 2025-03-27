@@ -83,38 +83,109 @@ static void FaceCornerListInsert(MeshView mesh, FaceID face_id, CornerID new_cor
 }
 
 
+bool EdgeCornerListRemove(MeshView mesh, CornerID corner_id) {
+	auto& corner = mesh[corner_id];
+	auto prev_corner_around_an_edge = corner.prev_corner_around_an_edge;
+	auto next_corner_around_an_edge = corner.next_corner_around_an_edge;
+	
+	mesh[next_corner_around_an_edge].prev_corner_around_an_edge = prev_corner_around_an_edge;
+	mesh[prev_corner_around_an_edge].next_corner_around_an_edge = next_corner_around_an_edge;
+	
+	// Remove the edge if it lost it's last corner.
+	bool is_last_reference = (prev_corner_around_an_edge.index == corner_id.index);
+	auto new_edge_corner_list_base = is_last_reference ? CornerID{ u32_max } : prev_corner_around_an_edge;
+	
+	mesh[corner.edge_id].edge_corner_list_base = new_edge_corner_list_base;
+	
+	corner.prev_corner_around_an_edge.index = u32_max;
+	corner.next_corner_around_an_edge.index = u32_max;
+	
+	return is_last_reference;
+}
+
+bool FaceCornerListRemove(MeshView mesh, CornerID corner_id) {
+	auto& corner = mesh[corner_id];
+	auto prev_corner_around_a_face = corner.prev_corner_around_a_face;
+	auto next_corner_around_a_face = corner.next_corner_around_a_face;
+	
+	mesh[next_corner_around_a_face].prev_corner_around_a_face = prev_corner_around_a_face;
+	mesh[prev_corner_around_a_face].next_corner_around_a_face = next_corner_around_a_face;
+	
+	// Remove the face if it lost it's last corner.
+	bool is_last_reference = (prev_corner_around_a_face.index == corner_id.index);
+	auto new_face_corner_list_base = is_last_reference ? CornerID{ u32_max } : prev_corner_around_a_face;
+	
+	mesh[corner.face_id].face_corner_list_base = new_face_corner_list_base;
+	
+	corner.prev_corner_around_a_face.index = u32_max;
+	corner.next_corner_around_a_face.index = u32_max;
+	
+	return is_last_reference;
+}
+
+bool VertexCornerListRemove(MeshView mesh, CornerID corner_id) {
+	auto& corner = mesh[corner_id];
+	auto prev_corner_around_a_vertex = corner.prev_corner_around_a_vertex;
+	auto next_corner_around_a_vertex = corner.next_corner_around_a_vertex;
+
+	mesh[next_corner_around_a_vertex].prev_corner_around_a_vertex = prev_corner_around_a_vertex;
+	mesh[prev_corner_around_a_vertex].next_corner_around_a_vertex = next_corner_around_a_vertex;
+	
+	// Remove the vertex if it lost it's last corner.
+	bool is_last_reference = (prev_corner_around_a_vertex.index == corner_id.index);
+	auto new_vertex_corner_list_base = is_last_reference ? CornerID{ u32_max } : prev_corner_around_a_vertex;
+	
+	mesh[corner.vertex_id].vertex_corner_list_base = new_vertex_corner_list_base;
+	
+	corner.prev_corner_around_a_vertex.index = u32_max;
+	corner.next_corner_around_a_vertex.index = u32_max;
+	
+	return is_last_reference;
+}
+
+
 template<typename Lambda>
 static void IterateEdgeCornerList(MeshView mesh, CornerID edge_corner_list_base_id, Lambda&& lambda) {
 	auto current_corner_id = edge_corner_list_base_id;
+	auto& edge = mesh[mesh[edge_corner_list_base_id].edge_id];
+	bool edge_is_valid = true;
 	do {
 		auto next_corner_around_an_edge = mesh[current_corner_id].next_corner_around_an_edge;
 		lambda(current_corner_id);
+		edge_is_valid = edge.edge_corner_list_base.index != u32_max;
 		
 		current_corner_id = next_corner_around_an_edge;
-	} while (current_corner_id.index != edge_corner_list_base_id.index);
+	} while (current_corner_id.index != edge_corner_list_base_id.index && edge_is_valid);
 }
 
 template<typename Lambda>
 static void IterateVertexCornerList(MeshView mesh, CornerID vertex_corner_list_base_id, Lambda&& lambda) {
 	auto current_corner_id = vertex_corner_list_base_id;
+	auto& vertex = mesh[mesh[vertex_corner_list_base_id].vertex_id];
+	bool vertex_is_valid = true;
 	do {
 		auto next_corner_around_a_vertex = mesh[current_corner_id].next_corner_around_a_vertex;
 		lambda(current_corner_id);
+		vertex_is_valid = vertex.vertex_corner_list_base.index != u32_max;
 		
 		current_corner_id = next_corner_around_a_vertex;
-	} while (current_corner_id.index != vertex_corner_list_base_id.index);
+	} while (current_corner_id.index != vertex_corner_list_base_id.index && vertex_is_valid);
 }
 
 template<typename Lambda>
 static void IterateFaceCornerList(MeshView mesh, CornerID face_corner_list_base_id, Lambda&& lambda) {
 	auto current_corner_id = face_corner_list_base_id;
+	auto& face = mesh[mesh[face_corner_list_base_id].face_id];
+	bool face_is_valid = true;
 	do {
 		auto next_corner_around_a_face = mesh[current_corner_id].next_corner_around_a_face;
 		lambda(current_corner_id);
+		face_is_valid = face.face_corner_list_base.index != u32_max;
 		
 		current_corner_id = next_corner_around_a_face;
-	} while (current_corner_id.index != face_corner_list_base_id.index);
+	} while (current_corner_id.index != face_corner_list_base_id.index && face_is_valid);
 }
+
 
 
 Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
@@ -204,11 +275,6 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 			EdgeCornerListInsert(mesh, it->second, CornerID{ i + corner_index });
 			FaceCornerListInsert(mesh, face_id, CornerID{ i + corner_index });
 		}
-
-		// __debugbreak();
-		// __debugbreak();
-		// __debugbreak();
-		// __debugbreak();
 	}
 
 	
@@ -246,6 +312,188 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 #endif
 	
 	return result_mesh;
+}
+
+
+static void PerformEdgeCollapse(MeshView mesh, EdgeID edge_id) {
+	auto& edge = mesh[edge_id];
+	
+	auto& vertex_0 = mesh[edge.vertex_0];
+	auto& vertex_1 = mesh[edge.vertex_1];
+
+	assert(edge.edge_corner_list_base.index != u32_max);
+	assert(vertex_0.vertex_corner_list_base.index != u32_max);
+	assert(vertex_1.vertex_corner_list_base.index != u32_max);
+	
+	
+	IterateEdgeCornerList(mesh, edge.edge_corner_list_base, [&](CornerID corner_id) {
+		auto& corner = mesh[corner_id];
+		auto& face   = mesh[corner.face_id];
+		
+		IterateFaceCornerList(mesh, face.face_corner_list_base, [&](CornerID corner_id) {
+			VertexCornerListRemove(mesh, corner_id);
+			EdgeCornerListRemove(mesh, corner_id);
+			FaceCornerListRemove(mesh, corner_id);
+		});
+	});
+	
+	{
+		// Splice vertex lists
+		auto base0 = mesh[edge.vertex_0].vertex_corner_list_base;
+		auto base1 = mesh[edge.vertex_1].vertex_corner_list_base;
+		
+		if (base0.index != u32_max && base1.index != u32_max) {
+			IterateVertexCornerList(mesh, base1, [&](CornerID corner_id) {
+				mesh[corner_id].vertex_id = edge.vertex_0;
+				
+				IterateFaceCornerList(mesh, corner_id, [&](CornerID corner_id) {
+					auto& e0 = mesh[mesh[corner_id].edge_id];
+					
+					if (e0.vertex_0.index == edge.vertex_1.index) {
+						e0.vertex_0 = edge.vertex_0;
+					}
+					
+					if (e0.vertex_1.index == edge.vertex_1.index) {
+						e0.vertex_1 = edge.vertex_0;
+					}
+				});
+			});
+			
+			u32 degree0 = 0; IterateVertexCornerList(mesh, base0, [&](CornerID) { degree0 += 1; });
+			u32 degree1 = 0; IterateVertexCornerList(mesh, base1, [&](CornerID) { degree1 += 1; });
+			
+			auto base0_prev_corner_around_a_vertex = mesh[base0].prev_corner_around_a_vertex;
+			auto base1_prev_corner_around_a_vertex = mesh[base1].prev_corner_around_a_vertex;
+			
+			mesh[base0].prev_corner_around_a_vertex = base1_prev_corner_around_a_vertex;
+			mesh[base1_prev_corner_around_a_vertex].next_corner_around_a_vertex = base0;
+			
+			mesh[base1].prev_corner_around_a_vertex = base0_prev_corner_around_a_vertex;
+			mesh[base0_prev_corner_around_a_vertex].next_corner_around_a_vertex = base1;
+			
+			u32 degree2 = 0; IterateVertexCornerList(mesh, base0, [&](CornerID) { degree2 += 1; });
+			assert(degree0 + degree1 == degree2);
+		}
+	}
+	
+	auto remaning_base_id   = vertex_0.vertex_corner_list_base.index != u32_max ? vertex_0.vertex_corner_list_base : vertex_1.vertex_corner_list_base;
+	auto remaning_base_id_nocheckin = vertex_0.vertex_corner_list_base.index != u32_max ? 0 : 1;
+	
+	std::unordered_map<Edge, EdgeID, VertexHasher> edge_duplicate_map;
+	
+	if (remaning_base_id.index != u32_max) IterateVertexCornerList(mesh, remaning_base_id, [&](CornerID corner_id) {
+		IterateFaceCornerList(mesh, corner_id, [&](CornerID corner_id) {
+			auto edge_id_1 = mesh[corner_id].edge_id;
+			
+			auto [it, is_inserted] = edge_duplicate_map.emplace(mesh[edge_id_1], edge_id_1);
+			auto edge_id_0 = it->second;
+			
+			if (is_inserted == false && edge_id_0.index != edge_id_1.index) {
+				auto base0 = mesh[edge_id_0].edge_corner_list_base;
+				auto base1 = mesh[edge_id_1].edge_corner_list_base;
+				
+				u32 degree0 = 0; IterateEdgeCornerList(mesh, base0, [&](CornerID) { degree0 += 1; });
+				u32 degree1 = 0; IterateEdgeCornerList(mesh, base1, [&](CornerID) { degree1 += 1; });
+				
+				auto base0_prev_corner_around_an_edge = mesh[base0].prev_corner_around_an_edge;
+				auto base1_prev_corner_around_an_edge = mesh[base1].prev_corner_around_an_edge;
+				
+				mesh[base0].prev_corner_around_an_edge = base1_prev_corner_around_an_edge;
+				mesh[base1_prev_corner_around_an_edge].next_corner_around_an_edge = base0;
+				
+				mesh[base1].prev_corner_around_an_edge = base0_prev_corner_around_an_edge;
+				mesh[base0_prev_corner_around_an_edge].next_corner_around_an_edge = base1;
+				
+				u32 degree2 = 0; IterateEdgeCornerList(mesh, base0, [&](CornerID) { degree2 += 1; });
+				assert(degree0 + degree1 == degree2);
+				
+				IterateEdgeCornerList(mesh, base0, [&](CornerID corner_id) {
+					mesh[corner_id].edge_id = edge_id_0;
+				});
+				mesh[edge_id_1].edge_corner_list_base.index = u32_max;
+			}
+		});
+	});
+	
+	if (remaning_base_id_nocheckin == 0) {
+		vertex_1.vertex_corner_list_base.index = u32_max; // Removed.
+	} else {
+		vertex_0.vertex_corner_list_base.index = u32_max; // Removed.
+	}
+}
+
+void PerformRandomEdgeCollapse(MeshView mesh) {
+#if 0
+	auto edge_id = EdgeID{ 1 };
+	
+	printf("CollapseID: %u\n", edge_id.index);
+	PerformEdgeCollapse(mesh, edge_id);
+
+	edge_id = EdgeID{ 7 };
+	printf("CollapseID: %u\n", edge_id.index);
+	PerformEdgeCollapse(mesh, edge_id);
+
+	int k = 2;
+#else
+	u32 to_collapse = 1800;
+	if (to_collapse >= mesh.edge_count) to_collapse = mesh.edge_count;
+	for (u32 i = 0; i < to_collapse; i += 4) {
+		auto edge_id = EdgeID{ i };
+		if (mesh[edge_id].edge_corner_list_base.index == u32_max) continue;
+		
+		printf("CollapseID: %u\n", edge_id.index);
+		PerformEdgeCollapse(mesh, edge_id);
+	}
+#endif
+
+#if 0
+	for (u32 i = 0; i < mesh.vertex_count; i += 1) {
+		auto vertex = mesh[VertexID{ i }];
+		if (vertex.vertex_corner_list_base.index == u32_max) continue;
+
+		printf("v%u: ", i);
+
+		IterateVertexCornerList(mesh, vertex.vertex_corner_list_base, [](CornerID corner_id) {
+			printf("%u -> ", corner_id.index);
+		});
+		printf("%u\n", vertex.vertex_corner_list_base.index);
+	}
+#endif
+
+#if 0
+	for (u32 i = 0; i < mesh.edge_count; i += 1) {
+		auto edge = mesh[EdgeID{ i }];
+		if (edge.edge_corner_list_base.index == u32_max) continue;
+
+		printf("e%u: ", i);
+
+		IterateEdgeCornerList(mesh, edge.edge_corner_list_base, [](CornerID corner_id) {
+			printf("%u -> ", corner_id.index);
+		});
+		printf("%u\n", edge.edge_corner_list_base.index);
+	}
+#endif
+	
+#if 0
+	for (u32 i = 0; i < mesh.face_count; i += 1) {
+		auto face = mesh[FaceID{ i }];
+		if (face.face_corner_list_base.index == u32_max) continue;
+
+		printf("f%u: ", i);
+
+		IterateFaceCornerList(mesh, face.face_corner_list_base, [](CornerID corner_id) {
+			printf("%u -> ", corner_id.index);
+		});
+		printf("%u\n", face.face_corner_list_base.index);
+	}
+#endif
+
+#if 0
+	auto edge_id = EdgeID{ 1 };
+	
+	printf("CollapseID: %u\n", edge_id.index);
+	PerformEdgeCollapse(mesh, edge_id);
+#endif
 }
 
 

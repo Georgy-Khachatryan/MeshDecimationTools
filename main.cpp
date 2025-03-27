@@ -122,7 +122,7 @@ ObjTriangleMesh ParseWavefrontObj(const char* string) {
 }
 
 void WriteWavefrontObjFile(ObjTriangleMesh mesh) {
-	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/NonManifoldCornerX.obj", "wb");
+	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/Output/NonManifoldCorner.obj", "wb");
 	if (file == nullptr) return;
 	
 	fprintf(file, "# MeshDecimation\n");
@@ -146,7 +146,7 @@ void WriteWavefrontObjFile(ObjTriangleMesh mesh) {
 }
 
 void WriteWavefrontObjFile(MeshView mesh) {
-	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/NonManifoldCornerX.obj", "wb");
+	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/Output/NonManifoldCorner.obj", "wb");
 	if (file == nullptr) return;
 	
 	fprintf(file, "# MeshDecimation\n");
@@ -205,6 +205,7 @@ int main() {
 	auto editable_mesh = ObjMeshToEditableMesh(triangle_mesh);
 
 	auto mesh = MeshToMeshView(editable_mesh);
+	PerformRandomEdgeCollapse(mesh);
 	
 	WriteWavefrontObjFile(mesh);
 	

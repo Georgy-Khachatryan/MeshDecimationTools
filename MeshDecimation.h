@@ -149,6 +149,8 @@ struct MeshView {
 };
 
 MeshView MeshToMeshView(Mesh& mesh);
+void PerformRandomEdgeCollapse(MeshView mesh);
+
 
 struct ObjVertex {
 	Vector3 position;
