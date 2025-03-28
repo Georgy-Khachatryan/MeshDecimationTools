@@ -165,11 +165,11 @@ void WriteWavefrontObjFile(MeshView mesh) {
 	
 	for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
 		auto& f = mesh[face_id];
-		if (f.face_corner_list_base.index == u32_max) continue;
+		if (f.corner_list_base.index == u32_max) continue;
 		
 		fprintf(file, "f");
 
-		auto face_corner_list_base_id = f.face_corner_list_base;
+		auto face_corner_list_base_id = f.corner_list_base;
 		auto current_corner_id = face_corner_list_base_id;
 		do {
 			auto& c0 = mesh[current_corner_id];
@@ -178,7 +178,7 @@ void WriteWavefrontObjFile(MeshView mesh) {
 			
 			fprintf(file, " %u/%u/%u", vi0, ai0, ai0);
 		
-			current_corner_id = mesh[current_corner_id].next_corner_around_a_face;
+			current_corner_id = mesh[current_corner_id].corner_list_around[(u32)ElementType::Face].next;
 		} while (current_corner_id.index != face_corner_list_base_id.index);
 
 		fprintf(file, "\n");
@@ -195,11 +195,12 @@ int main() {
 	u64 file_size = ftell(file);
 	fseek(file, 0, SEEK_SET);
 	
-	char* file_data = (char*)malloc(file_size + 1);
-	fread(file_data, 1, file_size, file);
+	std::vector<char> file_data;
+	file_data.resize(file_size + 1);
+	fread(file_data.data(), 1, file_size, file);
 	file_data[file_size] = 0;
 	
-	auto triangle_mesh = ParseWavefrontObj(file_data);
+	auto triangle_mesh = ParseWavefrontObj(file_data.data());
 	// WriteWavefrontObjFile(triangle_mesh);
 	
 	auto editable_mesh = ObjMeshToEditableMesh(triangle_mesh);
@@ -208,8 +209,6 @@ int main() {
 	PerformRandomEdgeCollapse(mesh);
 	
 	WriteWavefrontObjFile(mesh);
-	
-	printf("%llu", file_size);
 	
 	fclose(file);
 	

@@ -59,20 +59,34 @@ struct Vector2 {
 };
 
 
+enum struct ElementType : u32 {
+	Vertex = 0,
+	Edge   = 1,
+	Face   = 2,
+	
+	Count
+};
+
 struct CornerID {
 	u32 index = 0;
 };
 
 struct FaceID {
 	u32 index = 0;
+	
+	compile_const ElementType element_type = ElementType::Face;
 };
 
 struct VertexID {
 	u32 index = 0;
+	
+	compile_const ElementType element_type = ElementType::Vertex;
 };
 
 struct EdgeID {
 	u32 index = 0;
+	
+	compile_const ElementType element_type = ElementType::Edge;
 };
 
 struct AttributesID {
@@ -82,30 +96,22 @@ compile_const u32 attribute_stride_dwords = 5; // 3 normal + 2 texcoords.
 
 
 struct Face {
-	CornerID face_corner_list_base;
+	CornerID corner_list_base; // Corner list around a face.
 };
 
 struct Edge {
 	VertexID vertex_0;
 	VertexID vertex_1;
-	CornerID edge_corner_list_base; // Corner list around an edge.
-	
-	friend bool operator== (Edge lh, Edge rh) {
-		return // Edges are non directional. Edge(A, B) is the same as Edge(B, A)
-			(lh.vertex_0.index == rh.vertex_0.index) && (lh.vertex_1.index == rh.vertex_1.index) ||
-			(lh.vertex_0.index == rh.vertex_1.index) && (lh.vertex_1.index == rh.vertex_0.index);
-	}
+	CornerID corner_list_base; // Corner list around an edge.
+};
+
+struct CornerListIDs {
+	CornerID next;
+	CornerID prev;
 };
 
 struct Corner {
-	CornerID prev_corner_around_a_vertex;
-	CornerID next_corner_around_a_vertex;
-	
-	CornerID prev_corner_around_an_edge;
-	CornerID next_corner_around_an_edge;
-	
-	CornerID prev_corner_around_a_face;
-	CornerID next_corner_around_a_face;
+	CornerListIDs corner_list_around[(u32)ElementType::Count];
 	
 	FaceID face_id;
 	EdgeID edge_id;
@@ -113,10 +119,11 @@ struct Corner {
 	VertexID vertex_id;
 	AttributesID attributes_id;
 };
+static_assert(sizeof(Corner) == 40, "Invalid Corner size.");
 
 struct Vertex {
 	Vector3 position;
-	CornerID vertex_corner_list_base; // Corner list around a vertex.
+	CornerID corner_list_base; // Corner list around a vertex.
 };
 
 
