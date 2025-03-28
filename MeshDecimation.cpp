@@ -244,6 +244,62 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 	return result_mesh;
 }
 
+ObjTriangleMesh EditableMeshToObjMesh(MeshView mesh) {
+	std::vector<VertexID> attribute_vertex_ids;
+	attribute_vertex_ids.resize(mesh.attribute_count, VertexID{ u32_max });
+	
+	std::vector<u32> attribute_id_remap;
+	attribute_id_remap.resize(mesh.attribute_count);
+	
+	
+	for (VertexID vertex_id = { 0 }; vertex_id.index < mesh.vertex_count; vertex_id.index += 1) {
+		auto& vertex = mesh[vertex_id];
+		
+		if (vertex.corner_list_base.index != u32_max) {
+			IterateCornerList<ElementType::Vertex>(mesh, vertex.corner_list_base, [&](CornerID corner_id) {
+				u32 attribute_index = mesh[corner_id].attributes_id.index;
+				attribute_vertex_ids[attribute_index] = vertex_id;
+			});
+		}
+	}
+	
+	u32 attribute_count = 0;
+	for (AttributesID attribute_id = { 0 }; attribute_id.index < mesh.attribute_count; attribute_id.index += 1) {
+		bool is_active = (attribute_vertex_ids[attribute_id.index].index != u32_max);
+		attribute_id_remap[attribute_id.index] = attribute_count;
+		attribute_count += is_active ? 1 : 0;
+	}
+	
+	u32 face_count = 0;
+	for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
+		face_count +=  mesh[face_id].corner_list_base.index != u32_max ? 1 : 0;
+	}
+	
+	ObjTriangleMesh triangle_mesh;
+	triangle_mesh.indices.reserve(face_count * 3);
+	triangle_mesh.vertices.reserve(attribute_count);
+	
+	for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
+		auto& face = mesh[face_id];
+		if (face.corner_list_base.index == u32_max) continue;
+		
+		IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
+			auto& corner = mesh[corner_id];
+			triangle_mesh.indices.emplace_back(attribute_id_remap[corner.attributes_id.index]);
+		});
+	}
+	
+	for (AttributesID attribute_id = { 0 }; attribute_id.index < mesh.attribute_count; attribute_id.index += 1) {
+		auto vertex_id = attribute_vertex_ids[attribute_id.index];
+		if (vertex_id.index != u32_max) {
+			auto& vertex = triangle_mesh.vertices.emplace_back();
+			vertex.position = mesh[vertex_id].position;
+			memcpy((float*)&vertex + 3, mesh[attribute_id], attribute_stride_dwords * sizeof(u32));
+		}
+	}
+	
+	return triangle_mesh;
+}
 
 static void PerformEdgeCollapse(MeshView mesh, EdgeID edge_id) {
 	auto& edge = mesh[edge_id];
@@ -290,28 +346,12 @@ static void PerformEdgeCollapse(MeshView mesh, EdgeID edge_id) {
 }
 
 void PerformRandomEdgeCollapse(MeshView mesh) {
-#if 0
-	auto edge_id = EdgeID{ 1 };
-	
-	printf("CollapseID: %u\n", edge_id.index);
-	PerformEdgeCollapse(mesh, edge_id);
-
-	edge_id = EdgeID{ 5 };
-	printf("CollapseID: %u\n", edge_id.index);
-	PerformEdgeCollapse(mesh, edge_id);
-
-	int k = 2;
-#else
-	u32 to_collapse = 1800;
-	if (to_collapse >= mesh.edge_count) to_collapse = mesh.edge_count;
-	for (u32 i = 0; i < to_collapse; i += 1) {
-		auto edge_id = EdgeID{ i };
+	for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 4) {
 		if (mesh[edge_id].corner_list_base.index == u32_max) continue;
 		
 		printf("CollapseID: %u\n", edge_id.index);
 		PerformEdgeCollapse(mesh, edge_id);
 	}
-#endif
 }
 
 

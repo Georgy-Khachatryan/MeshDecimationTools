@@ -121,7 +121,7 @@ ObjTriangleMesh ParseWavefrontObj(const char* string) {
 	return mesh;
 }
 
-void WriteWavefrontObjFile(ObjTriangleMesh mesh) {
+void WriteWavefrontObjFile(const ObjTriangleMesh& mesh) {
 	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/Output/NonManifoldCorner.obj", "wb");
 	if (file == nullptr) return;
 	
@@ -145,48 +145,6 @@ void WriteWavefrontObjFile(ObjTriangleMesh mesh) {
 	fclose(file);
 }
 
-void WriteWavefrontObjFile(MeshView mesh) {
-	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/Output/NonManifoldCorner.obj", "wb");
-	if (file == nullptr) return;
-	
-	fprintf(file, "# MeshDecimation\n");
-	fprintf(file, "o Object\n");
-	
-	for (VertexID vertex_id = { 0 }; vertex_id.index < mesh.vertex_count; vertex_id.index += 1) {
-		auto& v = mesh[vertex_id];
-		fprintf(file, "v %f %f %f\n", v.position.x, v.position.y, v.position.z);
-	}
-	
-	for (AttributesID attribute_id = { 0 }; attribute_id.index < mesh.attribute_count; attribute_id.index += 1) {
-		auto* a = mesh[attribute_id];
-		fprintf(file, "vn %f %f %f\n", a[2], a[3], a[4]);
-		fprintf(file, "vt %f %f\n", a[0], a[1]);
-	}
-	
-	for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
-		auto& f = mesh[face_id];
-		if (f.corner_list_base.index == u32_max) continue;
-		
-		fprintf(file, "f");
-
-		auto face_corner_list_base_id = f.corner_list_base;
-		auto current_corner_id = face_corner_list_base_id;
-		do {
-			auto& c0 = mesh[current_corner_id];
-			u32 vi0 = c0.vertex_id.index + 1;
-			u32 ai0 = c0.attributes_id.index + 1;
-			
-			fprintf(file, " %u/%u/%u", vi0, ai0, ai0);
-		
-			current_corner_id = mesh[current_corner_id].corner_list_around[(u32)ElementType::Face].next;
-		} while (current_corner_id.index != face_corner_list_base_id.index);
-
-		fprintf(file, "\n");
-	}
-	
-	fclose(file);
-}
-
 int main() {
 	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/NonManifoldCorner.obj", "rb");
 	if (file == nullptr) return -1;
@@ -201,14 +159,12 @@ int main() {
 	file_data[file_size] = 0;
 	
 	auto triangle_mesh = ParseWavefrontObj(file_data.data());
-	// WriteWavefrontObjFile(triangle_mesh);
-	
 	auto editable_mesh = ObjMeshToEditableMesh(triangle_mesh);
 
-	auto mesh = MeshToMeshView(editable_mesh);
-	PerformRandomEdgeCollapse(mesh);
+	auto mesh_view = MeshToMeshView(editable_mesh);
+	PerformRandomEdgeCollapse(mesh_view);
 	
-	WriteWavefrontObjFile(mesh);
+	WriteWavefrontObjFile(EditableMeshToObjMesh(mesh_view));
 	
 	fclose(file);
 	

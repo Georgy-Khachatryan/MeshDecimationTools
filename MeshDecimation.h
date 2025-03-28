@@ -44,6 +44,17 @@ compile_const u64 u64_min = (u64)0x0000'0000'0000'0000;
 compile_const s64 s64_max = (s64)0x7FFF'FFFF'FFFF'FFFF;
 compile_const s64 s64_min = (s64)0x8000'0000'0000'0000;
 
+compile_const u32 u8_bit_count = 8;
+compile_const u32 s8_bit_count = 8;
+compile_const u32 u16_bit_count = 16;
+compile_const u32 s16_bit_count = 16;
+compile_const u32 u32_bit_count = 32;
+compile_const u32 s32_bit_count = 32;
+compile_const u32 u64_bit_count = 64;
+compile_const u32 s64_bit_count = 64;
+compile_const u32 f32_bit_count = 32;
+compile_const u32 f64_bit_count = 64;
+
 
 struct Vector3 {
 	float x = 0.f;
@@ -171,5 +182,6 @@ struct ObjTriangleMesh {
 };
 
 Mesh ObjMeshToEditableMesh(ObjTriangleMesh mesh);
+ObjTriangleMesh EditableMeshToObjMesh(MeshView mesh);
 
 #endif // MESHDECIMATION_H
