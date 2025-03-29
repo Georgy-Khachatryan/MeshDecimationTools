@@ -408,11 +408,22 @@ struct Quadric {
 	float weight = 0.f;
 };
 
+#define ENABLE_ATTRIBUTE_SUPPORT 0
+
+#if ENABLE_ATTRIBUTE_SUPPORT
+struct QuadricAttributeData {
+	Vector3 g = { 0.f, 0.f, 0.f };
+	float d = 0.f;
+};
+#endif // ENABLE_ATTRIBUTE_SUPPORT
+
+
 static Vector3 operator+ (const Vector3& lh, const Vector3& rh) { return Vector3{ lh.x + rh.x, lh.y + rh.y, lh.z + rh.z }; }
 static Vector3 operator- (const Vector3& lh, const Vector3& rh) { return Vector3{ lh.x - rh.x, lh.y - rh.y, lh.z - rh.z }; }
 static Vector3 operator* (const Vector3& lh, float rh) { return Vector3{ lh.x * rh, lh.y * rh, lh.z * rh }; }
 static float DotProduct(const Vector3& lh, const Vector3& rh) { return lh.x * rh.x + lh.y * rh.y + lh.z * rh.z; }
 static float Length(const Vector3& v) { return sqrtf(DotProduct(v, v)); }
+static Vector3 Normalize(const Vector3& v) { return v * (1.f / Length(v)); }
 static Vector3 CrossProduct(const Vector3& lh, const Vector3& rh) { return Vector3{ lh.y * rh.z - lh.z * rh.y, lh.z * rh.x - lh.x * rh.z, lh.x * rh.y - lh.y * rh.x }; }
 
 
@@ -432,9 +443,23 @@ static void AccumulateQuadric(Quadric& accumulator, const Quadric& quadric) {
 	accumulator.weight += quadric.weight;
 }
 
+#if ENABLE_ATTRIBUTE_SUPPORT
+static void AccumulateQuadricAttribute(QuadricAttributeData* accumulators, const QuadricAttributeData* quadrics) {
+	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
+		auto& accumulator = accumulators[i];
+		auto& quadric     = quadrics[i];
+
+		accumulator.g.x += quadric.g.x;
+		accumulator.g.y += quadric.g.y;
+		accumulator.g.z += quadric.g.z;
+		accumulator.d   += quadric.d;
+	}
+}
+#endif // ENABLE_ATTRIBUTE_SUPPORT
+
 static Quadric ComputeQuadric(const Vector3& normal, float distance_to_triangle, float weight) {
 	//
-	// For reference see [Hugues Hoppe 1999] Simplification of geometry.
+	// For reference see [Hugues Hoppe 1999] Section 3 Previous Quadric Error Metrics.
 	//
 	// A = normal * normal^T
 	// b = distance_to_triangle * normal
@@ -462,6 +487,83 @@ static Quadric ComputeQuadric(const Vector3& normal, float distance_to_triangle,
 	return quadric;
 }
 
+#if ENABLE_ATTRIBUTE_SUPPORT
+static void ComputeAttributeQuadric(Quadric& quadric, QuadricAttributeData* quadric_attribute, const Vector3& p0, const Vector3& p1, const Vector3& p2, float* a0, float* a1, float* a2, float weight) {
+	//
+	// For reference see [Hugues Hoppe 1999] Section 4 New Quadric Error Metric.
+	//
+	// (p0^T, 1)   (g.x)   (s0);
+	// (p1^T, 1) * (g.z) = (s1);
+	// (p2^T, 1)   (g.y)   (s2);
+	// (n^T,  0)   ( d )   (0);
+	//
+	// ((p1 - p0)^T)   (g.x)   (s1 - s0)
+	// ((p2 - p0)^T) * (g.y) = (s2 - s0)
+	// (    n^T    )   (g.z)   (   0   )
+	//
+	// (p10^T)   (g.x)   (s10)
+	// (p20^T) * (g.y) = (s20)
+	// ( n^T )   (g.z)   ( 0 )
+	//
+	// A * x = b
+	//
+	auto p10 = p1 - p0;
+	auto p20 = p2 - p0;
+	auto n   = Normalize(CrossProduct(p10, p20));
+	
+	// Compute determinant of a 3x3 matrix A with rows p10, p20, n.
+	float det0 = p10.x * (p20.y * n.z - p20.z * n.y);
+	float det1 = p10.y * (p20.z * n.x - p20.x * n.z);
+	float det2 = p10.z * (p20.x * n.y - p20.y * n.x);
+	float determinant = det0 + det1 + det2;
+	float determinant_rcp = determinant == 0.f ? 0.f : 1.f / determinant;
+	
+	// Compute first two colums of A^-1.
+	float a_inv_00 = (p20.y * n.z - n.y * p20.z) * determinant_rcp;
+	float a_inv_01 = (n.x * p20.z - p20.x * n.z) * determinant_rcp;
+	float a_inv_10 = (n.y * p10.z - p10.y * n.z) * determinant_rcp;
+	float a_inv_11 = (p10.x * n.z - n.x * p10.z) * determinant_rcp;
+	float a_inv_20 = (p10.y * p20.z - p20.y * p10.z) * determinant_rcp;
+	float a_inv_21 = (p20.x * p10.z - p10.x * p20.z) * determinant_rcp;
+	
+	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
+		float s0 = a0[i];
+		float s1 = a1[i];
+		float s2 = a2[i];
+		
+		float s10 = s1 - s0;
+		float s20 = s2 - s0;
+		
+		Vector3 g;
+		g.x = a_inv_00 * s10 + a_inv_01 * s20;
+		g.y = a_inv_10 * s10 + a_inv_11 * s20;
+		g.z = a_inv_20 * s10 + a_inv_21 * s20;
+		float d = s0 - DotProduct(p0, g);
+		
+		//
+		// A += g * g^T
+		// b += d * g
+		// c += d^2
+		//
+		quadric.a00 += (g.x * g.x) * weight;
+		quadric.a11 += (g.y * g.y) * weight;
+		quadric.a22 += (g.z * g.z) * weight;
+		quadric.a01 += (g.x * g.y) * weight;
+		quadric.a02 += (g.x * g.z) * weight;
+		quadric.a12 += (g.y * g.z) * weight;
+		
+		quadric.b.x += (d * g.x) * weight;
+		quadric.b.y += (d * g.y) * weight;
+		quadric.b.z += (d * g.z) * weight;
+		
+		quadric.c += (d * d) * weight;
+		
+		quadric_attribute[i].g = g * weight;
+		quadric_attribute[i].d = d * weight;
+	}
+}
+#endif // ENABLE_ATTRIBUTE_SUPPORT
+
 static float ComputeQuadricError(const Quadric& q, const Vector3& p) {
 	//
 	// error = p^T * A * p + 2 * b * v + c
@@ -479,6 +581,27 @@ static float ComputeQuadricError(const Quadric& q, const Vector3& p) {
 	
 	return fabsf(weighted_error) * (1.f / q.weight);
 }
+
+#if ENABLE_ATTRIBUTE_SUPPORT
+static float ComputeQuadricError(const Quadric& q, const Vector3& p, const QuadricAttributeData* a) {
+	//
+	// error = p^T * A * p + 2 * b * v + c
+	//
+	//                   (a00, a01, a02)   (p.x)
+	// (p.x, p.y, p.z) * (a01, a11, a12) * (p.y) + 2 * b * p + c
+	//                   (a02, a12, a22)   (p.z)
+	// 
+	float weighted_error = 
+		p.x * (p.x * q.a00 + p.y * q.a01 + p.z * q.a02) +
+		p.y * (p.x * q.a01 + p.y * q.a11 + p.z * q.a12) +
+		p.z * (p.x * q.a02 + p.y * q.a12 + p.z * q.a22) +
+		2.f * DotProduct(q.b, p) +
+		q.c;
+	
+	return fabsf(weighted_error) * (1.f / q.weight);
+}
+#endif // ENABLE_ATTRIBUTE_SUPPORT
+
 
 // Check if any triangle around the collapsed edge is flipped, excluding collapsed triangles.
 static bool CheckTriangleFlip(MeshView mesh, Edge edge, const Vector3& new_position) {
@@ -529,22 +652,39 @@ void DecimateMesh(MeshView mesh) {
 	std::vector<Quadric> vertex_quadrics;
 	vertex_quadrics.resize(mesh.vertex_count);
 	
+#if ENABLE_ATTRIBUTE_SUPPORT
+	std::vector<QuadricAttributeData> vertex_quadric_attributes;
+	vertex_quadric_attributes.resize(mesh.vertex_count * attribute_stride_dwords);
+#endif // ENABLE_ATTRIBUTE_SUPPORT
+	
 	for (u32 i = 0; i < 375; i += 1) {
 		memset(vertex_quadrics.data(), 0, vertex_quadrics.size() * sizeof(Quadric));
+
+#if ENABLE_ATTRIBUTE_SUPPORT
+		memset(vertex_quadric_attributes.data(), 0, vertex_quadric_attributes.size() * sizeof(QuadricAttributeData));
+#endif // ENABLE_ATTRIBUTE_SUPPORT
 		
 		for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
 			auto& face = mesh[face_id];
 			if (face.corner_list_base.index == u32_max) continue;
 			
 			auto& c1 = mesh[face.corner_list_base];
+			auto& c0 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev];
+			auto& c2 = mesh[c1.corner_list_around[(u32)ElementType::Face].next];
 			
-			auto v0 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev].vertex_id;
+			auto v0 = c0.vertex_id;
 			auto v1 = c1.vertex_id;
-			auto v2 = mesh[c1.corner_list_around[(u32)ElementType::Face].next].vertex_id;
+			auto v2 = c2.vertex_id;
 			
 			auto p0 = mesh[v0].position;
 			auto p1 = mesh[v1].position;
 			auto p2 = mesh[v2].position;
+			
+#if ENABLE_ATTRIBUTE_SUPPORT
+			auto* a0 = mesh[c0.attributes_id];
+			auto* a1 = mesh[c1.attributes_id];
+			auto* a2 = mesh[c2.attributes_id];
+#endif // ENABLE_ATTRIBUTE_SUPPORT
 			
 			auto e10 = p1 - p0;
 			auto e20 = p2 - p0;
@@ -553,12 +693,24 @@ void DecimateMesh(MeshView mesh) {
 			auto twice_triangle_area  = Length(normal_direction);
 			auto normal               = normal_direction * (1.f / twice_triangle_area); // TODO: Potential division by zero.
 			auto distance_to_triangle = -DotProduct(normal, p0);
+			float weight = twice_triangle_area * 0.5f;
 			
-			auto quadric = ComputeQuadric(normal, distance_to_triangle, twice_triangle_area * 0.5f);
+			auto quadric = ComputeQuadric(normal, distance_to_triangle, weight);
+			
+#if ENABLE_ATTRIBUTE_SUPPORT
+			QuadricAttributeData quadric_attributes[attribute_stride_dwords] = {};
+			ComputeAttributeQuadric(quadric, quadric_attributes, p0, p1, p2, a0, a1, a2, weight);
+#endif // ENABLE_ATTRIBUTE_SUPPORT
 			
 			AccumulateQuadric(vertex_quadrics[v0.index], quadric);
 			AccumulateQuadric(vertex_quadrics[v1.index], quadric);
 			AccumulateQuadric(vertex_quadrics[v2.index], quadric);
+			
+#if ENABLE_ATTRIBUTE_SUPPORT
+			AccumulateQuadricAttribute(&vertex_quadric_attributes[v0.index * attribute_stride_dwords], quadric_attributes);
+			AccumulateQuadricAttribute(&vertex_quadric_attributes[v1.index * attribute_stride_dwords], quadric_attributes);
+			AccumulateQuadricAttribute(&vertex_quadric_attributes[v2.index * attribute_stride_dwords], quadric_attributes);
+#endif // ENABLE_ATTRIBUTE_SUPPORT
 		}
 		
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
@@ -610,6 +762,12 @@ void DecimateMesh(MeshView mesh) {
 			
 			auto q = vertex_quadrics[edge.vertex_0.index];
 			AccumulateQuadric(q, vertex_quadrics[edge.vertex_1.index]);
+
+#if ENABLE_ATTRIBUTE_SUPPORT
+			QuadricAttributeData quadric_attributes[attribute_stride_dwords] = {};
+			memcpy(quadric_attributes, &vertex_quadric_attributes[edge.vertex_0.index * attribute_stride_dwords], attribute_stride_dwords * sizeof(QuadricAttributeData));
+			AccumulateQuadricAttribute(quadric_attributes, &vertex_quadric_attributes[edge.vertex_1.index * attribute_stride_dwords]);
+#endif // ENABLE_ATTRIBUTE_SUPPORT
 			
 			// Try a few different positions for the new vertex.
 			auto p0 = mesh[edge.vertex_0].position;
