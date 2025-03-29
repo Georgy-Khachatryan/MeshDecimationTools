@@ -162,7 +162,7 @@ int main() {
 	auto editable_mesh = ObjMeshToEditableMesh(triangle_mesh);
 
 	auto mesh_view = MeshToMeshView(editable_mesh);
-	PerformRandomEdgeCollapse(mesh_view);
+	DecimateMesh(mesh_view);
 	
 	WriteWavefrontObjFile(EditableMeshToObjMesh(mesh_view));
 	

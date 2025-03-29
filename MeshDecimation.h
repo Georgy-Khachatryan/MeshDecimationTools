@@ -166,10 +166,6 @@ struct MeshView {
 	float*  operator[] (AttributesID attributes_id) { return attributes + attributes_id.index * attribute_stride_dwords; }
 };
 
-MeshView MeshToMeshView(Mesh& mesh);
-void PerformRandomEdgeCollapse(MeshView mesh);
-
-
 struct ObjVertex {
 	Vector3 position;
 	Vector2 texcoord;
@@ -181,7 +177,11 @@ struct ObjTriangleMesh {
 	std::vector<u32>       indices;
 };
 
+
 Mesh ObjMeshToEditableMesh(ObjTriangleMesh mesh);
 ObjTriangleMesh EditableMeshToObjMesh(MeshView mesh);
+MeshView MeshToMeshView(Mesh& mesh);
+
+void DecimateMesh(MeshView mesh);
 
 #endif // MESHDECIMATION_H
