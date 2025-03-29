@@ -104,6 +104,11 @@ static bool CornerListRemove(MeshView mesh, CornerID corner_id) {
 	return is_last_reference;
 }
 
+enum struct IterationControl : u32 {
+	Continue = 0,
+	Break    = 1,
+};
+
 // Iterate linked list around a given element type starting with the base corner id. 
 // Removal while iterating is allowed.
 template<ElementType element_type_t, typename Lambda>
@@ -111,13 +116,20 @@ static void IterateCornerList(MeshView mesh, CornerID corner_list_base, Lambda&&
 	auto& element = mesh[GetElementID<element_type_t>(mesh[corner_list_base])];
 	
 	auto current_corner_id = corner_list_base;
+	IterationControl control = IterationControl::Continue;
 	do {
 		auto next_corner_id = mesh[current_corner_id].corner_list_around[(u32)element_type_t].next;
 		
-		lambda(current_corner_id);
+		if constexpr (std::is_invocable_r<IterationControl, Lambda&, CornerID>::value) {
+			control = lambda(current_corner_id);
+		} else if constexpr (std::is_invocable_r<void, Lambda&, CornerID>::value) {
+			lambda(current_corner_id);
+		} else {
+			static_assert(false, "Lambda passed to IterateCornerList should have signature (CornerID) -> void or (CornerID) -> IterationControl.");
+		}
 		
 		current_corner_id = next_corner_id;
-	} while (current_corner_id.index != corner_list_base.index && element.corner_list_base.index != u32_max);
+	} while (current_corner_id.index != corner_list_base.index && element.corner_list_base.index != u32_max && control == IterationControl::Continue);
 }
 
 // Merge linked lists around element_0 and element_1 and remove element_1.
@@ -468,6 +480,51 @@ static float ComputeQuadricError(const Quadric& q, const Vector3& p) {
 	return fabsf(weighted_error) * (1.f / q.weight);
 }
 
+// Check if any triangle around the collapsed edge is flipped, excluding collapsed triangles.
+static bool CheckTriangleFlip(MeshView mesh, Edge edge, const Vector3& new_position) {
+	bool triangle_flips = false;
+	
+	auto check_triangle_flip_for_vertex = [&](CornerID corner_id)-> IterationControl {
+		auto& c1 = mesh[corner_id];
+		
+		auto v0 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev].vertex_id;
+		auto v1 = c1.vertex_id;
+		auto v2 = mesh[c1.corner_list_around[(u32)ElementType::Face].next].vertex_id;
+		
+		auto p0 = mesh[v0].position;
+		auto p1 = mesh[v1].position;
+		auto p2 = mesh[v2].position;
+		
+		auto n0 = CrossProduct(p1 - p0, p2 - p0);
+		
+		u32 replaced_vertex_count = 0;
+		if (v0.index == edge.vertex_0.index || v0.index == edge.vertex_1.index) { replaced_vertex_count += 1; p0 = new_position; }
+		if (v1.index == edge.vertex_0.index || v1.index == edge.vertex_1.index) { replaced_vertex_count += 1; p1 = new_position; }
+		if (v2.index == edge.vertex_0.index || v2.index == edge.vertex_1.index) { replaced_vertex_count += 1; p2 = new_position; }
+		
+		// Replaced vertex count == 0 is impossible.
+		// Replaced vertex count == 2 is true for triangles that would get collapsed, we don't need to check if they flip.
+		if (replaced_vertex_count == 1) {
+			auto n1 = CrossProduct(p1 - p0, p2 - p0);
+			triangle_flips |= DotProduct(n0, n1) < 0.f;
+		}
+		
+		return triangle_flips ? IterationControl::Break : IterationControl::Continue;
+	};
+	
+	if (triangle_flips == false) IterateCornerList<ElementType::Vertex>(mesh, mesh[edge.vertex_0].corner_list_base, check_triangle_flip_for_vertex);
+	if (triangle_flips == false) IterateCornerList<ElementType::Vertex>(mesh, mesh[edge.vertex_1].corner_list_base, check_triangle_flip_for_vertex);
+	
+	return triangle_flips;
+}
+
+//
+// TODO:
+// - Support for attribute quadrics.
+// - Optimization of vertex location.
+// - Priority queue (don't recompute all quadrics after each collapse).
+// - Output an obj sequence for edge to verify edge collapses.
+//
 void DecimateMesh(MeshView mesh) {
 	std::vector<Quadric> vertex_quadrics;
 	vertex_quadrics.resize(mesh.vertex_count);
@@ -537,7 +594,7 @@ void DecimateMesh(MeshView mesh) {
 			auto normal                = normal_direction * (1.f / Length(normal_direction)); // TODO: Potential division by zero.
 			auto distance_to_triangle  = -DotProduct(normal, p1);
 			
-			auto quadric = ComputeQuadric(normal, distance_to_triangle, Length(e21)/* * 10.f*/);
+			auto quadric = ComputeQuadric(normal, distance_to_triangle, Length(e21));
 			
 			AccumulateQuadric(vertex_quadrics[v1.index], quadric);
 			AccumulateQuadric(vertex_quadrics[v2.index], quadric);
@@ -560,21 +617,21 @@ void DecimateMesh(MeshView mesh) {
 			auto p2 = (p0 + p1) * 0.5f;
 			
 			float error0 = ComputeQuadricError(q, p0);
-			if (min_error > error0) {
+			if (min_error > error0 && CheckTriangleFlip(mesh, edge, p0) == false) {
 				min_error = error0;
 				edge_to_collapse = edge_id;
 				new_position = p0;
 			}
 			
 			float error1 = ComputeQuadricError(q, p1);
-			if (min_error > error1) {
+			if (min_error > error1 && CheckTriangleFlip(mesh, edge, p1) == false) {
 				min_error = error1;
 				edge_to_collapse = edge_id;
 				new_position = p1;
 			}
 			
 			float error2 = ComputeQuadricError(q, p2);
-			if (min_error > error2) {
+			if (min_error > error2 && CheckTriangleFlip(mesh, edge, p2) == false) {
 				min_error = error2;
 				edge_to_collapse = edge_id;
 				new_position = p2;
