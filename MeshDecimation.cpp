@@ -545,14 +545,6 @@ static void ComputeAttributeQuadric(Quadric& quadric, QuadricAttributeData* quad
 		
 		float d = s0 - DotProduct(p0, g);
 		
-		float xs0 = DotProduct(p0, g) + d;
-		float xs1 = DotProduct(p1, g) + d;
-		float xs2 = DotProduct(p2, g) + d;
-		
-		assert(fabsf(xs0 - s0) < 0.01f);
-		assert(fabsf(xs1 - s1) < 0.01f);
-		assert(fabsf(xs2 - s2) < 0.01f);
-		
 		//
 		// A += g * g^T
 		// b += d * g
@@ -619,17 +611,21 @@ static float ComputeQuadricError(const Quadric& q, const QuadricAttributeData* a
 			attributes[i] = s * (1.f / attribute_weight);
 		}
 		
-		float weighted_attribute_error =
-			p.x * (-g.x * s) +
-			p.y * (-g.y * s) +
-			p.z * (-g.z * s) +
-			s * (-DotProduct(p, g) + s) +
-			-2.f * d * s;
+		//
+		// Simplified by replacing first three lines with a dot product, and substituting -DotProduct(g, p) for (d - s * q.weight).
+		//
+		// p.x * (-g.x * s) +
+		// p.y * (-g.y * s) +
+		// p.z * (-g.z * s) +
+		// s * (-DotProduct(g, p) + s) +
+		// -2.f * d * s;
+		//
+		float weighted_attribute_error = s * s * (1.f - 2.f * q.weight);
 		
 		weighted_error += weighted_attribute_error;
 	}
 	
-	return fabsf(weighted_error) * (1.f / q.weight);
+	return fabsf(weighted_error);
 }
 #endif // ENABLE_ATTRIBUTE_SUPPORT
 
