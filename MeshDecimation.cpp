@@ -410,7 +410,7 @@ struct Quadric {
 	float weight = 0.f;
 };
 
-#define ENABLE_ATTRIBUTE_SUPPORT 0
+#define ENABLE_ATTRIBUTE_SUPPORT 1
 
 #if ENABLE_ATTRIBUTE_SUPPORT
 struct QuadricAttributeData {
@@ -490,8 +490,6 @@ static Quadric ComputeQuadric(const Vector3& normal, float distance_to_triangle,
 }
 
 #if ENABLE_ATTRIBUTE_SUPPORT
-#include <DirectXMath.h>
-
 compile_const float attribute_weight = 1.f / (1024.f * 1024.f);
 
 static void ComputeAttributeQuadric(Quadric& quadric, QuadricAttributeData* quadric_attribute, const Vector3& p0, const Vector3& p1, const Vector3& p2, float* a0, float* a1, float* a2, float weight) {
@@ -517,8 +515,6 @@ static void ComputeAttributeQuadric(Quadric& quadric, QuadricAttributeData* quad
 	auto p20 = p2 - p0;
 	auto n   = Normalize(CrossProduct(p10, p20));
 	
-	// TODO: Find where is the issue with this matrix inverse.
-#if 0
 	// Compute determinant of a 3x3 matrix A with rows p10, p20, n.
 	float det0 = p10.x * (p20.y * n.z - p20.z * n.y);
 	float det1 = p10.y * (p20.z * n.x - p20.x * n.z);
@@ -527,28 +523,14 @@ static void ComputeAttributeQuadric(Quadric& quadric, QuadricAttributeData* quad
 	float determinant_rcp = determinant == 0.f ? 0.f : 1.f / determinant;
 	
 	// Compute first two colums of A^-1.
-	float a_inv_00 = (p20.y * n.z - n.y * p20.z) * determinant_rcp;
-	float a_inv_01 = (n.x * p20.z - p20.x * n.z) * determinant_rcp;
-	float a_inv_10 = (n.y * p10.z - p10.y * n.z) * determinant_rcp;
-	float a_inv_11 = (p10.x * n.z - n.x * p10.z) * determinant_rcp;
-	float a_inv_20 = (p10.y * p20.z - p20.y * p10.z) * determinant_rcp;
-	float a_inv_21 = (p20.x * p10.z - p10.x * p20.z) * determinant_rcp;
-#else
-	using namespace DirectX;
+	float a_inv_00 = (p20.y * n.z - p20.z * n.y) * determinant_rcp;
+	float a_inv_01 = (p10.z * n.y - p10.y * n.z) * determinant_rcp;
+	float a_inv_10 = (p20.z * n.x - p20.x * n.z) * determinant_rcp;
+	float a_inv_11 = (p10.x * n.z - p10.z * n.x) * determinant_rcp;
+	float a_inv_20 = (p20.x * n.y - p20.y * n.x) * determinant_rcp;
+	float a_inv_21 = (p10.y * n.x - p10.x * n.y) * determinant_rcp;
 	
-	XMMATRIX m;
-	m.r[0] = XMLoadFloat3((XMFLOAT3*)&p10);
-	m.r[1] = XMLoadFloat3((XMFLOAT3*)&p20);
-	m.r[2] = XMLoadFloat3((XMFLOAT3*)&n);
-	m.r[3] = g_XMIdentityR3;
-	
-	XMVECTOR det;
-	auto m_inv = XMMatrixInverse(&det, XMMatrixTranspose(m));
-	
-	bool is_invertable = (fabsf(XMVectorGetX(det)) > FLT_EPSILON);
-#endif
-	
-	if (is_invertable)for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
+	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
 		float s0 = a0[i] * attribute_weight;
 		float s1 = a1[i] * attribute_weight;
 		float s2 = a2[i] * attribute_weight;
@@ -557,13 +539,9 @@ static void ComputeAttributeQuadric(Quadric& quadric, QuadricAttributeData* quad
 		float s20 = s2 - s0;
 		
 		Vector3 g;
-#if 0
 		g.x = a_inv_00 * s10 + a_inv_01 * s20;
 		g.y = a_inv_10 * s10 + a_inv_11 * s20;
 		g.z = a_inv_20 * s10 + a_inv_21 * s20;
-#else
-		XMStoreFloat3((XMFLOAT3*)&g, XMVector4Transform(XMVectorSet(s10, s20, 0.f, 0.f), m_inv));
-#endif
 		
 		float d = s0 - DotProduct(p0, g);
 		
@@ -656,9 +634,9 @@ static float ComputeQuadricError(const Quadric& q, const QuadricAttributeData* a
 #endif // ENABLE_ATTRIBUTE_SUPPORT
 
 
-// Check if any triangle around the collapsed edge is flipped, excluding collapsed triangles.
-static bool CheckTriangleFlip(MeshView mesh, Edge edge, const Vector3& new_position) {
-	bool triangle_flips = false;
+// Check if any triangle around the collapsed edge is flipped or becomes zero area, excluding collapsed triangles.
+static bool ValidateEdgeCollapsePosition(MeshView mesh, Edge edge, const Vector3& new_position) {
+	bool reject_edge_collapse = false;
 	
 	auto check_triangle_flip_for_vertex = [&](CornerID corner_id)-> IterationControl {
 		auto& c1 = mesh[corner_id];
@@ -682,16 +660,18 @@ static bool CheckTriangleFlip(MeshView mesh, Edge edge, const Vector3& new_posit
 		// Replaced vertex count == 2 is true for triangles that would get collapsed, we don't need to check if they flip.
 		if (replaced_vertex_count == 1) {
 			auto n1 = CrossProduct(p1 - p0, p2 - p0);
-			triangle_flips |= DotProduct(n0, n1) < 0.f;
+			
+			// Prevent flipped or zero area triangles.
+			reject_edge_collapse |= (DotProduct(n0, n1) < 0.f) || (DotProduct(n0, n0) > FLT_EPSILON && DotProduct(n1, n1) < FLT_EPSILON);
 		}
 		
-		return triangle_flips ? IterationControl::Break : IterationControl::Continue;
+		return reject_edge_collapse ? IterationControl::Break : IterationControl::Continue;
 	};
 	
-	if (triangle_flips == false) IterateCornerList<ElementType::Vertex>(mesh, mesh[edge.vertex_0].corner_list_base, check_triangle_flip_for_vertex);
-	if (triangle_flips == false) IterateCornerList<ElementType::Vertex>(mesh, mesh[edge.vertex_1].corner_list_base, check_triangle_flip_for_vertex);
+	if (reject_edge_collapse == false) IterateCornerList<ElementType::Vertex>(mesh, mesh[edge.vertex_0].corner_list_base, check_triangle_flip_for_vertex);
+	if (reject_edge_collapse == false) IterateCornerList<ElementType::Vertex>(mesh, mesh[edge.vertex_1].corner_list_base, check_triangle_flip_for_vertex);
 	
-	return triangle_flips;
+	return reject_edge_collapse == false;
 }
 
 struct State {
@@ -820,7 +800,7 @@ void ComputeEdgeCollapseError(MeshView mesh, State& state, EdgeSelectInfo& info,
 #endif // ENABLE_ATTRIBUTE_SUPPORT
 		}
 		
-		if (info.min_error > error && CheckTriangleFlip(mesh, edge, p) == false) {
+		if (info.min_error > error && ValidateEdgeCollapsePosition(mesh, edge, p)) {
 			info.min_error = error;
 			info.edge_to_collapse = edge_id;
 			info.new_position = p;
@@ -847,7 +827,7 @@ void DecimateMesh(MeshView mesh) {
 	state.wedge_quadrics_a.reserve(64 * attribute_stride_dwords);
 #endif // ENABLE_ATTRIBUTE_SUPPORT
 	
-	for (u32 i = 0; i < 375; i += 1) {
+	for (u32 i = 0; i < 405; i += 1) {
 		memset(state.vertex_edge_quadrics.data(), 0, state.vertex_edge_quadrics.size() * sizeof(Quadric));
 		memset(state.attribute_face_quadrics.data(), 0, state.attribute_face_quadrics.size() * sizeof(Quadric));
 		
