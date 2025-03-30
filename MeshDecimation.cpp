@@ -463,37 +463,62 @@ static void AccumulateQuadricWithAttributes(QuadricWithAttributes& accumulator, 
 #endif // ENABLE_ATTRIBUTE_SUPPORT
 }
 
-static void ComputeQuadric(Quadric& quadric, const Vector3& normal, float distance_to_triangle, float weight) {
+static void ComputePlanarQuadric(Quadric& quadric, const Vector3& n, float d, float weight) {
 	//
 	// For reference see [Hugues Hoppe 1999] Section 3 Previous Quadric Error Metrics.
 	//
-	// A = normal * normal^T
-	// b = distance_to_triangle * normal
-	// c = distance_to_triangle^2
+	// A = n * n^T
+	// b = d * n
+	// c = d^2
 	//
 	// (n.x)
 	// (n.y) * (n.x, n.y, n.z)
 	// (n.z)
 	//
-	quadric.a00 = (normal.x * normal.x) * weight;
-	quadric.a11 = (normal.y * normal.y) * weight;
-	quadric.a22 = (normal.z * normal.z) * weight;
-	quadric.a01 = (normal.x * normal.y) * weight;
-	quadric.a02 = (normal.x * normal.z) * weight;
-	quadric.a12 = (normal.y * normal.z) * weight;
+	quadric.a00 = (n.x * n.x) * weight;
+	quadric.a11 = (n.y * n.y) * weight;
+	quadric.a22 = (n.z * n.z) * weight;
+	quadric.a01 = (n.x * n.y) * weight;
+	quadric.a02 = (n.x * n.z) * weight;
+	quadric.a12 = (n.y * n.z) * weight;
 	
-	quadric.b.x = (normal.x * distance_to_triangle) * weight;
-	quadric.b.y = (normal.y * distance_to_triangle) * weight;
-	quadric.b.z = (normal.z * distance_to_triangle) * weight;
+	quadric.b.x = (n.x * d) * weight;
+	quadric.b.y = (n.y * d) * weight;
+	quadric.b.z = (n.z * d) * weight;
 	
-	quadric.c = (distance_to_triangle * distance_to_triangle) * weight;
+	quadric.c = (d * d) * weight;
 	quadric.weight = weight;
 }
 
-#if ENABLE_ATTRIBUTE_SUPPORT
+// Assumes that the quadric edge is (p0, p1)
+static void ComputeEdgeQuadric(Quadric& quadric, const Vector3& p0, const Vector3& p1, const Vector3& p2) {
+	auto p10 = p1 - p0;
+	auto p20 = p2 - p0;
+	
+	auto face_normal_direction = CrossProduct(p10, p20);
+	auto normal_direction      = CrossProduct(p10, face_normal_direction);
+	auto normal_length         = Length(normal_direction);
+	auto normal                = normal_length < FLT_EPSILON ? normal_direction : normal_direction * (1.f / normal_length); // TODO: Potential division by zero. Handle better.
+	auto distance_to_triangle  = -DotProduct(normal, p1);
+	
+	ComputePlanarQuadric(quadric, normal, distance_to_triangle, Length(p10));
+}
+
 compile_const float attribute_weight = 1.f / (1024.f * 1024.f);
 
-static void ComputeQuadricWithAttributes(QuadricWithAttributes& quadric, const Vector3& p0, const Vector3& p1, const Vector3& p2, float* a0, float* a1, float* a2, float weight) {
+static void ComputeFaceQuadricWithAttributes(QuadricWithAttributes& quadric, const Vector3& p0, const Vector3& p1, const Vector3& p2, float* a0, float* a1, float* a2) {
+	auto p10 = p1 - p0;
+	auto p20 = p2 - p0;
+	
+	auto scaled_normal       = CrossProduct(p10, p20);
+	auto twice_triangle_area = Length(scaled_normal);
+	auto n                   = twice_triangle_area < FLT_EPSILON ? scaled_normal : scaled_normal * (1.f / twice_triangle_area); // TODO: Potential division by zero. Handle better.
+	
+	float weight = twice_triangle_area * 0.5f;
+	ComputePlanarQuadric(quadric, n, -DotProduct(n, p0), weight);
+	
+	
+#if ENABLE_ATTRIBUTE_SUPPORT
 	//
 	// For reference see [Hugues Hoppe 1999] Section 4 New Quadric Error Metric.
 	//
@@ -512,9 +537,6 @@ static void ComputeQuadricWithAttributes(QuadricWithAttributes& quadric, const V
 	//
 	// A * x = b
 	//
-	auto p10 = p1 - p0;
-	auto p20 = p2 - p0;
-	auto n   = Normalize(CrossProduct(p10, p20));
 	
 	// Compute determinant of a 3x3 matrix A with rows p10, p20, n.
 	float det0 = p10.x * (p20.y * n.z - p20.z * n.y);
@@ -567,8 +589,8 @@ static void ComputeQuadricWithAttributes(QuadricWithAttributes& quadric, const V
 		quadric.attributes[i].g = g * weight;
 		quadric.attributes[i].d = d * weight;
 	}
-}
 #endif // ENABLE_ATTRIBUTE_SUPPORT
+}
 
 static float ComputeQuadricError(const Quadric& q, const Vector3& p) {
 	//
@@ -601,12 +623,13 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 	float weighted_error = ComputeQuadricError(q, p);
 	
 #if ENABLE_ATTRIBUTE_SUPPORT
+	float rcp_weight = q.weight < FLT_EPSILON ? 0.f : (1.f / q.weight);
 	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
 		auto g = q.attributes[i].g;
 		auto d = q.attributes[i].d;
 		if (q.weight <= 0.f) continue;
 		
-		float s = (DotProduct(g, p) + d) * (1.f / q.weight);
+		float s = (DotProduct(g, p) + d) * rcp_weight;
 		
 		if constexpr (attribute_weight > 0.f) {
 			attributes[i] = s * (1.f / attribute_weight);
@@ -680,6 +703,7 @@ struct State {
 	
 	std::vector<u8> wedge_attribute_set;
 	std::vector<QuadricWithAttributes> wedge_quadrics;
+	std::vector<float> wedge_attributes;
 	std::vector<AttributesID> wedge_attributes_ids;
 };
 
@@ -690,13 +714,15 @@ struct EdgeSelectInfo {
 	Vector3 new_position;
 };
 
-void ComputeEdgeCollapseError(MeshView mesh, State& state, EdgeSelectInfo& info, EdgeID edge_id) {
+void ComputeEdgeCollapseError(MeshView mesh, State& state, EdgeID edge_id, EdgeSelectInfo* info = nullptr) {
 	memset(state.wedge_attribute_set.data(), 0, state.wedge_attribute_set.size());
 	state.wedge_quadrics.clear();
 	state.wedge_attributes_ids.clear();
 	
 	auto& edge = mesh[edge_id];
 	
+	// Wedges spanning collapsed edge must be unified. Manually set their wedge index to the same value and accumulate quadrics.
+	// For reference see [Hugues Hoppe 1999] Section 5 Attribute Discontinuities, Figure 5.
 	IterateCornerList<ElementType::Edge>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
 		auto& corner_0 = mesh[corner_id];
 		auto& corner_1 = mesh[corner_0.corner_list_around[(u32)ElementType::Face].next];
@@ -737,31 +763,33 @@ void ComputeEdgeCollapseError(MeshView mesh, State& state, EdgeSelectInfo& info,
 	IterateCornerList<ElementType::Vertex>(mesh, v0.corner_list_base, accumulate_quadrics);
 	IterateCornerList<ElementType::Vertex>(mesh, v1.corner_list_base, accumulate_quadrics);
 	
-	auto edge_quadrics = state.vertex_edge_quadrics[edge.vertex_0.index];
-	AccumulateQuadric(edge_quadrics, state.vertex_edge_quadrics[edge.vertex_1.index]);
-	
-	// Try a few different positions for the new vertex.
-	compile_const u32 candidate_position_count = 3;
-	Vector3 candidate_positions[candidate_position_count];
-	candidate_positions[0] = v0.position;
-	candidate_positions[1] = v1.position;
-	candidate_positions[2] = (candidate_positions[0] + candidate_positions[1]) * 0.5f;
-	
-	u32 wedge_count = (u32)state.wedge_quadrics.size();
-	for (u32 i = 0; i < candidate_position_count; i += 1) {
-		auto& p = candidate_positions[i];
+	if (info != nullptr) {
+		auto edge_quadrics = state.vertex_edge_quadrics[edge.vertex_0.index];
+		AccumulateQuadric(edge_quadrics, state.vertex_edge_quadrics[edge.vertex_1.index]);
 		
-		float error = ComputeQuadricError(edge_quadrics, p);
+		// Try a few different positions for the new vertex.
+		compile_const u32 candidate_position_count = 3;
+		Vector3 candidate_positions[candidate_position_count];
+		candidate_positions[0] = v0.position;
+		candidate_positions[1] = v1.position;
+		candidate_positions[2] = (candidate_positions[0] + candidate_positions[1]) * 0.5f;
 		
-		for (u32 i = 0; i < wedge_count; i += 1) {
-			float attributes[attribute_stride_dwords];
-			error += ComputeQuadricErrorWithAttributes(state.wedge_quadrics[i], p, attributes);
-		}
-		
-		if (info.min_error > error && ValidateEdgeCollapsePosition(mesh, edge, p)) {
-			info.min_error = error;
-			info.edge_to_collapse = edge_id;
-			info.new_position = p;
+		u32 wedge_count = (u32)state.wedge_quadrics.size();
+		for (u32 i = 0; i < candidate_position_count; i += 1) {
+			auto& p = candidate_positions[i];
+			
+			float error = ComputeQuadricError(edge_quadrics, p);
+			
+			for (u32 i = 0; i < wedge_count; i += 1) {
+				float attributes[attribute_stride_dwords];
+				error += ComputeQuadricErrorWithAttributes(state.wedge_quadrics[i], p, attributes);
+			}
+			
+			if (info->min_error > error && ValidateEdgeCollapsePosition(mesh, edge, p)) {
+				info->min_error = error;
+				info->edge_to_collapse = edge_id;
+				info->new_position = p;
+			}
 		}
 	}
 }
@@ -770,7 +798,8 @@ void ComputeEdgeCollapseError(MeshView mesh, State& state, EdgeSelectInfo& info,
 // TODO:
 // - Support for attribute quadrics.
 // - Optimization of vertex location.
-// - Priority queue (don't recompute all quadrics after each collapse).
+// - Memory and memory-less quadrics. Don't recompute all quadrics after each collapse.
+// - Priority queue. Don't reevaluate all edge collapses after each collapse.
 // - Output an obj sequence for edge to verify edge collapses.
 //
 void DecimateMesh(MeshView mesh) {
@@ -779,6 +808,8 @@ void DecimateMesh(MeshView mesh) {
 	state.attribute_face_quadrics.resize(mesh.attribute_count);
 	state.wedge_attribute_set.resize(mesh.attribute_count);
 	state.wedge_quadrics.reserve(64);
+	state.wedge_attributes.reserve(64 * attribute_stride_dwords);
+	state.wedge_attributes_ids.reserve(64 * attribute_stride_dwords);
 
 	for (u32 i = 0; i < 405; i += 1) {
 		memset(state.vertex_edge_quadrics.data(), 0, state.vertex_edge_quadrics.size() * sizeof(Quadric));
@@ -796,27 +827,12 @@ void DecimateMesh(MeshView mesh) {
 			auto p1 = mesh[c1.vertex_id].position;
 			auto p2 = mesh[c2.vertex_id].position;
 			
-#if ENABLE_ATTRIBUTE_SUPPORT
 			auto* a0 = mesh[c0.attributes_id];
 			auto* a1 = mesh[c1.attributes_id];
 			auto* a2 = mesh[c2.attributes_id];
-#endif // ENABLE_ATTRIBUTE_SUPPORT
-			
-			auto e10 = p1 - p0;
-			auto e20 = p2 - p0;
-			
-			auto normal_direction     = CrossProduct(e10, e20);
-			auto twice_triangle_area  = Length(normal_direction);
-			auto normal               = twice_triangle_area < FLT_EPSILON ? normal_direction : normal_direction * (1.f / twice_triangle_area); // TODO: Potential division by zero. Handle better.
-			auto distance_to_triangle = -DotProduct(normal, p0);
-			float weight = twice_triangle_area * 0.5f;
 			
 			QuadricWithAttributes quadric;
-			ComputeQuadric(quadric, normal, distance_to_triangle, weight);
-			
-#if ENABLE_ATTRIBUTE_SUPPORT
-			ComputeQuadricWithAttributes(quadric, p0, p1, p2, a0, a1, a2, weight);
-#endif // ENABLE_ATTRIBUTE_SUPPORT
+			ComputeFaceQuadricWithAttributes(quadric, p0, p1, p2, a0, a1, a2);
 			
 			AccumulateQuadricWithAttributes(state.attribute_face_quadrics[c0.attributes_id.index], quadric);
 			AccumulateQuadricWithAttributes(state.attribute_face_quadrics[c1.attributes_id.index], quadric);
@@ -835,33 +851,20 @@ void DecimateMesh(MeshView mesh) {
 			
 			auto& c1 = mesh[edge.corner_list_base];
 			
-			// v1---v2 is the edge.
-			auto v0 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev].vertex_id;
-			auto v1 = c1.vertex_id;
-			auto v2 = mesh[c1.corner_list_around[(u32)ElementType::Face].next].vertex_id;
-			
-			assert(v1.index == edge.vertex_0.index || v1.index == edge.vertex_1.index);
-			assert(v2.index == edge.vertex_0.index || v2.index == edge.vertex_1.index);
+			// (v0, v1) is the current edge.
+			auto v0 = c1.vertex_id;
+			auto v1 = mesh[c1.corner_list_around[(u32)ElementType::Face].next].vertex_id;
+			auto v2 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev].vertex_id;
 			
 			auto p0 = mesh[v0].position;
 			auto p1 = mesh[v1].position;
 			auto p2 = mesh[v2].position;
 			
-			auto e10 = p1 - p0;
-			auto e20 = p2 - p0;
-			auto e21 = p1 - p2;
-			
-			auto face_normal_direction = CrossProduct(e10, e20);
-			auto normal_direction      = CrossProduct(e21, face_normal_direction);
-			auto normal_length         = Length(normal_direction);
-			auto normal                = normal_length < FLT_EPSILON ? normal_direction : normal_direction * (1.f / normal_length); // TODO: Potential division by zero. Handle better.
-			auto distance_to_triangle  = -DotProduct(normal, p1);
-			
 			Quadric quadric;
-			ComputeQuadric(quadric, normal, distance_to_triangle, Length(e21));
+			ComputeEdgeQuadric(quadric, p0, p1, p2);
 			
+			AccumulateQuadric(state.vertex_edge_quadrics[v0.index], quadric);
 			AccumulateQuadric(state.vertex_edge_quadrics[v1.index], quadric);
-			AccumulateQuadric(state.vertex_edge_quadrics[v2.index], quadric);
 		}
 		
 		EdgeSelectInfo select_info;
@@ -870,13 +873,12 @@ void DecimateMesh(MeshView mesh) {
 			auto& edge = mesh[edge_id];
 			if (edge.corner_list_base.index == u32_max) continue;
 			
-			ComputeEdgeCollapseError(mesh, state, select_info, edge_id);
+			ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
 		}
 		
 		if (select_info.edge_to_collapse.index != u32_max) {
 #if ENABLE_ATTRIBUTE_SUPPORT
-			EdgeSelectInfo new_select_info = {};
-			ComputeEdgeCollapseError(mesh, state, new_select_info, select_info.edge_to_collapse);
+			ComputeEdgeCollapseError(mesh, state, select_info.edge_to_collapse);
 #endif // ENABLE_ATTRIBUTE_SUPPORT
 			
 			// printf("CollapseID: %u, Error: %.3f\n", edge_to_collapse.index, min_error);
@@ -885,16 +887,14 @@ void DecimateMesh(MeshView mesh) {
 			auto& edge = mesh[select_info.edge_to_collapse];
 			mesh[edge.vertex_0].position = select_info.new_position;
 			mesh[edge.vertex_1].position = select_info.new_position;
-				
+			
 #if ENABLE_ATTRIBUTE_SUPPORT
 			if (remaning_base_id.index != u32_max) {
 				u32 wedge_count = (u32)state.wedge_quadrics.size();
-				
-				std::vector<float> attributes;
-				attributes.resize(wedge_count * attribute_stride_dwords);
+				state.wedge_attributes.resize(wedge_count * attribute_stride_dwords);
 				
 				for (u32 i = 0; i < wedge_count; i += 1) {
-					ComputeQuadricErrorWithAttributes(state.wedge_quadrics[i], select_info.new_position, &attributes[i * attribute_stride_dwords]);
+					ComputeQuadricErrorWithAttributes(state.wedge_quadrics[i], select_info.new_position, &state.wedge_attributes[i * attribute_stride_dwords]);
 				}
 				
 				IterateCornerList<ElementType::Vertex>(mesh, remaning_base_id, [&](CornerID corner_id) {
@@ -902,7 +902,7 @@ void DecimateMesh(MeshView mesh) {
 					
 					u8 index = state.wedge_attribute_set[attributes_id.index];
 					if (index != 0) {
-						memcpy(mesh[attributes_id], &attributes[(index - 1) * attribute_stride_dwords], sizeof(u32) * attribute_stride_dwords);
+						memcpy(mesh[attributes_id], &state.wedge_attributes[(index - 1) * attribute_stride_dwords], sizeof(u32) * attribute_stride_dwords);
 						mesh[corner_id].attributes_id = state.wedge_attributes_ids[index - 1];
 					}
 				});
