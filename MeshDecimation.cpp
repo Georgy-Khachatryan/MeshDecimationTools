@@ -13,17 +13,6 @@
 // - HSUEH-TI DEREK LIU, XIAOTING ZHANG, CEM YUKSEL. 2024. Simplifying Triangle Meshes in the Wild.
 //
 
-struct EdgeKey {
-	VertexID vertex_0;
-	VertexID vertex_1;
-	
-	friend bool operator== (EdgeKey lh, EdgeKey rh) {
-		return // Edges are non directional. EdgeKey(A, B) is the same as EdgeKey(B, A)
-			(lh.vertex_0.index == rh.vertex_0.index) && (lh.vertex_1.index == rh.vertex_1.index) ||
-			(lh.vertex_0.index == rh.vertex_1.index) && (lh.vertex_1.index == rh.vertex_0.index);
-	}
-};
-
 // fenv pragmas are an attempt at making compiler not optimize away (x + 0.f).
 #pragma fenv_access(on)
 struct VertexHasher {
@@ -43,11 +32,14 @@ struct VertexHasher {
 		return _mm_cvtsi128_si64(hash);
 	}
 	
-	u64 operator() (const EdgeKey& e) const { return std::hash<u64>{}(e.vertex_0.index) + std::hash<u64>{}(e.vertex_1.index); }
 	u64 operator() (const Vector3& v) const { return PositionHash(v); }
 };
 #pragma fenv_access(off)
 
+static u64 PackEdgeKey(VertexID vertex_id_0, VertexID vertex_id_1) {
+	// Always pack VertexIDs in ascending order to ensure that PackEdgeKey(A, B) == PackEdgeKey(B, A) and they hash to the same value.
+	return vertex_id_1.index > vertex_id_0.index ? ((u64)vertex_id_1.index << u32_bit_count) | (u64)vertex_id_0.index : ((u64)vertex_id_0.index << u32_bit_count) | (u64)vertex_id_1.index;
+}
 
 template<ElementType element_type_t> auto GetElementID(const Corner& corner) {
 	if constexpr (element_type_t == ElementType::Vertex) {
@@ -152,6 +144,7 @@ static void CornerListMerge(MeshView mesh, ElementID element_0, ElementID elemen
 					auto& edge = mesh[mesh[corner_id].edge_id];
 					if (edge.vertex_0.index == element_1.index) edge.vertex_0 = element_0;
 					if (edge.vertex_1.index == element_1.index) edge.vertex_1 = element_0;
+					assert(edge.vertex_0.index != edge.vertex_1.index);
 				});
 			} else if constexpr (element_type_t == ElementType::Edge) {
 				mesh[corner_id].edge_id = element_0;
@@ -209,8 +202,8 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 	
 	
 	auto edge_id_allocator = EdgeID{ 0 };
-	std::unordered_map<EdgeKey, EdgeID, VertexHasher> edge_to_edge_id;
-
+	std::unordered_map<u64, EdgeID> edge_to_edge_id;
+	
 	u32 triangle_count = (u32)(triangle_mesh.indices.size() / 3);
 	for (u32 triangle_index = 0; triangle_index < triangle_count; triangle_index += 1) {
 		auto face_id = FaceID{ triangle_index };
@@ -227,23 +220,33 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 			src_vertex_index_to_vertex_id[indices[2]],
 		};
 		
-		EdgeKey edge_keys[3] = {
-			EdgeKey{ vertex_ids[0], vertex_ids[1] },
-			EdgeKey{ vertex_ids[1], vertex_ids[2] },
-			EdgeKey{ vertex_ids[2], vertex_ids[0] },
+		u64 edge_keys[3] = {
+			PackEdgeKey(vertex_ids[0], vertex_ids[1]),
+			PackEdgeKey(vertex_ids[1], vertex_ids[2]),
+			PackEdgeKey(vertex_ids[2], vertex_ids[0]),
 		};
 
 		auto& face = mesh[face_id];
 		face.corner_list_base.index = u32_max;
 		
+		bool has_duplicate_vertices = 
+			vertex_ids[0].index == vertex_ids[1].index ||
+			vertex_ids[0].index == vertex_ids[2].index ||
+			vertex_ids[1].index == vertex_ids[2].index;
+		
+		// Skip primitives that reduce to a single line or a point. PerformEdgeCollapse(...) can't reliably handle them.
+		if (has_duplicate_vertices) continue;
+		
+		
 		for (u32 corner_index = 0; corner_index < 3; corner_index += 1) {
 			auto corner_id = CornerID{ triangle_index * 3 + corner_index };
+			u64 edge_key = edge_keys[corner_index];
 			
-			auto [it, is_inserted] = edge_to_edge_id.emplace(edge_keys[corner_index], edge_id_allocator);
+			auto [it, is_inserted] = edge_to_edge_id.emplace(edge_key, edge_id_allocator);
 			if (is_inserted) {
 				auto& edge = result_mesh.edges.emplace_back();
-				edge.vertex_0 = edge_keys[corner_index].vertex_0;
-				edge.vertex_1 = edge_keys[corner_index].vertex_1;
+				edge.vertex_0 = VertexID{ (u32)(edge_key >> 0) };
+				edge.vertex_1 = VertexID{ (u32)(edge_key >> u32_bit_count) };
 				edge.corner_list_base.index = u32_max;
 				
 				edge_id_allocator.index += 1;
@@ -340,12 +343,14 @@ MeshView MeshToMeshView(Mesh& mesh) {
 static CornerID PerformEdgeCollapse(MeshView mesh, EdgeID edge_id) {
 	auto& edge = mesh[edge_id];
 	
+	assert(edge.vertex_0.index != edge.vertex_1.index);
 	auto& vertex_0 = mesh[edge.vertex_0];
 	auto& vertex_1 = mesh[edge.vertex_1];
 
 	assert(edge.corner_list_base.index != u32_max);
 	assert(vertex_0.corner_list_base.index != u32_max);
 	assert(vertex_1.corner_list_base.index != u32_max);
+	assert(vertex_0.corner_list_base.index != vertex_1.corner_list_base.index);
 	
 	IterateCornerList<ElementType::Edge>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
 		auto& corner = mesh[corner_id];
@@ -362,7 +367,7 @@ static CornerID PerformEdgeCollapse(MeshView mesh, EdgeID edge_id) {
 	
 	auto remaning_base_id = vertex_0.corner_list_base.index != u32_max ? vertex_0.corner_list_base : vertex_1.corner_list_base;
 	if (remaning_base_id.index != u32_max) {
-		std::unordered_map<EdgeKey, EdgeID, VertexHasher> edge_duplicate_map;
+		std::unordered_map<u64, EdgeID> edge_duplicate_map;
 		
 		IterateCornerList<ElementType::Vertex>(mesh, remaning_base_id, [&](CornerID corner_id) {
 			// TODO: This can be iteration over just incoming and outgoing edges of a corner.
@@ -370,7 +375,7 @@ static CornerID PerformEdgeCollapse(MeshView mesh, EdgeID edge_id) {
 				auto edge_id_1 = mesh[corner_id].edge_id;
 				auto& edge_1 = mesh[edge_id_1];
 				
-				auto [it, is_inserted] = edge_duplicate_map.emplace(EdgeKey{ edge_1.vertex_0, edge_1.vertex_1 }, edge_id_1);
+				auto [it, is_inserted] = edge_duplicate_map.emplace(PackEdgeKey(edge_1.vertex_0, edge_1.vertex_1), edge_id_1);
 				auto edge_id_0 = it->second;
 				
 				if (is_inserted == false && edge_id_0.index != edge_id_1.index) {
@@ -694,14 +699,42 @@ static bool ValidateEdgeCollapsePosition(MeshView mesh, Edge edge, const Vector3
 	return reject_edge_collapse == false;
 }
 
-struct State {
+
+struct AttributeWedgeMap {
+	compile_const u32 capacity = 256;
+	
+	AttributesID keys[capacity];
+	u8 values[capacity];
+	u32 count = 0;
+};
+
+static void AttributeWedgeMapAdd(AttributeWedgeMap& small_set, AttributesID key, u8 value) {
+	u32 index = (small_set.count < AttributeWedgeMap::capacity) ? small_set.count++ : (AttributeWedgeMap::capacity - 1);
+	small_set.keys[index]   = key;
+	small_set.values[index] = value;
+}
+
+static u8 AttributeWedgeMapFind(AttributeWedgeMap& small_set, AttributesID key) {
+	for (u32 i = 0; i < small_set.count; i += 1) {
+		if (small_set.keys[i].index == key.index) return small_set.values[i];
+	}
+	
+	return 0;
+}
+
+static void ResetAttributeWedgeMap(AttributeWedgeMap& small_set) {
+	small_set.count = 0;
+}
+
+
+struct MeshDecimationState {
 	// Edge quadrics accumulated on vertices.
 	std::vector<Quadric> vertex_edge_quadrics;
 	
 	// Face quadrics accumulated on attributes.
 	std::vector<QuadricWithAttributes> attribute_face_quadrics;
 	
-	std::vector<u8> wedge_attribute_set;
+	AttributeWedgeMap wedge_attribute_set;
 	std::vector<QuadricWithAttributes> wedge_quadrics;
 	std::vector<float> wedge_attributes;
 	std::vector<AttributesID> wedge_attributes_ids;
@@ -714,8 +747,8 @@ struct EdgeSelectInfo {
 	Vector3 new_position;
 };
 
-void ComputeEdgeCollapseError(MeshView mesh, State& state, EdgeID edge_id, EdgeSelectInfo* info = nullptr) {
-	memset(state.wedge_attribute_set.data(), 0, state.wedge_attribute_set.size());
+void ComputeEdgeCollapseError(MeshView mesh, MeshDecimationState& state, EdgeID edge_id, EdgeSelectInfo* info = nullptr) {
+	ResetAttributeWedgeMap(state.wedge_attribute_set);
 	state.wedge_quadrics.clear();
 	state.wedge_attributes_ids.clear();
 	
@@ -727,33 +760,33 @@ void ComputeEdgeCollapseError(MeshView mesh, State& state, EdgeID edge_id, EdgeS
 		auto& corner_0 = mesh[corner_id];
 		auto& corner_1 = mesh[corner_0.corner_list_around[(u32)ElementType::Face].next];
 		
-		u8 wedge_index_0 = state.wedge_attribute_set[corner_0.attributes_id.index];
-		u8 wedge_index_1 = state.wedge_attribute_set[corner_1.attributes_id.index];
+		u8 wedge_index_0 = AttributeWedgeMapFind(state.wedge_attribute_set, corner_0.attributes_id);
+		u8 wedge_index_1 = AttributeWedgeMapFind(state.wedge_attribute_set, corner_1.attributes_id);
 		
 		if (wedge_index_0 == 0 && wedge_index_1 == 0) {
 			u8 index = (u8)(state.wedge_quadrics.size() + 1);
-			state.wedge_attribute_set[corner_0.attributes_id.index] = index;
-			state.wedge_attribute_set[corner_1.attributes_id.index] = index;
+			AttributeWedgeMapAdd(state.wedge_attribute_set, corner_0.attributes_id, index);
+			AttributeWedgeMapAdd(state.wedge_attribute_set, corner_1.attributes_id, index);
 			
 			state.wedge_attributes_ids.emplace_back(corner_0.attributes_id);
 			auto& quadric = state.wedge_quadrics.emplace_back(state.attribute_face_quadrics[corner_0.attributes_id.index]);
 			AccumulateQuadricWithAttributes(quadric, state.attribute_face_quadrics[corner_1.attributes_id.index]);
 		} else if (wedge_index_0 == 0 && wedge_index_1 != 0) {
-			state.wedge_attribute_set[corner_0.attributes_id.index] = wedge_index_1;
+			AttributeWedgeMapAdd(state.wedge_attribute_set, corner_0.attributes_id, wedge_index_1);
 			AccumulateQuadricWithAttributes(state.wedge_quadrics[wedge_index_1 - 1], state.attribute_face_quadrics[corner_0.attributes_id.index]);
 		} else if (wedge_index_0 != 0 && wedge_index_1 == 0) {
-			state.wedge_attribute_set[corner_1.attributes_id.index] = wedge_index_0;
+			AttributeWedgeMapAdd(state.wedge_attribute_set, corner_1.attributes_id, wedge_index_0);
 			AccumulateQuadricWithAttributes(state.wedge_quadrics[wedge_index_0 - 1], state.attribute_face_quadrics[corner_1.attributes_id.index]);
 		}
 	});
 	
 	auto accumulate_quadrics = [&](CornerID corner_id) {
-		u32 attribute_index = mesh[corner_id].attributes_id.index;
+		auto attribute_id = mesh[corner_id].attributes_id;
 		
-		if (state.wedge_attribute_set[attribute_index] == 0) {
-			state.wedge_attribute_set[attribute_index] = (u8)(state.wedge_quadrics.size() + 1);
-			state.wedge_quadrics.push_back(state.attribute_face_quadrics[attribute_index]);
-			state.wedge_attributes_ids.emplace_back(AttributesID{ attribute_index });
+		if (AttributeWedgeMapFind(state.wedge_attribute_set, attribute_id) == 0) {
+			AttributeWedgeMapAdd(state.wedge_attribute_set, attribute_id, (u8)(state.wedge_quadrics.size() + 1));
+			state.wedge_quadrics.push_back(state.attribute_face_quadrics[attribute_id.index]);
+			state.wedge_attributes_ids.emplace_back(attribute_id);
 		}
 	};
 	
@@ -803,10 +836,9 @@ void ComputeEdgeCollapseError(MeshView mesh, State& state, EdgeID edge_id, EdgeS
 // - Output an obj sequence for edge to verify edge collapses.
 //
 void DecimateMesh(MeshView mesh) {
-	State state;
+	MeshDecimationState state;
 	state.vertex_edge_quadrics.resize(mesh.vertex_count);
 	state.attribute_face_quadrics.resize(mesh.attribute_count);
-	state.wedge_attribute_set.resize(mesh.attribute_count);
 	state.wedge_quadrics.reserve(64);
 	state.wedge_attributes.reserve(64 * attribute_stride_dwords);
 	state.wedge_attributes_ids.reserve(64 * attribute_stride_dwords);
@@ -900,7 +932,7 @@ void DecimateMesh(MeshView mesh) {
 				IterateCornerList<ElementType::Vertex>(mesh, remaning_base_id, [&](CornerID corner_id) {
 					auto attributes_id = mesh[corner_id].attributes_id;
 					
-					u8 index = state.wedge_attribute_set[attributes_id.index];
+					u8 index = AttributeWedgeMapFind(state.wedge_attribute_set, attributes_id);
 					if (index != 0) {
 						memcpy(mesh[attributes_id], &state.wedge_attributes[(index - 1) * attribute_stride_dwords], sizeof(u32) * attribute_stride_dwords);
 						mesh[corner_id].attributes_id = state.wedge_attributes_ids[index - 1];
