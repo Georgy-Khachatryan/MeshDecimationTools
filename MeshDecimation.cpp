@@ -339,8 +339,10 @@ MeshView MeshToMeshView(Mesh& mesh) {
 	return view;
 }
 
+using RemovedEdgeArray = std::vector<EdgeID>;
+using EdgeDuplicateMap = std::unordered_map<u64, EdgeID>;
 
-static CornerID PerformEdgeCollapse(MeshView mesh, EdgeID edge_id) {
+static CornerID PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, EdgeDuplicateMap& edge_duplicate_map, RemovedEdgeArray& removed_edge_array) {
 	auto& edge = mesh[edge_id];
 	
 	assert(edge.vertex_0.index != edge.vertex_1.index);
@@ -352,14 +354,17 @@ static CornerID PerformEdgeCollapse(MeshView mesh, EdgeID edge_id) {
 	assert(vertex_1.corner_list_base.index != u32_max);
 	assert(vertex_0.corner_list_base.index != vertex_1.corner_list_base.index);
 	
+	removed_edge_array.clear();
 	IterateCornerList<ElementType::Edge>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
 		auto& corner = mesh[corner_id];
 		auto& face   = mesh[corner.face_id];
 		
 		IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
 			CornerListRemove<ElementType::Vertex>(mesh, corner_id);
-			CornerListRemove<ElementType::Edge>(mesh, corner_id);
+			bool edge_removed = CornerListRemove<ElementType::Edge>(mesh, corner_id);
 			CornerListRemove<ElementType::Face>(mesh, corner_id);
+			
+			if (edge_removed) removed_edge_array.push_back(mesh[corner_id].edge_id);
 		});
 	});
 	
@@ -367,7 +372,7 @@ static CornerID PerformEdgeCollapse(MeshView mesh, EdgeID edge_id) {
 	
 	auto remaning_base_id = vertex_0.corner_list_base.index != u32_max ? vertex_0.corner_list_base : vertex_1.corner_list_base;
 	if (remaning_base_id.index != u32_max) {
-		std::unordered_map<u64, EdgeID> edge_duplicate_map;
+		edge_duplicate_map.clear();
 		
 		IterateCornerList<ElementType::Vertex>(mesh, remaning_base_id, [&](CornerID corner_id) {
 			// TODO: This can be iteration over just incoming and outgoing edges of a corner.
@@ -380,7 +385,25 @@ static CornerID PerformEdgeCollapse(MeshView mesh, EdgeID edge_id) {
 				
 				if (is_inserted == false && edge_id_0.index != edge_id_1.index) {
 					CornerListMerge<EdgeID>(mesh, edge_id_0, edge_id_1);
+					removed_edge_array.push_back(edge_id_1);
 				}
+			});
+		});
+		
+		IterateCornerList<ElementType::Vertex>(mesh, remaning_base_id, [&](CornerID corner_id_0) {
+			IterateCornerList<ElementType::Face>(mesh, corner_id_0, [&](CornerID corner_id_1) {
+				if (remaning_base_id.index == corner_id_1.index) return;
+				
+				IterateCornerList<ElementType::Vertex>(mesh, corner_id_1, [&](CornerID corner_id_2) {
+					if (corner_id_1.index == corner_id_2.index) return;
+					
+					IterateCornerList<ElementType::Face>(mesh, corner_id_2, [&](CornerID corner_id) {
+						auto edge_id = mesh[corner_id].edge_id;
+						auto& edge = mesh[edge_id];
+						
+						edge_duplicate_map.emplace(PackEdgeKey(edge.vertex_0, edge.vertex_1), edge_id);
+					});
+				});
 			});
 		});
 	}
@@ -734,6 +757,9 @@ struct MeshDecimationState {
 	// Face quadrics accumulated on attributes.
 	std::vector<QuadricWithAttributes> attribute_face_quadrics;
 	
+	EdgeDuplicateMap edge_duplicate_map;
+	RemovedEdgeArray removed_edge_array;
+	
 	AttributeWedgeMap wedge_attribute_set;
 	std::vector<QuadricWithAttributes> wedge_quadrics;
 	std::vector<float> wedge_attributes;
@@ -827,6 +853,8 @@ void ComputeEdgeCollapseError(MeshView mesh, MeshDecimationState& state, EdgeID 
 	}
 }
 
+#include <map>
+
 //
 // TODO:
 // - Support for attribute quadrics.
@@ -842,10 +870,12 @@ void DecimateMesh(MeshView mesh) {
 	state.wedge_quadrics.reserve(64);
 	state.wedge_attributes.reserve(64 * attribute_stride_dwords);
 	state.wedge_attributes_ids.reserve(64 * attribute_stride_dwords);
-
-	for (u32 i = 0; i < 405; i += 1) {
-		memset(state.vertex_edge_quadrics.data(), 0, state.vertex_edge_quadrics.size() * sizeof(Quadric));
-		memset(state.attribute_face_quadrics.data(), 0, state.attribute_face_quadrics.size() * sizeof(QuadricWithAttributes));
+	
+	memset(state.vertex_edge_quadrics.data(), 0, state.vertex_edge_quadrics.size() * sizeof(Quadric));
+	memset(state.attribute_face_quadrics.data(), 0, state.attribute_face_quadrics.size() * sizeof(QuadricWithAttributes));
+	
+	{
+		// ScopedTimer t("- Compute Face Quadrics");
 		
 		for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
 			auto& face = mesh[face_id];
@@ -870,6 +900,10 @@ void DecimateMesh(MeshView mesh) {
 			AccumulateQuadricWithAttributes(state.attribute_face_quadrics[c1.attributes_id.index], quadric);
 			AccumulateQuadricWithAttributes(state.attribute_face_quadrics[c2.attributes_id.index], quadric);
 		}
+	}
+	
+	{
+		// ScopedTimer t("- Compute Edge Quadrics");
 		
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
@@ -898,28 +932,101 @@ void DecimateMesh(MeshView mesh) {
 			AccumulateQuadric(state.vertex_edge_quadrics[v0.index], quadric);
 			AccumulateQuadric(state.vertex_edge_quadrics[v1.index], quadric);
 		}
-		
-		EdgeSelectInfo select_info;
+	}
+	
+	// TODO: Remove once it's no longer useful.
+	u32 neighbourhood_size_histogram[256];
+	memset(neighbourhood_size_histogram, 0, sizeof(neighbourhood_size_histogram));
+	
+	using EdgeCollapseHeap = std::multimap<float, EdgeID>;
+	EdgeCollapseHeap edge_collapse_heap;
+	
+	std::vector<EdgeCollapseHeap::iterator> edge_collapse_its;
+	edge_collapse_its.resize(mesh.edge_count);
+	
+	{
+		// ScopedTimer t("- Rank Edge Collapses");
 		
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
-			auto& edge = mesh[edge_id];
-			if (edge.corner_list_base.index == u32_max) continue;
-			
+			EdgeSelectInfo select_info;
 			ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
+			auto it = edge_collapse_heap.emplace(select_info.min_error, edge_id);
+			edge_collapse_its[edge_id.index] = it;
+		}
+	}
+	
+	u32 edges_collapsed = 0;
+	u32 target_edges_collapsed = mesh.edge_count * 21 / 64;
+	
+	u64 time0 = 0;
+	u64 time1 = 0;
+	
+	while (edges_collapsed < target_edges_collapsed && edge_collapse_heap.size()) {
+		if ((target_edges_collapsed - edges_collapsed) % 1000 == 0) {
+			printf("Remaining: %u\n", target_edges_collapsed - edges_collapsed);
 		}
 		
-		if (select_info.edge_to_collapse.index != u32_max) {
-#if ENABLE_ATTRIBUTE_SUPPORT
-			ComputeEdgeCollapseError(mesh, state, select_info.edge_to_collapse);
-#endif // ENABLE_ATTRIBUTE_SUPPORT
+		u64 t0 = __rdtsc();
+		
+		// ~80% of the execution time split between ComputeEdgeCollapseError (50%) and edge collapse ops (30%)
+		for (auto& [edge_key, edge_id] : state.edge_duplicate_map) {
+			auto old_it = edge_collapse_its[edge_id.index];
+			if (old_it == edge_collapse_heap.end()) continue;
 			
-			// printf("CollapseID: %u, Error: %.3f\n", edge_to_collapse.index, min_error);
-			auto remaning_base_id = PerformEdgeCollapse(mesh, select_info.edge_to_collapse);
+			edge_collapse_heap.erase(edge_collapse_its[edge_id.index]);
+			if (mesh[edge_id].corner_list_base.index != u32_max) {
+				EdgeSelectInfo select_info;
+				ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
+				auto it = edge_collapse_heap.emplace(select_info.min_error, edge_id);
+				edge_collapse_its[edge_id.index] = it;
+			} else {
+				edge_collapse_its[edge_id.index] = edge_collapse_heap.end();
+			}
+		}
+		state.edge_duplicate_map.clear();
 			
-			auto& edge = mesh[select_info.edge_to_collapse];
+		u64 t1 = __rdtsc();
+		time0 += (t1 - t0);
+		
+		auto it = edge_collapse_heap.lower_bound(0.f);
+		
+		// TODO: This should never happen, but it would be good to put a safeguard here. Continue as is would cause an infinite loop.
+		if (it == edge_collapse_heap.end()) continue;
+		
+		auto edge_id = it->second;
+		auto& edge = mesh[edge_id];
+		
+		// 2% of the execution time
+		EdgeSelectInfo select_info;
+		ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
+		
+		// TODO: This should never happen, but it would be good to put a safeguard here. Continue as is would cause an infinite loop.
+		if (select_info.edge_to_collapse.index == u32_max) continue;
+		
+		// 15% of the execution time
+		auto remaning_base_id = PerformEdgeCollapse(mesh, select_info.edge_to_collapse, state.edge_duplicate_map, state.removed_edge_array);
+		edges_collapsed += 1;
+		
+		u32 edge_duplicate_map_size = (u32)state.edge_duplicate_map.size();
+		if (edge_duplicate_map_size > 255) edge_duplicate_map_size = 255;
+		
+		neighbourhood_size_histogram[edge_duplicate_map_size] += 1;
+		
+		for (auto edge_id : state.removed_edge_array) {
+			edge_collapse_heap.erase(edge_collapse_its[edge_id.index]);
+			edge_collapse_its[edge_id.index] = edge_collapse_heap.end();
+		}
+		
+		{
 			mesh[edge.vertex_0].position = select_info.new_position;
 			mesh[edge.vertex_1].position = select_info.new_position;
 			
+			Quadric quadric = state.vertex_edge_quadrics[edge.vertex_0.index];
+			AccumulateQuadric(quadric, state.vertex_edge_quadrics[edge.vertex_1.index]);
+			
+			state.vertex_edge_quadrics[edge.vertex_0.index] = quadric;
+			state.vertex_edge_quadrics[edge.vertex_1.index] = quadric;
+		
 #if ENABLE_ATTRIBUTE_SUPPORT
 			if (remaning_base_id.index != u32_max) {
 				u32 wedge_count = (u32)state.wedge_quadrics.size();
@@ -927,6 +1034,7 @@ void DecimateMesh(MeshView mesh) {
 				
 				for (u32 i = 0; i < wedge_count; i += 1) {
 					ComputeQuadricErrorWithAttributes(state.wedge_quadrics[i], select_info.new_position, &state.wedge_attributes[i * attribute_stride_dwords]);
+					state.attribute_face_quadrics[state.wedge_attributes_ids[i].index] = state.wedge_quadrics[i];
 				}
 				
 				IterateCornerList<ElementType::Vertex>(mesh, remaning_base_id, [&](CornerID corner_id) {
@@ -940,9 +1048,13 @@ void DecimateMesh(MeshView mesh) {
 				});
 			}
 #endif // ENABLE_ATTRIBUTE_SUPPORT
-		} else {
-			break;
 		}
+		
+		u64 t2 = __rdtsc();
+		
+		time1 += (t2 - t0);
 	}
+	
+	printf("%.3f\n", (double)time0 / (double)time1);
 }
 
