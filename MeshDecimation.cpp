@@ -532,7 +532,9 @@ static void ComputeEdgeQuadric(Quadric& quadric, const Vector3& p0, const Vector
 	ComputePlanarQuadric(quadric, normal, distance_to_triangle, Length(p10));
 }
 
+// TODO: Convert these constants into user editable settings.
 compile_const float attribute_weight = 1.f / (1024.f * 1024.f);
+compile_const float inversion_error  = 1.f;
 
 static void ComputeFaceQuadricWithAttributes(QuadricWithAttributes& quadric, const Vector3& p0, const Vector3& p1, const Vector3& p2, float* a0, float* a1, float* a2) {
 	auto p10 = p1 - p0;
@@ -655,7 +657,7 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
 		auto g = q.attributes[i].g;
 		auto d = q.attributes[i].d;
-		if (q.weight <= 0.f) continue;
+		if (q.weight <= 0.f) continue; // TODO: Check if we hit this and how we should handle fallback.
 		
 		float s = (DotProduct(g, p) + d) * rcp_weight;
 		
@@ -767,9 +769,7 @@ struct MeshDecimationState {
 };
 
 struct EdgeSelectInfo {
-	EdgeID edge_to_collapse = { u32_max };
 	float min_error = FLT_MAX;
-	
 	Vector3 new_position;
 };
 
@@ -843,24 +843,162 @@ void ComputeEdgeCollapseError(MeshView mesh, MeshDecimationState& state, EdgeID 
 				float attributes[attribute_stride_dwords];
 				error += ComputeQuadricErrorWithAttributes(state.wedge_quadrics[i], p, attributes);
 			}
+			if (error > info->min_error) continue;
 			
-			if (info->min_error > error && ValidateEdgeCollapsePosition(mesh, edge, p)) {
-				info->min_error = error;
-				info->edge_to_collapse = edge_id;
-				info->new_position = p;
-			}
+			
+			error += ValidateEdgeCollapsePosition(mesh, edge, p) ? 0.f : inversion_error;
+			if (error > info->min_error) continue;
+
+			info->min_error = error;
+			info->new_position = p;
 		}
 	}
 }
 
-#include <map>
+struct EdgeCollapseHeap {
+	std::vector<EdgeID> heap_index_to_edge_id;
+	std::vector<u32>    edge_id_to_heap_index;
+	std::vector<float>  edge_collapse_errors;
+};
+
+static u32 HeapChildIndex0(u32 node_index) { return node_index * 2 + 1; }
+static u32 HeapChildIndex1(u32 node_index) { return node_index * 2 + 2; }
+static u32 HeapParentIndex(u32 node_index) { return (node_index - 1) / 2; }
+
+static void EdgeCollapseHeapSwapElements(EdgeCollapseHeap& heap, u32 node_index_0, u32 node_index_1) {
+	auto node_0_edge_id = heap.heap_index_to_edge_id[node_index_0];
+	auto node_1_edge_id = heap.heap_index_to_edge_id[node_index_1];
+	auto node_0_error   = heap.edge_collapse_errors[node_index_0];
+	auto node_1_error   = heap.edge_collapse_errors[node_index_1];
+	
+	heap.heap_index_to_edge_id[node_index_0] = node_1_edge_id;
+	heap.edge_collapse_errors[node_index_0]  = node_1_error;
+	
+	heap.heap_index_to_edge_id[node_index_1] = node_0_edge_id;
+	heap.edge_collapse_errors[node_index_1]  = node_0_error;
+	
+	heap.edge_id_to_heap_index[node_1_edge_id.index] = node_index_0;
+	heap.edge_id_to_heap_index[node_0_edge_id.index] = node_index_1;
+}
+
+static void EdgeCollapseHeapSiftUp(EdgeCollapseHeap& heap, u32 node_index) {
+	while (node_index) {
+		u32 parent_node_index = HeapParentIndex(node_index);
+		
+		if (heap.edge_collapse_errors[node_index] < heap.edge_collapse_errors[parent_node_index]) {
+			EdgeCollapseHeapSwapElements(heap, node_index, parent_node_index);
+		}
+		
+		node_index = parent_node_index;
+	}
+}
+
+static void EdgeCollapseHeapSiftDown(EdgeCollapseHeap& heap, u32 node_index) {
+	u32 element_count = (u32)heap.edge_collapse_errors.size();
+	while (HeapChildIndex0(node_index) < element_count) {
+		u32 index_0 = HeapChildIndex0(node_index);
+		u32 index_1 = HeapChildIndex1(node_index);
+		
+		u32 smallest_child_index = index_1 >= element_count ? index_0 : (heap.edge_collapse_errors[index_0] < heap.edge_collapse_errors[index_1] ? index_0 : index_1);
+		
+		if (heap.edge_collapse_errors[node_index] > heap.edge_collapse_errors[smallest_child_index]) {
+			EdgeCollapseHeapSwapElements(heap, node_index, smallest_child_index);
+		}
+		
+		node_index = smallest_child_index;
+	}
+}
+
+static EdgeID EdgeCollapseHeapPop(EdgeCollapseHeap& heap) {
+	auto edge_id = heap.heap_index_to_edge_id.front();
+	
+	if (heap.edge_collapse_errors.size() > 1) {
+		heap.edge_collapse_errors[0]  = heap.edge_collapse_errors.back();
+		heap.heap_index_to_edge_id[0] = heap.heap_index_to_edge_id.back();
+	
+		heap.edge_id_to_heap_index[edge_id.index] = u32_max;
+		heap.edge_id_to_heap_index[heap.heap_index_to_edge_id[0].index] = 0;
+	}
+
+	heap.edge_collapse_errors.pop_back();
+	heap.heap_index_to_edge_id.pop_back();
+	
+	EdgeCollapseHeapSiftDown(heap, 0);
+	
+	return edge_id;
+}
+
+static void EdgeCollapseHeapRemove(EdgeCollapseHeap& heap, u32 heap_index) {
+	auto edge_id = heap.heap_index_to_edge_id[heap_index];
+	
+	bool sift_up = true;
+	if (heap.edge_collapse_errors.size() > heap_index) {
+		float prev_error = heap.edge_collapse_errors[heap_index];
+
+		heap.edge_collapse_errors[heap_index]  = heap.edge_collapse_errors.back();
+		heap.heap_index_to_edge_id[heap_index] = heap.heap_index_to_edge_id.back();
+
+		float new_error = heap.edge_collapse_errors[heap_index];
+		sift_up = new_error < prev_error;
+	
+		heap.edge_id_to_heap_index[edge_id.index] = u32_max;
+		heap.edge_id_to_heap_index[heap.heap_index_to_edge_id[heap_index].index] = heap_index;
+	}
+
+	heap.edge_collapse_errors.pop_back();
+	heap.heap_index_to_edge_id.pop_back();
+	
+	if (sift_up) {
+		EdgeCollapseHeapSiftUp(heap, heap_index);
+	} else {
+		EdgeCollapseHeapSiftDown(heap, heap_index);
+	}
+}
+
+static void EdgeCollapseHeapUpdate(EdgeCollapseHeap& heap, u32 node_index, float error) {
+	bool sift_up = error < heap.edge_collapse_errors[node_index];
+	
+	heap.edge_collapse_errors[node_index] = error;
+	
+	if (sift_up) {
+		EdgeCollapseHeapSiftUp(heap, node_index);
+	} else {
+		EdgeCollapseHeapSiftDown(heap, node_index);
+	}
+}
+
+static void EdgeCollapseHeapInitialize(EdgeCollapseHeap& heap) {
+	if (heap.edge_collapse_errors.size() == 0) return;
+	
+	u32 node_index = HeapParentIndex((u32)heap.edge_collapse_errors.size() - 1);
+	
+	for (u32 i = node_index; i > 0; i -= 1) {
+		EdgeCollapseHeapSiftDown(heap, i);
+	}
+	EdgeCollapseHeapSiftDown(heap, 0);
+}
+
+#define ENABLE_EDGE_COLLAPSE_HEAP_VALIDATION 0
+#if ENABLE_EDGE_COLLAPSE_HEAP_VALIDATION
+static void EdgeCollapseHeapValidate(EdgeCollapseHeap& heap) {
+	for (u32 i = 0; i < heap.edge_collapse_errors.size(); i += 1) {
+		float e0 = heap.edge_collapse_errors[i];
+		float e1 = HeapChildIndex0(i) < heap.edge_collapse_errors.size() ? heap.edge_collapse_errors[HeapChildIndex0(i)] : FLT_MAX;
+		float e2 = HeapChildIndex1(i) < heap.edge_collapse_errors.size() ? heap.edge_collapse_errors[HeapChildIndex1(i)] : FLT_MAX;
+
+		assert(e0 <= e1);
+		assert(e0 <= e2);
+
+		assert(heap.edge_id_to_heap_index[heap.heap_index_to_edge_id[i].index] == i);
+	}
+}
+#endif // ENABLE_EDGE_COLLAPSE_HEAP_VALIDATION
 
 //
 // TODO:
-// - Support for attribute quadrics.
 // - Optimization of vertex location.
-// - Memory and memory-less quadrics. Don't recompute all quadrics after each collapse.
-// - Priority queue. Don't reevaluate all edge collapses after each collapse.
+// - Scale mesh and attributes before simplification.
+// - Memory-less quadrics.
 // - Output an obj sequence for edge to verify edge collapses.
 //
 void DecimateMesh(MeshView mesh) {
@@ -938,11 +1076,11 @@ void DecimateMesh(MeshView mesh) {
 	u32 neighbourhood_size_histogram[256];
 	memset(neighbourhood_size_histogram, 0, sizeof(neighbourhood_size_histogram));
 	
-	using EdgeCollapseHeap = std::multimap<float, EdgeID>;
-	EdgeCollapseHeap edge_collapse_heap;
 	
-	std::vector<EdgeCollapseHeap::iterator> edge_collapse_its;
-	edge_collapse_its.resize(mesh.edge_count);
+	EdgeCollapseHeap edge_collapse_heap;
+	edge_collapse_heap.edge_collapse_errors.resize(mesh.edge_count);
+	edge_collapse_heap.edge_id_to_heap_index.resize(mesh.edge_count);
+	edge_collapse_heap.heap_index_to_edge_id.resize(mesh.edge_count);
 	
 	{
 		// ScopedTimer t("- Rank Edge Collapses");
@@ -950,9 +1088,13 @@ void DecimateMesh(MeshView mesh) {
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			EdgeSelectInfo select_info;
 			ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
-			auto it = edge_collapse_heap.emplace(select_info.min_error, edge_id);
-			edge_collapse_its[edge_id.index] = it;
+			
+			edge_collapse_heap.edge_collapse_errors[edge_id.index]  = select_info.min_error;
+			edge_collapse_heap.edge_id_to_heap_index[edge_id.index] = edge_id.index;
+			edge_collapse_heap.heap_index_to_edge_id[edge_id.index] = edge_id;
 		}
+		
+		EdgeCollapseHeapInitialize(edge_collapse_heap);
 	}
 	
 	u32 edges_collapsed = 0;
@@ -961,50 +1103,40 @@ void DecimateMesh(MeshView mesh) {
 	u64 time0 = 0;
 	u64 time1 = 0;
 	
-	while (edges_collapsed < target_edges_collapsed && edge_collapse_heap.size()) {
+	while (edges_collapsed < target_edges_collapsed && edge_collapse_heap.edge_collapse_errors.size()) {
 		if ((target_edges_collapsed - edges_collapsed) % 1000 == 0) {
 			printf("Remaining: %u\n", target_edges_collapsed - edges_collapsed);
+			
+#if ENABLE_EDGE_COLLAPSE_HEAP_VALIDATION
+			EdgeCollapseHeapValidate(edge_collapse_heap);
+#endif // ENABLE_EDGE_COLLAPSE_HEAP_VALIDATION
 		}
 		
 		u64 t0 = __rdtsc();
 		
-		// ~80% of the execution time split between ComputeEdgeCollapseError (50%) and edge collapse ops (30%)
+		// ~80% of the execution time.
 		for (auto& [edge_key, edge_id] : state.edge_duplicate_map) {
-			auto old_it = edge_collapse_its[edge_id.index];
-			if (old_it == edge_collapse_heap.end()) continue;
+			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[edge_id.index];
+			if (heap_index == u32_max) continue;
 			
-			edge_collapse_heap.erase(edge_collapse_its[edge_id.index]);
-			if (mesh[edge_id].corner_list_base.index != u32_max) {
-				EdgeSelectInfo select_info;
-				ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
-				auto it = edge_collapse_heap.emplace(select_info.min_error, edge_id);
-				edge_collapse_its[edge_id.index] = it;
-			} else {
-				edge_collapse_its[edge_id.index] = edge_collapse_heap.end();
-			}
+			EdgeSelectInfo select_info;
+			ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
+			
+			EdgeCollapseHeapUpdate(edge_collapse_heap, heap_index, select_info.min_error);
 		}
 		state.edge_duplicate_map.clear();
 			
 		u64 t1 = __rdtsc();
 		time0 += (t1 - t0);
 		
-		auto it = edge_collapse_heap.lower_bound(0.f);
-		
-		// TODO: This should never happen, but it would be good to put a safeguard here. Continue as is would cause an infinite loop.
-		if (it == edge_collapse_heap.end()) continue;
-		
-		auto edge_id = it->second;
-		auto& edge = mesh[edge_id];
+		auto edge_id = EdgeCollapseHeapPop(edge_collapse_heap);
 		
 		// 2% of the execution time
 		EdgeSelectInfo select_info;
 		ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
 		
-		// TODO: This should never happen, but it would be good to put a safeguard here. Continue as is would cause an infinite loop.
-		if (select_info.edge_to_collapse.index == u32_max) continue;
-		
 		// 15% of the execution time
-		auto remaning_base_id = PerformEdgeCollapse(mesh, select_info.edge_to_collapse, state.edge_duplicate_map, state.removed_edge_array);
+		auto remaning_base_id = PerformEdgeCollapse(mesh, edge_id, state.edge_duplicate_map, state.removed_edge_array);
 		edges_collapsed += 1;
 		
 		u32 edge_duplicate_map_size = (u32)state.edge_duplicate_map.size();
@@ -1013,11 +1145,12 @@ void DecimateMesh(MeshView mesh) {
 		neighbourhood_size_histogram[edge_duplicate_map_size] += 1;
 		
 		for (auto edge_id : state.removed_edge_array) {
-			edge_collapse_heap.erase(edge_collapse_its[edge_id.index]);
-			edge_collapse_its[edge_id.index] = edge_collapse_heap.end();
+			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[edge_id.index];
+			if (heap_index != u32_max) EdgeCollapseHeapRemove(edge_collapse_heap, heap_index);
 		}
 		
 		{
+			auto& edge = mesh[edge_id];
 			mesh[edge.vertex_0].position = select_info.new_position;
 			mesh[edge.vertex_1].position = select_info.new_position;
 			
@@ -1053,6 +1186,10 @@ void DecimateMesh(MeshView mesh) {
 		u64 t2 = __rdtsc();
 		
 		time1 += (t2 - t0);
+	}
+	
+	for (u32 i = 0; i < 256; i += 1) {
+		printf("%u: %u\n", i, neighbourhood_size_histogram[i]);
 	}
 	
 	printf("%.3f\n", (double)time0 / (double)time1);
