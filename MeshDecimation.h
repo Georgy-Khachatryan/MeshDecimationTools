@@ -144,6 +144,7 @@ struct Mesh {
 	std::vector<Vertex> vertices;
 	std::vector<Corner> corners;
 	std::vector<float>  attributes;
+	u32 active_face_count = 0; // Excluding any removed faces.
 };
 
 struct MeshView {
@@ -158,6 +159,7 @@ struct MeshView {
 	u32 vertex_count    = 0;
 	u32 corner_count    = 0;
 	u32 attribute_count = 0;
+	u32 active_face_count = 0;
 	
 	Face&   operator[] (FaceID face_id)             { return faces[face_id.index]; }
 	Edge&   operator[] (EdgeID edge_id)             { return edges[edge_id.index]; }

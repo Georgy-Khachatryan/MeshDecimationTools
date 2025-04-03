@@ -174,9 +174,10 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 	
 	Mesh result_mesh;
 	
+	u32 triangle_count = (u32)(triangle_mesh.indices.size() / 3);
 	result_mesh.vertices.reserve(triangle_mesh.vertices.size());
 	result_mesh.corners.resize(triangle_mesh.indices.size());
-	result_mesh.faces.resize(triangle_mesh.indices.size() / 3);
+	result_mesh.faces.resize(triangle_count);
 	result_mesh.edges.reserve(triangle_mesh.indices.size());
 	result_mesh.attributes.resize(triangle_mesh.vertices.size() * attribute_stride_dwords);
 	
@@ -205,7 +206,7 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 	auto edge_id_allocator = EdgeID{ 0 };
 	std::unordered_map<u64, EdgeID> edge_to_edge_id;
 	
-	u32 triangle_count = (u32)(triangle_mesh.indices.size() / 3);
+	u32 active_face_count = 0;
 	for (u32 triangle_index = 0; triangle_index < triangle_count; triangle_index += 1) {
 		auto face_id = FaceID{ triangle_index };
 		
@@ -263,7 +264,9 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 			CornerListInsert<EdgeID>(mesh, corner.edge_id, corner_id);
 			CornerListInsert<FaceID>(mesh, corner.face_id, corner_id);
 		}
+		active_face_count += 1;
 	}
+	result_mesh.active_face_count = active_face_count;
 
 	return result_mesh;
 }
@@ -337,13 +340,19 @@ MeshView MeshToMeshView(Mesh& mesh) {
 	view.vertex_count    = (u32)mesh.vertices.size();
 	view.corner_count    = (u32)mesh.corners.size();
 	view.attribute_count = (u32)mesh.attributes.size() / attribute_stride_dwords;
+	view.active_face_count = mesh.active_face_count;
 	return view;
 }
 
 using RemovedEdgeArray = std::vector<EdgeID>;
 using EdgeDuplicateMap = std::unordered_map<u64, EdgeID>;
 
-static CornerID PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, EdgeDuplicateMap& edge_duplicate_map, RemovedEdgeArray& removed_edge_array) {
+struct EdgeCollapseResult {
+	CornerID remaning_base_id;
+	u32 removed_face_count = 0;
+};
+
+static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, EdgeDuplicateMap& edge_duplicate_map, RemovedEdgeArray& removed_edge_array) {
 	auto& edge = mesh[edge_id];
 	
 	assert(edge.vertex_0.index != edge.vertex_1.index);
@@ -356,6 +365,7 @@ static CornerID PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, EdgeDuplicate
 	assert(vertex_0.corner_list_base.index != vertex_1.corner_list_base.index);
 	
 	removed_edge_array.clear();
+	u32 removed_face_count = 0;
 	IterateCornerList<ElementType::Edge>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
 		auto& corner = mesh[corner_id];
 		auto& face   = mesh[corner.face_id];
@@ -363,9 +373,10 @@ static CornerID PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, EdgeDuplicate
 		IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
 			CornerListRemove<ElementType::Vertex>(mesh, corner_id);
 			bool edge_removed = CornerListRemove<ElementType::Edge>(mesh, corner_id);
-			CornerListRemove<ElementType::Face>(mesh, corner_id);
+			bool face_removed = CornerListRemove<ElementType::Face>(mesh, corner_id);
 			
 			if (edge_removed) removed_edge_array.push_back(mesh[corner_id].edge_id);
+			removed_face_count += (u32)face_removed;
 		});
 	});
 	
@@ -409,7 +420,12 @@ static CornerID PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, EdgeDuplicate
 		});
 	}
 	
-	return remaning_base_id;
+	
+	EdgeCollapseResult result;
+	result.remaning_base_id   = remaning_base_id;
+	result.removed_face_count = removed_face_count;
+	
+	return result;
 }
 
 
@@ -1201,16 +1217,18 @@ void DecimateMesh(MeshView mesh) {
 		EdgeCollapseHeapInitialize(edge_collapse_heap);
 	}
 	
-	u32 edges_collapsed = 0;
-	u32 target_edges_collapsed = mesh.edge_count * 21 / 64;
+	u32 target_face_count = mesh.face_count / 138;
+	u32 active_face_count = mesh.active_face_count;
+	s32 next_report_target = active_face_count + 1;
 	
 	u64 time0 = 0;
 	u64 time1 = 0;
 	
 	float max_error = 0.f;
-	while (edges_collapsed < target_edges_collapsed && edge_collapse_heap.edge_collapse_errors.size()) {
-		if ((target_edges_collapsed - edges_collapsed) % 10000 == 0) {
-			printf("Remaining: %u\n", target_edges_collapsed - edges_collapsed);
+	while (active_face_count > target_face_count && edge_collapse_heap.edge_collapse_errors.size()) {
+		if ((s32)active_face_count < next_report_target) {
+			printf("Remaining Faces: %u\n", active_face_count - target_face_count);
+			next_report_target -= 10000;
 			
 #if ENABLE_EDGE_COLLAPSE_HEAP_VALIDATION
 			EdgeCollapseHeapValidate(edge_collapse_heap);
@@ -1243,8 +1261,8 @@ void DecimateMesh(MeshView mesh) {
 		max_error = max_error < select_info.min_error ? select_info.min_error : max_error;
 		
 		// 15% of the execution time
-		auto remaning_base_id = PerformEdgeCollapse(mesh, edge_id, state.edge_duplicate_map, state.removed_edge_array);
-		edges_collapsed += 1;
+		auto [remaning_base_id, removed_face_count] = PerformEdgeCollapse(mesh, edge_id, state.edge_duplicate_map, state.removed_edge_array);
+		active_face_count -= removed_face_count;
 		
 		u32 edge_duplicate_map_size = (u32)state.edge_duplicate_map.size();
 		if (edge_duplicate_map_size > 255) edge_duplicate_map_size = 255;
@@ -1295,5 +1313,6 @@ void DecimateMesh(MeshView mesh) {
 	
 	printf("%.3f\n", (float)time0 / (float)time1);
 	printf("Max Error: %e\n", max_error);
+	printf("Face Count: %u\n", active_face_count);
 }
 
