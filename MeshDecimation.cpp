@@ -11,6 +11,7 @@
 // - Michael Garland, Paul S. Heckbert. 1997. Surface Simplification Using Quadric Error Metrics.
 // - Hugues Hoppe. 1999. New Quadric Metric for Simplifying Meshes with Appearance Attributes.
 // - HSUEH-TI DEREK LIU, XIAOTING ZHANG, CEM YUKSEL. 2024. Simplifying Triangle Meshes in the Wild.
+// - Hugues Hoppe, Steve Marschner. 2000. Efficient Minimization of New Quadric Metric for Simplifying Meshes with Appearance Attributes.
 //
 
 // fenv pragmas are an attempt at making compiler not optimize away (x + 0.f).
@@ -450,6 +451,16 @@ struct QuadricWithAttributes : Quadric {
 };
 
 
+//
+// Matt Pharr's blog. 2019. Accurate Differences of Products with Kahan's Algorithm.
+//
+static float DifferenceOfProducts(float a, float b, float c, float d) {
+	float cd = c * d;
+	float err = fmaf(c, -d,  cd);
+	float dop = fmaf(a,  b, -cd);
+	return dop + err;
+}
+
 static Vector3 operator+ (const Vector3& lh, const Vector3& rh) { return Vector3{ lh.x + rh.x, lh.y + rh.y, lh.z + rh.z }; }
 static Vector3 operator- (const Vector3& lh, const Vector3& rh) { return Vector3{ lh.x - rh.x, lh.y - rh.y, lh.z - rh.z }; }
 static Vector3 operator* (const Vector3& lh, float rh) { return Vector3{ lh.x * rh, lh.y * rh, lh.z * rh }; }
@@ -569,19 +580,19 @@ static void ComputeFaceQuadricWithAttributes(QuadricWithAttributes& quadric, con
 	//
 	
 	// Compute determinant of a 3x3 matrix A with rows p10, p20, n.
-	float det0 = p10.x * (p20.y * n.z - p20.z * n.y);
-	float det1 = p10.y * (p20.z * n.x - p20.x * n.z);
-	float det2 = p10.z * (p20.x * n.y - p20.y * n.x);
+	float det0 = p10.x * DifferenceOfProducts(p20.y, n.z, p20.z, n.y);
+	float det1 = p10.y * DifferenceOfProducts(p20.z, n.x, p20.x, n.z);
+	float det2 = p10.z * DifferenceOfProducts(p20.x, n.y, p20.y, n.x);
 	float determinant = det0 + det1 + det2;
-	float determinant_rcp = determinant == 0.f ? 0.f : 1.f / determinant;
+	float determinant_rcp = fabsf(determinant) < FLT_EPSILON ? 0.f : 1.f / determinant;
 	
 	// Compute first two colums of A^-1.
-	float a_inv_00 = (p20.y * n.z - p20.z * n.y) * determinant_rcp;
-	float a_inv_01 = (p10.z * n.y - p10.y * n.z) * determinant_rcp;
-	float a_inv_10 = (p20.z * n.x - p20.x * n.z) * determinant_rcp;
-	float a_inv_11 = (p10.x * n.z - p10.z * n.x) * determinant_rcp;
-	float a_inv_20 = (p20.x * n.y - p20.y * n.x) * determinant_rcp;
-	float a_inv_21 = (p10.y * n.x - p10.x * n.y) * determinant_rcp;
+	float a_inv_00 = DifferenceOfProducts(p20.y, n.z, p20.z, n.y) * determinant_rcp;
+	float a_inv_01 = DifferenceOfProducts(p10.z, n.y, p10.y, n.z) * determinant_rcp;
+	float a_inv_10 = DifferenceOfProducts(p20.z, n.x, p20.x, n.z) * determinant_rcp;
+	float a_inv_11 = DifferenceOfProducts(p10.x, n.z, p10.z, n.x) * determinant_rcp;
+	float a_inv_20 = DifferenceOfProducts(p20.x, n.y, p20.y, n.x) * determinant_rcp;
+	float a_inv_21 = DifferenceOfProducts(p10.y, n.x, p10.x, n.y) * determinant_rcp;
 	
 	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
 		float s0 = a0[i] * attribute_weight;
@@ -683,6 +694,93 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 	return fabsf(weighted_error);
 }
 
+static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, Vector3& optimal_position) {
+	//
+	// For reference see [Hugues Hoppe 2000] Section 3 Quadric Metric Minimization.
+	//
+	// Note that definition of b = (d, d0, di) is negated in [Hugues Hoppe 2000] relative to [Hugues Hoppe 1999].
+	// We're using definitions from [Hugues Hoppe 2000] where g*p + d = s.
+	//
+	
+	if (quadric.weight < FLT_EPSILON) return false;
+	
+	// K = B * B^T
+	float k00 = 0.f;
+	float k11 = 0.f;
+	float k22 = 0.f;
+	float k01 = 0.f;
+	float k02 = 0.f;
+	float k12 = 0.f;
+	
+	// h = B * b2
+	float h0 = 0.f;
+	float h1 = 0.f;
+	float h2 = 0.f;
+	
+#if ENABLE_ATTRIBUTE_SUPPORT
+	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
+		auto g = quadric.attributes[i].g;
+		auto d = quadric.attributes[i].d;
+		
+		// B * B^T
+		k00 += (g.x * g.x);
+		k11 += (g.y * g.y);
+		k22 += (g.z * g.z);
+		k01 += (g.x * g.y);
+		k02 += (g.x * g.z);
+		k12 += (g.y * g.z);
+		
+		// B * b2
+		h0 += ((float)g.x * (float)d);
+		h1 += ((float)g.y * (float)d);
+		h2 += ((float)g.z * (float)d);
+	}
+#endif // ENABLE_ATTRIBUTE_SUPPORT
+	
+	// M = C - B * B^T * (1.0 / alpha)
+	float rcp_weight = 1.f / quadric.weight;
+	float m00 = quadric.a00 - k00 * rcp_weight;
+	float m11 = quadric.a11 - k11 * rcp_weight;
+	float m22 = quadric.a22 - k22 * rcp_weight;
+	float m01 = quadric.a01 - k01 * rcp_weight;
+	float m02 = quadric.a02 - k02 * rcp_weight;
+	float m12 = quadric.a12 - k12 * rcp_weight;
+	
+	// Note that this expression is negated relative to [Hugues Hoppe 2000] because our b is using notation
+	// from [Hugues Hoppe 1999] where it's negated. So both h and quadric.b are negated.
+	float j0 = (h0 * rcp_weight - quadric.b.x);
+	float j1 = (h1 * rcp_weight - quadric.b.y);
+	float j2 = (h2 * rcp_weight - quadric.b.z);
+	
+	// Determinant of M.
+	float det0 = m00 * DifferenceOfProducts(m11, m22, m12, m12);
+	float det1 = m01 * DifferenceOfProducts(m01, m22, m12, m02);
+	float det2 = m02 * DifferenceOfProducts(m01, m12, m11, m02);
+	float determinant = det0 - det1 + det2;
+	
+	//
+	// As an alternative to inverting M [HSUEH-TI DEREK LIU 2024] suggests Cholesky decomposition.
+	// LU decomposition should work too. SVD could be used to find least squares solution.
+	//
+	if (fabsf(determinant) < FLT_EPSILON) return false;
+	float determinant_rcp = 1.f / determinant;
+	
+	//
+	// M inverse. Has to be computed with extra precision, otherwise vertex placement is all over the place.
+	//
+	float m_inv_00 = DifferenceOfProducts(m11, m22, m12, m12);
+	float m_inv_01 = DifferenceOfProducts(m02, m12, m01, m22);
+	float m_inv_02 = DifferenceOfProducts(m01, m12, m02, m11);
+	float m_inv_11 = DifferenceOfProducts(m00, m22, m02, m02);
+	float m_inv_12 = DifferenceOfProducts(m02, m01, m00, m12);
+	float m_inv_22 = DifferenceOfProducts(m00, m11, m01, m01);
+	
+	optimal_position.x = (m_inv_00 * j0 + m_inv_01 * j1 + m_inv_02 * j2) * determinant_rcp;
+	optimal_position.y = (m_inv_01 * j0 + m_inv_11 * j1 + m_inv_12 * j2) * determinant_rcp;
+	optimal_position.z = (m_inv_02 * j0 + m_inv_12 * j1 + m_inv_22 * j2) * determinant_rcp;
+	
+	return true;
+}
 
 // Check if any triangle around the collapsed edge is flipped or becomes zero area, excluding collapsed triangles.
 static bool ValidateEdgeCollapsePosition(MeshView mesh, Edge edge, const Vector3& new_position) {
@@ -833,7 +931,17 @@ void ComputeEdgeCollapseError(MeshView mesh, MeshDecimationState& state, EdgeID 
 		candidate_positions[1] = v1.position;
 		candidate_positions[2] = (candidate_positions[0] + candidate_positions[1]) * 0.5f;
 		
+		QuadricWithAttributes total_quadric;
+		AccumulateQuadric(total_quadric, edge_quadrics);
+		
 		u32 wedge_count = (u32)state.wedge_quadrics.size();
+		for (u32 i = 0; i < wedge_count; i += 1) {
+			 AccumulateQuadricWithAttributes(total_quadric, state.wedge_quadrics[i]);
+		}
+		
+		// Override average with optimal position if it can be computed.
+		ComputeOptimalVertexPosition(total_quadric, candidate_positions[2]);
+		
 		for (u32 i = 0; i < candidate_position_count; i += 1) {
 			auto& p = candidate_positions[i];
 			
@@ -1072,10 +1180,6 @@ void DecimateMesh(MeshView mesh) {
 		}
 	}
 	
-	// TODO: Remove once it's no longer useful.
-	u32 neighbourhood_size_histogram[256];
-	memset(neighbourhood_size_histogram, 0, sizeof(neighbourhood_size_histogram));
-	
 	
 	EdgeCollapseHeap edge_collapse_heap;
 	edge_collapse_heap.edge_collapse_errors.resize(mesh.edge_count);
@@ -1103,8 +1207,9 @@ void DecimateMesh(MeshView mesh) {
 	u64 time0 = 0;
 	u64 time1 = 0;
 	
+	float max_error = 0.f;
 	while (edges_collapsed < target_edges_collapsed && edge_collapse_heap.edge_collapse_errors.size()) {
-		if ((target_edges_collapsed - edges_collapsed) % 1000 == 0) {
+		if ((target_edges_collapsed - edges_collapsed) % 10000 == 0) {
 			printf("Remaining: %u\n", target_edges_collapsed - edges_collapsed);
 			
 #if ENABLE_EDGE_COLLAPSE_HEAP_VALIDATION
@@ -1135,14 +1240,14 @@ void DecimateMesh(MeshView mesh) {
 		EdgeSelectInfo select_info;
 		ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
 		
+		max_error = max_error < select_info.min_error ? select_info.min_error : max_error;
+		
 		// 15% of the execution time
 		auto remaning_base_id = PerformEdgeCollapse(mesh, edge_id, state.edge_duplicate_map, state.removed_edge_array);
 		edges_collapsed += 1;
 		
 		u32 edge_duplicate_map_size = (u32)state.edge_duplicate_map.size();
 		if (edge_duplicate_map_size > 255) edge_duplicate_map_size = 255;
-		
-		neighbourhood_size_histogram[edge_duplicate_map_size] += 1;
 		
 		for (auto edge_id : state.removed_edge_array) {
 			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[edge_id.index];
@@ -1188,10 +1293,7 @@ void DecimateMesh(MeshView mesh) {
 		time1 += (t2 - t0);
 	}
 	
-	for (u32 i = 0; i < 256; i += 1) {
-		printf("%u: %u\n", i, neighbourhood_size_histogram[i]);
-	}
-	
-	printf("%.3f\n", (double)time0 / (double)time1);
+	printf("%.3f\n", (float)time0 / (float)time1);
+	printf("Max Error: %e\n", max_error);
 }
 
