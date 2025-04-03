@@ -667,7 +667,7 @@ static float ComputeQuadricError(const Quadric& q, const Vector3& p) {
 	return fabsf(weighted_error);
 }
 
-static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, const Vector3& p, float* attributes) {
+static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, const Vector3& p) {
 	//
 	// error = p^T * A * p + 2 * b * v + c
 	//
@@ -680,17 +680,14 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 	float weighted_error = ComputeQuadricError(q, p);
 	
 #if ENABLE_ATTRIBUTE_SUPPORT
-	float rcp_weight = q.weight < FLT_EPSILON ? 0.f : (1.f / q.weight);
+	if (q.weight < FLT_EPSILON) return weighted_error;
+	
+	float rcp_weight = 1.f / q.weight;
 	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
 		auto g = q.attributes[i].g;
 		auto d = q.attributes[i].d;
-		if (q.weight <= 0.f) continue; // TODO: Check if we hit this and how we should handle fallback.
 		
 		float s = (DotProduct(g, p) + d) * rcp_weight;
-		
-		if constexpr (attribute_weight > 0.f) {
-			attributes[i] = s * (1.f / attribute_weight);
-		}
 		
 		//
 		// Simplified by replacing first three lines with a dot product, and substituting -DotProduct(g, p) for (d - s * q.weight).
@@ -708,6 +705,24 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 #endif // ENABLE_ATTRIBUTE_SUPPORT
 	
 	return fabsf(weighted_error);
+}
+
+// Attribute computation for zero weight quadrics should be handled by the caller.
+static bool ComputeWedgeAttributes(const QuadricWithAttributes& q, const Vector3& p, float* attributes) {
+	if constexpr (attribute_weight <= 0.f) return false;
+	if (q.weight < FLT_EPSILON) return false;
+	
+	float rcp_weight = 1.f / q.weight;
+	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
+		auto g = q.attributes[i].g;
+		auto d = q.attributes[i].d;
+		
+		float s = (DotProduct(g, p) + d) * rcp_weight;
+		
+		attributes[i] = s * (1.f / attribute_weight);
+	}
+	
+	return true;
 }
 
 static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, Vector3& optimal_position) {
@@ -964,8 +979,7 @@ void ComputeEdgeCollapseError(MeshView mesh, MeshDecimationState& state, EdgeID 
 			float error = ComputeQuadricError(edge_quadrics, p);
 			
 			for (u32 i = 0; i < wedge_count; i += 1) {
-				float attributes[attribute_stride_dwords];
-				error += ComputeQuadricErrorWithAttributes(state.wedge_quadrics[i], p, attributes);
+				error += ComputeQuadricErrorWithAttributes(state.wedge_quadrics[i], p);
 			}
 			if (error > info->min_error) continue;
 			
@@ -1289,8 +1303,19 @@ void DecimateMesh(MeshView mesh) {
 				state.wedge_attributes.resize(wedge_count * attribute_stride_dwords);
 				
 				for (u32 i = 0; i < wedge_count; i += 1) {
-					ComputeQuadricErrorWithAttributes(state.wedge_quadrics[i], select_info.new_position, &state.wedge_attributes[i * attribute_stride_dwords]);
-					state.attribute_face_quadrics[state.wedge_attributes_ids[i].index] = state.wedge_quadrics[i];
+					auto* attributes = &state.wedge_attributes[i * attribute_stride_dwords];
+					auto& wedge_quadric = state.wedge_quadrics[i];
+					auto attributes_id = state.wedge_attributes_ids[i];
+					
+					state.attribute_face_quadrics[attributes_id.index] = wedge_quadric;
+					if (ComputeWedgeAttributes(wedge_quadric, select_info.new_position, attributes)) {
+						// TODO: Provide a way to pick which attributes should be normalized.
+						auto* normal = (Vector3*)(attributes + 2);
+						*normal = Normalize(*normal);
+					} else {
+						// Zero weight wedge. In theory there is no difference which attributes we take.
+						memcpy(attributes, mesh[attributes_id], sizeof(u32) * attribute_stride_dwords);
+					}
 				}
 				
 				IterateCornerList<ElementType::Vertex>(mesh, remaning_base_id, [&](CornerID corner_id) {
