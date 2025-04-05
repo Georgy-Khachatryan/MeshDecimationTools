@@ -1,6 +1,5 @@
 #include "MeshDecimation.h"
 
-#include <unordered_map>
 #include <vector>
 #include <intrin.h>
 #include <assert.h>
@@ -236,9 +235,6 @@ static EdgeID HashTableAddOrFind(EdgeHashTable& table, std::vector<Edge>& edges,
 	return EdgeID{ u32_max };
 }
 
-#define USE_STL_HASH_TABLE 0
-
-#if USE_STL_HASH_TABLE == 0
 struct EdgeDuplicateMap {
 	struct KeyValue {
 		u64 edge_key;
@@ -300,7 +296,6 @@ static EdgeID HashTableAddOrFind(EdgeDuplicateMap& table, u64 edge_key, EdgeID e
 	
 	return EdgeID{ u32_max };
 }
-#endif // USE_STL_HASH_TABLE == 0
 
 static u64 ComputeHashTableSize(u64 max_element_count) {
 	u64 hash_table_size = 1;
@@ -475,9 +470,6 @@ MeshView MeshToMeshView(Mesh& mesh) {
 }
 
 using RemovedEdgeArray = std::vector<EdgeID>;
-#if USE_STL_HASH_TABLE
-using EdgeDuplicateMap = std::unordered_map<u64, EdgeID>;
-#endif // USE_STL_HASH_TABLE
 
 struct EdgeCollapseResult {
 	CornerID remaning_base_id;
@@ -516,33 +508,17 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Edg
 	
 	auto remaning_base_id = vertex_0.corner_list_base.index != u32_max ? vertex_0.corner_list_base : vertex_1.corner_list_base;
 	if (remaning_base_id.index != u32_max) {
-#if USE_STL_HASH_TABLE
-		edge_duplicate_map.clear();
-#else // USE_STL_HASH_TABLE
-		// HashTableClear(edge_duplicate_map);
-#endif // USE_STL_HASH_TABLE
-		
 		IterateCornerList<ElementType::Vertex>(mesh, remaning_base_id, [&](CornerID corner_id) {
 			// TODO: This can be iteration over just incoming and outgoing edges of a corner.
 			IterateCornerList<ElementType::Face>(mesh, corner_id, [&](CornerID corner_id) {
 				auto edge_id_1 = mesh[corner_id].edge_id;
 				auto& edge_1 = mesh[edge_id_1];
 				
-#if USE_STL_HASH_TABLE
-				auto [it, is_inserted] = edge_duplicate_map.emplace(PackEdgeKey(edge_1.vertex_0, edge_1.vertex_1), edge_id_1);
-				auto edge_id_0 = it->second;
-				
-				if (is_inserted == false && edge_id_0.index != edge_id_1.index) {
-					CornerListMerge<EdgeID>(mesh, edge_id_0, edge_id_1);
-					removed_edge_array.push_back(edge_id_1);
-				}
-#else // !USE_STL_HASH_TABLE
 				auto edge_id_0 = HashTableAddOrFind(edge_duplicate_map, PackEdgeKey(edge_1.vertex_0, edge_1.vertex_1), edge_id_1);
 				if (edge_id_0.index != edge_id_1.index) {
 					CornerListMerge<EdgeID>(mesh, edge_id_0, edge_id_1);
 					removed_edge_array.push_back(edge_id_1);
 				}
-#endif // !USE_STL_HASH_TABLE
 			});
 		});
 		
@@ -557,11 +533,7 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Edg
 						auto edge_id = mesh[corner_id].edge_id;
 						auto& edge = mesh[edge_id];
 						
-#if USE_STL_HASH_TABLE
-						edge_duplicate_map.emplace(PackEdgeKey(edge.vertex_0, edge.vertex_1), edge_id);
-#else // !USE_STL_HASH_TABLE
 						HashTableAddOrFind(edge_duplicate_map, PackEdgeKey(edge.vertex_0, edge.vertex_1), edge_id);
-#endif // !USE_STL_HASH_TABLE
 					});
 				});
 			});
@@ -1412,11 +1384,7 @@ void DecimateMesh(MeshView mesh) {
 	u64 time0 = 0;
 	u64 time1 = 0;
 	
-#if USE_STL_HASH_TABLE
-	state.edge_duplicate_map.reserve(128u);
-#else // !USE_STL_HASH_TABLE
 	state.edge_duplicate_map.keys_values.resize(ComputeHashTableSize(128u));
-#endif // !USE_STL_HASH_TABLE
 	
 	float max_error = 0.f;
 	while (active_face_count > target_face_count && edge_collapse_heap.edge_collapse_errors.size()) {
@@ -1432,12 +1400,8 @@ void DecimateMesh(MeshView mesh) {
 		u64 t0 = __rdtsc();
 		
 		// ~80% of the execution time.
-#if USE_STL_HASH_TABLE
-		for (auto& [edge_key, edge_id] : state.edge_duplicate_map) {
-#else // !USE_STL_HASH_TABLE
 		for (auto& [edge_key, edge_id] : state.edge_duplicate_map.keys_values) {
 			if (edge_key == u64_max) continue;
-#endif // !USE_STL_HASH_TABLE
 			
 			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[edge_id.index];
 			if (heap_index == u32_max) continue;
@@ -1447,11 +1411,7 @@ void DecimateMesh(MeshView mesh) {
 			
 			EdgeCollapseHeapUpdate(edge_collapse_heap, heap_index, select_info.min_error);
 		}
-#if USE_STL_HASH_TABLE
-		state.edge_duplicate_map.clear();
-#else // !USE_STL_HASH_TABLE
 		HashTableClear(state.edge_duplicate_map);
-#endif // !USE_STL_HASH_TABLE
 		
 		u64 t1 = __rdtsc();
 		time0 += (t1 - t0);
