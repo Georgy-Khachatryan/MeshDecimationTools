@@ -111,8 +111,14 @@ struct Face {
 };
 
 struct Edge {
-	VertexID vertex_0;
-	VertexID vertex_1;
+	union {
+		struct {
+			VertexID vertex_0;
+			VertexID vertex_1;
+		};
+		u64 edge_key = 0;
+	};
+	
 	CornerID corner_list_base; // Corner list around an edge.
 };
 

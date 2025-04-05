@@ -217,15 +217,14 @@ static EdgeID HashTableAddOrFind(EdgeHashTable& table, std::vector<Edge>& edges,
 			table.edge_ids[index] = new_edge_id;
 			
 			auto& edge = edges.emplace_back();
-			edge.vertex_0 = VertexID{ (u32)(edge_key >> 0) };
-			edge.vertex_1 = VertexID{ (u32)(edge_key >> u32_bit_count) };
+			edge.edge_key = edge_key;
 			edge.corner_list_base.index = u32_max;
 			
 			edge_id_allocator.index += 1;
 			return new_edge_id;
 		}
 		
-		if (*(u64*)&mesh[edge_id] == edge_key) {
+		if (mesh[edge_id].edge_key == edge_key) {
 			return edge_id;
 		}
 		
