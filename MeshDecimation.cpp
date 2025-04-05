@@ -167,6 +167,118 @@ static void CornerListMerge(MeshView mesh, ElementID element_0, ElementID elemen
 	}
 }
 
+struct VertexHashTable {
+	std::vector<VertexID> vertex_ids;
+};
+
+#define OUTPUT_HASH_TABLE_STATS 0
+
+#if OUTPUT_HASH_TABLE_STATS
+u32 vertex_histogram[256] = { 0 };
+u32 edge_histogram[256] = { 0 };
+#endif // OUTPUT_HASH_TABLE_STATS
+
+static VertexID HashTableAddOrFind(VertexHashTable& table, MeshView mesh, std::vector<Vertex>& vertices, const Vector3& position, VertexID& vertex_id_allocator) {
+	u64 table_size = table.vertex_ids.size();
+	u64 mod_mask   = table_size - 1u;
+	
+	u64 hash      = VertexHasher::PositionHash(position);
+	u64 index     = (hash & mod_mask);
+	u64 increment = 1;
+	
+	for (u64 i = 0; i < table_size; i += 1) {
+		auto vertex_id = table.vertex_ids[index];
+		
+		if (vertex_id.index == u32_max) {
+			auto new_vertex_id = vertex_id_allocator;
+			table.vertex_ids[index] = new_vertex_id;
+			
+			auto& vertex = vertices.emplace_back();
+			vertex.position = position;
+			vertex.corner_list_base.index = u32_max;
+			
+#if OUTPUT_HASH_TABLE_STATS
+			vertex_histogram[i >= 256 ? 255 : i] += 1;
+#endif // OUTPUT_HASH_TABLE_STATS
+			
+			vertex_id_allocator.index += 1;
+			return new_vertex_id;
+		}
+		
+		if (mesh[vertex_id].position == position) {
+#if OUTPUT_HASH_TABLE_STATS
+			vertex_histogram[i >= 256 ? 255 : i] += 1;
+#endif // OUTPUT_HASH_TABLE_STATS
+			return vertex_id;
+		}
+		
+		index = (index + increment) & mod_mask;
+		increment += 1;
+	}
+	
+	__debugbreak();
+	
+	return VertexID{ u32_max };
+}
+
+struct EdgeHashTable {
+	std::vector<EdgeID> edge_ids;
+};
+
+static EdgeID HashTableAddOrFind(EdgeHashTable& table, std::vector<Edge>& edges, MeshView mesh, u64 edge_key, EdgeID& edge_id_allocator) {
+	u64 table_size = table.edge_ids.size();
+	u64 mod_mask   = table_size - 1u;
+	
+	u64 hash      = std::hash<u64>{}(edge_key);
+	u64 index     = (hash & mod_mask);
+	u64 increment = 1;
+	
+	for (u64 i = 0; i < table_size; i += 1) {
+		auto edge_id = table.edge_ids[index];
+		
+		if (edge_id.index == u32_max) {
+			auto new_edge_id = edge_id_allocator;
+			table.edge_ids[index] = new_edge_id;
+			
+			auto& edge = edges.emplace_back();
+			edge.vertex_0 = VertexID{ (u32)(edge_key >> 0) };
+			edge.vertex_1 = VertexID{ (u32)(edge_key >> u32_bit_count) };
+			edge.corner_list_base.index = u32_max;
+			
+#if OUTPUT_HASH_TABLE_STATS
+			edge_histogram[i >= 256 ? 255 : i] += 1;
+#endif // OUTPUT_HASH_TABLE_STATS
+			
+			edge_id_allocator.index += 1;
+			return new_edge_id;
+		}
+		
+		if (*(u64*)&mesh[edge_id] == edge_key) {
+#if OUTPUT_HASH_TABLE_STATS
+			edge_histogram[i >= 256 ? 255 : i] += 1;
+#endif // OUTPUT_HASH_TABLE_STATS
+			return edge_id;
+		}
+		
+		index = (index + increment) & mod_mask;
+		increment += 1;
+	}
+	
+	__debugbreak();
+	
+	return EdgeID{ u32_max };
+}
+
+static u64 ComputeHashTableSize(u64 max_element_count) {
+	u64 hash_table_size = 1;
+	
+	while (hash_table_size < max_element_count + max_element_count / 4) {
+		hash_table_size = hash_table_size * 2;
+	}
+	
+	return hash_table_size;
+}
+
 
 Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 	std::vector<VertexID> src_vertex_index_to_vertex_id;
@@ -184,12 +296,21 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 	auto mesh = MeshToMeshView(result_mesh);
 	
 	auto vertex_id_allocator = VertexID{ 0 };
+	
+#define USE_STL_HASH_TABLE 0
+#if USE_STL_HASH_TABLE
 	std::unordered_map<Vector3, VertexID, VertexHasher> vertex_position_to_id;
+	vertex_position_to_id.reserve(triangle_mesh.vertices.size());
+#else // !USE_STL_HASH_TABLE
+	VertexHashTable table;
+	table.vertex_ids.resize(ComputeHashTableSize(triangle_mesh.vertices.size()), VertexID{ u32_max });
+#endif // !USE_STL_HASH_TABLE
 
 	for (u32 vertex_index = 0; vertex_index < triangle_mesh.vertices.size(); vertex_index += 1) {
 		auto& position = triangle_mesh.vertices[vertex_index].position;
 		memcpy(mesh[AttributesID{ vertex_index }], (float*)&triangle_mesh.vertices[vertex_index] + 3, attribute_stride_dwords * sizeof(u32));
 		
+#if USE_STL_HASH_TABLE
 		auto [it, is_inserted] = vertex_position_to_id.emplace(position, vertex_id_allocator);
 		if (is_inserted) {
 			auto& vertex = result_mesh.vertices.emplace_back();
@@ -200,11 +321,20 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 		}
 		
 		src_vertex_index_to_vertex_id[vertex_index] = it->second;
+#else // !USE_STL_HASH_TABLE
+		auto vertex_id = HashTableAddOrFind(table, mesh, result_mesh.vertices, position, vertex_id_allocator);
+		src_vertex_index_to_vertex_id[vertex_index] = vertex_id;
+#endif // !USE_STL_HASH_TABLE
 	}
 	
-	
 	auto edge_id_allocator = EdgeID{ 0 };
+#if USE_STL_HASH_TABLE
 	std::unordered_map<u64, EdgeID> edge_to_edge_id;
+	edge_to_edge_id.reserve(triangle_mesh.indices.size());
+#else // !USE_STL_HASH_TABLE
+	EdgeHashTable edge_table;
+	edge_table.edge_ids.resize(ComputeHashTableSize(triangle_mesh.indices.size()), EdgeID{ u32_max });
+#endif // !USE_STL_HASH_TABLE
 	
 	u32 active_face_count = 0;
 	for (u32 triangle_index = 0; triangle_index < triangle_count; triangle_index += 1) {
@@ -244,6 +374,7 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 			auto corner_id = CornerID{ triangle_index * 3 + corner_index };
 			u64 edge_key = edge_keys[corner_index];
 			
+#if USE_STL_HASH_TABLE
 			auto [it, is_inserted] = edge_to_edge_id.emplace(edge_key, edge_id_allocator);
 			if (is_inserted) {
 				auto& edge = result_mesh.edges.emplace_back();
@@ -253,12 +384,21 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 				
 				edge_id_allocator.index += 1;
 			}
-
+			
 			auto& corner = mesh[corner_id];
 			corner.face_id       = face_id;
 			corner.edge_id       = it->second;
 			corner.vertex_id     = vertex_ids[corner_index];
 			corner.attributes_id = { indices[corner_index] };
+#else // !USE_STL_HASH_TABLE
+			auto edge_id = HashTableAddOrFind(edge_table, result_mesh.edges, mesh, edge_key, edge_id_allocator);
+
+			auto& corner = mesh[corner_id];
+			corner.face_id       = face_id;
+			corner.edge_id       = edge_id;
+			corner.vertex_id     = vertex_ids[corner_index];
+			corner.attributes_id = { indices[corner_index] };
+#endif // !USE_STL_HASH_TABLE
 
 			CornerListInsert<VertexID>(mesh, corner.vertex_id, corner_id);
 			CornerListInsert<EdgeID>(mesh, corner.edge_id, corner_id);
