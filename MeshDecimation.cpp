@@ -166,7 +166,7 @@ struct VertexHashTable {
 	std::vector<VertexID> vertex_ids;
 };
 
-static VertexID HashTableAddOrFind(VertexHashTable& table, MeshView mesh, std::vector<Vertex>& vertices, const Vector3& position, VertexID& vertex_id_allocator) {
+static VertexID HashTableAddOrFind(VertexHashTable& table, std::vector<Vertex>& vertices, const Vector3& position) {
 	u64 table_size = table.vertex_ids.size();
 	u64 mod_mask   = table_size - 1u;
 	
@@ -177,18 +177,17 @@ static VertexID HashTableAddOrFind(VertexHashTable& table, MeshView mesh, std::v
 		auto vertex_id = table.vertex_ids[index];
 		
 		if (vertex_id.index == u32_max) {
-			auto new_vertex_id = vertex_id_allocator;
+			auto new_vertex_id = VertexID{ (u32)vertices.size() };
 			table.vertex_ids[index] = new_vertex_id;
 			
 			auto& vertex = vertices.emplace_back();
 			vertex.position = position;
 			vertex.corner_list_base.index = u32_max;
 			
-			vertex_id_allocator.index += 1;
 			return new_vertex_id;
 		}
 		
-		if (mesh[vertex_id].position == position) {
+		if (vertices[vertex_id.index].position == position) {
 			return vertex_id;
 		}
 		
@@ -202,7 +201,7 @@ struct EdgeHashTable {
 	std::vector<EdgeID> edge_ids;
 };
 
-static EdgeID HashTableAddOrFind(EdgeHashTable& table, std::vector<Edge>& edges, MeshView mesh, u64 edge_key, EdgeID& edge_id_allocator) {
+static EdgeID HashTableAddOrFind(EdgeHashTable& table, std::vector<Edge>& edges, u64 edge_key) {
 	u64 table_size = table.edge_ids.size();
 	u64 mod_mask   = table_size - 1u;
 	
@@ -213,18 +212,17 @@ static EdgeID HashTableAddOrFind(EdgeHashTable& table, std::vector<Edge>& edges,
 		auto edge_id = table.edge_ids[index];
 		
 		if (edge_id.index == u32_max) {
-			auto new_edge_id = edge_id_allocator;
+			auto new_edge_id = EdgeID{ (u32)edges.size() };
 			table.edge_ids[index] = new_edge_id;
 			
 			auto& edge = edges.emplace_back();
 			edge.edge_key = edge_key;
 			edge.corner_list_base.index = u32_max;
 			
-			edge_id_allocator.index += 1;
 			return new_edge_id;
 		}
 		
-		if (mesh[edge_id].edge_key == edge_key) {
+		if (edges[edge_id.index].edge_key == edge_key) {
 			return edge_id;
 		}
 		
@@ -325,19 +323,17 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 	
 	VertexHashTable table;
 	table.vertex_ids.resize(ComputeHashTableSize(triangle_mesh.vertices.size()), VertexID{ u32_max });
-	auto vertex_id_allocator = VertexID{ 0 };
-	
+
 	for (u32 vertex_index = 0; vertex_index < triangle_mesh.vertices.size(); vertex_index += 1) {
 		auto& position = triangle_mesh.vertices[vertex_index].position;
 		memcpy(mesh[AttributesID{ vertex_index }], (float*)&triangle_mesh.vertices[vertex_index] + 3, attribute_stride_dwords * sizeof(u32));
 		
-		auto vertex_id = HashTableAddOrFind(table, mesh, result_mesh.vertices, position, vertex_id_allocator);
+		auto vertex_id = HashTableAddOrFind(table, result_mesh.vertices, position);
 		src_vertex_index_to_vertex_id[vertex_index] = vertex_id;
 	}
 	
 	EdgeHashTable edge_table;
 	edge_table.edge_ids.resize(ComputeHashTableSize(triangle_mesh.indices.size()), EdgeID{ u32_max });
-	auto edge_id_allocator = EdgeID{ 0 };
 	
 	u32 active_face_count = 0;
 	for (u32 triangle_index = 0; triangle_index < triangle_count; triangle_index += 1) {
@@ -376,7 +372,7 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 		for (u32 corner_index = 0; corner_index < 3; corner_index += 1) {
 			auto corner_id = CornerID{ triangle_index * 3 + corner_index };
 			
-			auto edge_id = HashTableAddOrFind(edge_table, result_mesh.edges, mesh, edge_keys[corner_index], edge_id_allocator);
+			auto edge_id = HashTableAddOrFind(edge_table, result_mesh.edges, edge_keys[corner_index]);
 			
 			auto& corner = mesh[corner_id];
 			corner.face_id       = face_id;
