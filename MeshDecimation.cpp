@@ -546,7 +546,7 @@ static void ComputePlanarQuadric(Quadric& quadric, const Vector3& n, float d, fl
 }
 
 // Assumes that the quadric edge is (p0, p1)
-static void ComputeEdgeQuadric(Quadric& quadric, const Vector3& p0, const Vector3& p1, const Vector3& p2) {
+static void ComputeEdgeQuadric(Quadric& quadric, const Vector3& p0, const Vector3& p1, const Vector3& p2, float weight) {
 	auto p10 = p1 - p0;
 	auto p20 = p2 - p0;
 	
@@ -556,7 +556,7 @@ static void ComputeEdgeQuadric(Quadric& quadric, const Vector3& p0, const Vector
 	auto normal                = normal_length < FLT_EPSILON ? normal_direction : normal_direction * (1.f / normal_length); // TODO: Potential division by zero. Handle better.
 	auto distance_to_triangle  = -DotProduct(normal, p1);
 	
-	ComputePlanarQuadric(quadric, normal, distance_to_triangle, Length(p10));
+	ComputePlanarQuadric(quadric, normal, distance_to_triangle, DotProduct(p10, p10) * weight);
 }
 
 // TODO: Convert these constants into user editable settings.
@@ -707,6 +707,7 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 	return fabsf(weighted_error);
 }
 
+#if ENABLE_ATTRIBUTE_SUPPORT
 // Attribute computation for zero weight quadrics should be handled by the caller.
 static bool ComputeWedgeAttributes(const QuadricWithAttributes& q, const Vector3& p, float* attributes) {
 	if constexpr (attribute_weight <= 0.f) return false;
@@ -724,6 +725,7 @@ static bool ComputeWedgeAttributes(const QuadricWithAttributes& q, const Vector3
 	
 	return true;
 }
+#endif // ENABLE_ATTRIBUTE_SUPPORT
 
 static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, Vector3& optimal_position) {
 	//
@@ -814,8 +816,8 @@ static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, V
 }
 
 // Check if any triangle around the collapsed edge is flipped or becomes zero area, excluding collapsed triangles.
-static bool ValidateEdgeCollapsePosition(MeshView mesh, Edge edge, const Vector3& new_position) {
-	bool reject_edge_collapse = false;
+static u32 ValidateEdgeCollapsePositions(MeshView mesh, Edge edge, Vector3* candidate_positions, u32 candidate_position_count) {
+	u32 valid_position_mask = (1u << candidate_position_count) - 1u;
 	
 	auto check_triangle_flip_for_vertex = [&](CornerID corner_id)-> IterationControl {
 		auto& c1 = mesh[corner_id];
@@ -824,33 +826,44 @@ static bool ValidateEdgeCollapsePosition(MeshView mesh, Edge edge, const Vector3
 		auto v1 = c1.vertex_id;
 		auto v2 = mesh[c1.corner_list_around[(u32)ElementType::Face].next].vertex_id;
 		
-		auto p0 = mesh[v0].position;
-		auto p1 = mesh[v1].position;
-		auto p2 = mesh[v2].position;
+		Vector3 p[3] = {
+			mesh[v0].position,
+			mesh[v1].position,
+			mesh[v2].position,
+		};
 		
-		auto n0 = CrossProduct(p1 - p0, p2 - p0);
+		auto n0 = CrossProduct(p[1] - p[0], p[2] - p[0]);
 		
 		u32 replaced_vertex_count = 0;
-		if (v0.index == edge.vertex_0.index || v0.index == edge.vertex_1.index) { replaced_vertex_count += 1; p0 = new_position; }
-		if (v1.index == edge.vertex_0.index || v1.index == edge.vertex_1.index) { replaced_vertex_count += 1; p1 = new_position; }
-		if (v2.index == edge.vertex_0.index || v2.index == edge.vertex_1.index) { replaced_vertex_count += 1; p2 = new_position; }
+		u32 replaced_vertex_index = 0;
+		if (v0.index == edge.vertex_0.index || v0.index == edge.vertex_1.index) { replaced_vertex_count += 1; replaced_vertex_index = 0; }
+		if (v1.index == edge.vertex_0.index || v1.index == edge.vertex_1.index) { replaced_vertex_count += 1; replaced_vertex_index = 1; }
+		if (v2.index == edge.vertex_0.index || v2.index == edge.vertex_1.index) { replaced_vertex_count += 1; replaced_vertex_index = 2; }
 		
 		// Replaced vertex count == 0 is impossible.
 		// Replaced vertex count == 2 is true for triangles that would get collapsed, we don't need to check if they flip.
 		if (replaced_vertex_count == 1) {
-			auto n1 = CrossProduct(p1 - p0, p2 - p0);
-			
-			// Prevent flipped or zero area triangles.
-			reject_edge_collapse |= (DotProduct(n0, n1) < 0.f) || (DotProduct(n0, n0) > FLT_EPSILON && DotProduct(n1, n1) < FLT_EPSILON);
+			for (u32 i = 0; i < candidate_position_count; i += 1) {
+				p[replaced_vertex_index] = candidate_positions[i];
+				
+				auto n1 = CrossProduct(p[1] - p[0], p[2] - p[0]);
+				
+				// Prevent flipped or zero area triangles.
+				bool reject_edge_collapse = (DotProduct(n0, n1) < 0.f) || (DotProduct(n0, n0) > FLT_EPSILON && DotProduct(n1, n1) < FLT_EPSILON);
+				
+				if (reject_edge_collapse) {
+					valid_position_mask &= ~(1u << i);
+				}
+			}
 		}
 		
-		return reject_edge_collapse ? IterationControl::Break : IterationControl::Continue;
+		return valid_position_mask ? IterationControl::Continue : IterationControl::Break;
 	};
 	
-	if (reject_edge_collapse == false) IterateCornerList<ElementType::Vertex>(mesh, mesh[edge.vertex_0].corner_list_base, check_triangle_flip_for_vertex);
-	if (reject_edge_collapse == false) IterateCornerList<ElementType::Vertex>(mesh, mesh[edge.vertex_1].corner_list_base, check_triangle_flip_for_vertex);
+	if (valid_position_mask) IterateCornerList<ElementType::Vertex>(mesh, mesh[edge.vertex_0].corner_list_base, check_triangle_flip_for_vertex);
+	if (valid_position_mask) IterateCornerList<ElementType::Vertex>(mesh, mesh[edge.vertex_1].corner_list_base, check_triangle_flip_for_vertex);
 	
-	return reject_edge_collapse == false;
+	return valid_position_mask;
 }
 
 
@@ -973,10 +986,16 @@ void ComputeEdgeCollapseError(MeshView mesh, MeshDecimationState& state, EdgeID 
 		// Override average with optimal position if it can be computed.
 		ComputeOptimalVertexPosition(total_quadric, candidate_positions[2]);
 		
+		u32 valid_position_mask = ValidateEdgeCollapsePositions(mesh, edge, candidate_positions, candidate_position_count);
 		for (u32 i = 0; i < candidate_position_count; i += 1) {
 			auto& p = candidate_positions[i];
 			
-			float error = ComputeQuadricError(edge_quadrics, p);
+			float error = valid_position_mask & (1u << i) ? 0.f : inversion_error;
+			if (error > info->min_error) continue;
+			
+			
+			error += ComputeQuadricError(edge_quadrics, p);
+			if (error > info->min_error) continue;
 			
 			for (u32 i = 0; i < wedge_count; i += 1) {
 				error += ComputeQuadricErrorWithAttributes(state.wedge_quadrics[i], p);
@@ -984,9 +1003,6 @@ void ComputeEdgeCollapseError(MeshView mesh, MeshDecimationState& state, EdgeID 
 			if (error > info->min_error) continue;
 			
 			
-			error += ValidateEdgeCollapsePosition(mesh, edge, p) ? 0.f : inversion_error;
-			if (error > info->min_error) continue;
-
 			info->min_error = error;
 			info->new_position = p;
 		}
@@ -1185,25 +1201,35 @@ void DecimateMesh(MeshView mesh) {
 			auto& edge = mesh[edge_id];
 			if (edge.corner_list_base.index == u32_max) continue;
 			
-			u32 degree = 0;
-			IterateCornerList<ElementType::Edge>(mesh, edge.corner_list_base, [&](CornerID) {
-				degree += 1;
-			});
-			if (degree != 1) continue;
+			auto& c0 = mesh[edge.corner_list_base];
+			auto& c1 = mesh[c0.corner_list_around[(u32)ElementType::Face].next];
+			auto& c2 = mesh[c0.corner_list_around[(u32)ElementType::Face].prev];
 			
-			auto& c1 = mesh[edge.corner_list_base];
+			auto attributes_id_0 = c0.attributes_id;
+			auto attributes_id_1 = c1.attributes_id;
+			
+			u32 edge_degree = 0;
+			bool attribute_edge = false;
+			IterateCornerList<ElementType::Edge>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
+				auto attributes_id = mesh[corner_id].attributes_id;
+				attribute_edge |= (attributes_id.index != attributes_id_0.index && attributes_id.index != attributes_id_1.index);
+				
+				edge_degree += 1;
+			});
+			if (edge_degree != 1 && attribute_edge == false) continue;
+			
 			
 			// (v0, v1) is the current edge.
-			auto v0 = c1.vertex_id;
-			auto v1 = mesh[c1.corner_list_around[(u32)ElementType::Face].next].vertex_id;
-			auto v2 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev].vertex_id;
+			auto v0 = c0.vertex_id;
+			auto v1 = c1.vertex_id;
+			auto v2 = c2.vertex_id;
 			
 			auto p0 = mesh[v0].position;
 			auto p1 = mesh[v1].position;
 			auto p2 = mesh[v2].position;
 			
 			Quadric quadric;
-			ComputeEdgeQuadric(quadric, p0, p1, p2);
+			ComputeEdgeQuadric(quadric, p0, p1, p2, 1.f / edge_degree);
 			
 			AccumulateQuadric(state.vertex_edge_quadrics[v0.index], quadric);
 			AccumulateQuadric(state.vertex_edge_quadrics[v1.index], quadric);
