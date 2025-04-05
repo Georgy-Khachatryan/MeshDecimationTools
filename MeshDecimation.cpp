@@ -16,25 +16,21 @@
 
 // fenv pragmas are an attempt at making compiler not optimize away (x + 0.f).
 #pragma fenv_access(on)
-struct VertexHasher {
-	static u64 PositionHash(const Vector3& v) {
-		compile_const u64 knuth_golden_ratio = 0x9e3779b97f4a7c55;
-		
-		static union {
-			u64 scalars[2];
-			__m128i vector;
-		} seed = { knuth_golden_ratio, knuth_golden_ratio };
-		
-		// Add zero to turn -0.0 to +0.0.
-		auto hash = _mm_castps_si128(_mm_add_ps(_mm_setr_ps(v.z, v.z, v.y, v.x), _mm_setzero_ps()));
-		hash = _mm_aesdec_si128(hash, seed.vector);
-		hash = _mm_aesdec_si128(hash, seed.vector);
-		
-		return _mm_cvtsi128_si64(hash);
-	}
+static u64 ComputePositionHash(const Vector3& v) {
+	compile_const u64 knuth_golden_ratio = 0x9e3779b97f4a7c55;
 	
-	u64 operator() (const Vector3& v) const { return PositionHash(v); }
-};
+	static union {
+		u64 scalars[2];
+		__m128i vector;
+	} seed = { knuth_golden_ratio, knuth_golden_ratio };
+	
+	// Add zero to turn -0.0 to +0.0.
+	auto hash = _mm_castps_si128(_mm_add_ps(_mm_setr_ps(v.z, v.z, v.y, v.x), _mm_setzero_ps()));
+	hash = _mm_aesdec_si128(hash, seed.vector);
+	hash = _mm_aesdec_si128(hash, seed.vector);
+	
+	return _mm_cvtsi128_si64(hash);
+}
 #pragma fenv_access(off)
 
 static u64 PackEdgeKey(VertexID vertex_id_0, VertexID vertex_id_1) {
@@ -175,7 +171,7 @@ static VertexID HashTableAddOrFind(VertexHashTable& table, MeshView mesh, std::v
 	u64 table_size = table.vertex_ids.size();
 	u64 mod_mask   = table_size - 1u;
 	
-	u64 hash  = VertexHasher::PositionHash(position);
+	u64 hash  = ComputePositionHash(position);
 	u64 index = (hash & mod_mask);
 	
 	for (u64 i = 0; i <= mod_mask; i += 1) {
@@ -239,6 +235,72 @@ static EdgeID HashTableAddOrFind(EdgeHashTable& table, std::vector<Edge>& edges,
 	
 	return EdgeID{ u32_max };
 }
+
+#define USE_STL_HASH_TABLE 0
+
+#if USE_STL_HASH_TABLE == 0
+struct EdgeDuplicateMap {
+	struct KeyValue {
+		u64 edge_key;
+		EdgeID edge_id;
+	};
+	
+	std::vector<KeyValue> keys_values;
+	u32 element_count = 0;
+};
+
+
+static void HashTableClear(EdgeDuplicateMap& table) {
+	memset(table.keys_values.data(), 0xFF, table.keys_values.size() * sizeof(EdgeDuplicateMap::KeyValue));
+	table.element_count = 0;
+}
+
+static EdgeID HashTableAddOrFind(EdgeDuplicateMap& table, u64 edge_key, EdgeID edge_id);
+
+static void HashTableGrow(EdgeDuplicateMap& table) {
+	auto old_keys_values = std::move(table.keys_values);
+	table.keys_values.resize(old_keys_values.size() * 2);
+	
+	HashTableClear(table);
+	
+	for (auto [key, value] : old_keys_values) {
+		if (key != u64_max) HashTableAddOrFind(table, key, value);
+	}
+}
+
+static EdgeID HashTableAddOrFind(EdgeDuplicateMap& table, u64 edge_key, EdgeID edge_id) {
+	u64 table_size = table.keys_values.size();
+
+	compile_const u32 load_factor_percent = 85;
+	if ((table.element_count + 1) * 100 >= table_size * load_factor_percent) {
+		HashTableGrow(table);
+		table_size = table.keys_values.size();
+	}
+	
+	u64 mod_mask = table_size - 1u;
+	
+	u64 hash  = std::hash<u64>{}(edge_key);
+	u64 index = (hash & mod_mask);
+	
+	for (u64 i = 0; i <= mod_mask; i += 1) {
+		auto key_value = table.keys_values[index];
+		
+		if (key_value.edge_key == u64_max) {
+			table.element_count += 1;
+			table.keys_values[index] = { edge_key, edge_id };
+			return edge_id;
+		}
+		
+		if (key_value.edge_key == edge_key) {
+			return key_value.edge_id;
+		}
+		
+		index = (index + i + 1) & mod_mask;
+	}
+	
+	return EdgeID{ u32_max };
+}
+#endif // USE_STL_HASH_TABLE == 0
 
 static u64 ComputeHashTableSize(u64 max_element_count) {
 	u64 hash_table_size = 1;
@@ -413,7 +475,9 @@ MeshView MeshToMeshView(Mesh& mesh) {
 }
 
 using RemovedEdgeArray = std::vector<EdgeID>;
+#if USE_STL_HASH_TABLE
 using EdgeDuplicateMap = std::unordered_map<u64, EdgeID>;
+#endif // USE_STL_HASH_TABLE
 
 struct EdgeCollapseResult {
 	CornerID remaning_base_id;
@@ -452,7 +516,11 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Edg
 	
 	auto remaning_base_id = vertex_0.corner_list_base.index != u32_max ? vertex_0.corner_list_base : vertex_1.corner_list_base;
 	if (remaning_base_id.index != u32_max) {
+#if USE_STL_HASH_TABLE
 		edge_duplicate_map.clear();
+#else // USE_STL_HASH_TABLE
+		// HashTableClear(edge_duplicate_map);
+#endif // USE_STL_HASH_TABLE
 		
 		IterateCornerList<ElementType::Vertex>(mesh, remaning_base_id, [&](CornerID corner_id) {
 			// TODO: This can be iteration over just incoming and outgoing edges of a corner.
@@ -460,6 +528,7 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Edg
 				auto edge_id_1 = mesh[corner_id].edge_id;
 				auto& edge_1 = mesh[edge_id_1];
 				
+#if USE_STL_HASH_TABLE
 				auto [it, is_inserted] = edge_duplicate_map.emplace(PackEdgeKey(edge_1.vertex_0, edge_1.vertex_1), edge_id_1);
 				auto edge_id_0 = it->second;
 				
@@ -467,6 +536,13 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Edg
 					CornerListMerge<EdgeID>(mesh, edge_id_0, edge_id_1);
 					removed_edge_array.push_back(edge_id_1);
 				}
+#else // !USE_STL_HASH_TABLE
+				auto edge_id_0 = HashTableAddOrFind(edge_duplicate_map, PackEdgeKey(edge_1.vertex_0, edge_1.vertex_1), edge_id_1);
+				if (edge_id_0.index != edge_id_1.index) {
+					CornerListMerge<EdgeID>(mesh, edge_id_0, edge_id_1);
+					removed_edge_array.push_back(edge_id_1);
+				}
+#endif // !USE_STL_HASH_TABLE
 			});
 		});
 		
@@ -481,7 +557,11 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Edg
 						auto edge_id = mesh[corner_id].edge_id;
 						auto& edge = mesh[edge_id];
 						
+#if USE_STL_HASH_TABLE
 						edge_duplicate_map.emplace(PackEdgeKey(edge.vertex_0, edge.vertex_1), edge_id);
+#else // !USE_STL_HASH_TABLE
+						HashTableAddOrFind(edge_duplicate_map, PackEdgeKey(edge.vertex_0, edge.vertex_1), edge_id);
+#endif // !USE_STL_HASH_TABLE
 					});
 				});
 			});
@@ -1332,6 +1412,12 @@ void DecimateMesh(MeshView mesh) {
 	u64 time0 = 0;
 	u64 time1 = 0;
 	
+#if USE_STL_HASH_TABLE
+	state.edge_duplicate_map.reserve(128u);
+#else // !USE_STL_HASH_TABLE
+	state.edge_duplicate_map.keys_values.resize(ComputeHashTableSize(128u));
+#endif // !USE_STL_HASH_TABLE
+	
 	float max_error = 0.f;
 	while (active_face_count > target_face_count && edge_collapse_heap.edge_collapse_errors.size()) {
 		if ((s32)active_face_count < next_report_target) {
@@ -1346,7 +1432,13 @@ void DecimateMesh(MeshView mesh) {
 		u64 t0 = __rdtsc();
 		
 		// ~80% of the execution time.
+#if USE_STL_HASH_TABLE
 		for (auto& [edge_key, edge_id] : state.edge_duplicate_map) {
+#else // !USE_STL_HASH_TABLE
+		for (auto& [edge_key, edge_id] : state.edge_duplicate_map.keys_values) {
+			if (edge_key == u64_max) continue;
+#endif // !USE_STL_HASH_TABLE
+			
 			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[edge_id.index];
 			if (heap_index == u32_max) continue;
 			
@@ -1355,8 +1447,12 @@ void DecimateMesh(MeshView mesh) {
 			
 			EdgeCollapseHeapUpdate(edge_collapse_heap, heap_index, select_info.min_error);
 		}
+#if USE_STL_HASH_TABLE
 		state.edge_duplicate_map.clear();
-			
+#else // !USE_STL_HASH_TABLE
+		HashTableClear(state.edge_duplicate_map);
+#endif // !USE_STL_HASH_TABLE
+		
 		u64 t1 = __rdtsc();
 		time0 += (t1 - t0);
 		
@@ -1371,9 +1467,6 @@ void DecimateMesh(MeshView mesh) {
 		// 15% of the execution time
 		auto [remaning_base_id, removed_face_count] = PerformEdgeCollapse(mesh, edge_id, state.edge_duplicate_map, state.removed_edge_array);
 		active_face_count -= removed_face_count;
-		
-		u32 edge_duplicate_map_size = (u32)state.edge_duplicate_map.size();
-		if (edge_duplicate_map_size > 255) edge_duplicate_map_size = 255;
 		
 		for (auto edge_id : state.removed_edge_array) {
 			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[edge_id.index];
