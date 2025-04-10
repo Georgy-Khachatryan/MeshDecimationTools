@@ -162,6 +162,81 @@ static void CornerListMerge(MeshView mesh, ElementID element_0, ElementID elemen
 	}
 }
 
+
+// Should be used only with simple types.
+template<typename T>
+struct Array {
+	T* data = nullptr;
+	u32 count    = 0;
+	u32 capacity = 0;
+	
+	T& operator[] (u32 index) { assert(index < count); return data[index]; }
+	const T& operator[] (u32 index) const { assert(index < count); return data[index]; }
+};
+
+static u32 ArrayComputeNewCapacity(u32 old_capacity, u32 required_capacity = 0) {
+	u32 new_capacity = old_capacity ? (old_capacity + old_capacity / 2) : 16;
+	return new_capacity > required_capacity ? new_capacity : required_capacity;
+}
+
+template<typename T>
+static void ArrayReserve(Array<T>& array, u32 new_capacity) {
+	if (array.capacity >= new_capacity) return;
+	
+	auto* new_data = (T*)malloc(new_capacity * sizeof(T));
+	memcpy(new_data, array.data, array.count * sizeof(T));
+	
+	array.data     = new_data;
+	array.capacity = new_capacity;
+}
+
+template<typename T>
+static void ArrayResize(Array<T>& array, u32 new_count) { // Doesn't initialize new elements.
+	if (new_count > array.capacity) {
+		ArrayReserve(array, ArrayComputeNewCapacity(array.capacity, new_count));
+	}
+	
+	array.count = new_count;
+}
+
+template<typename T>
+static T& ArrayAppend(Array<T>& array, const T& value) {
+	assert(array.count < array.capacity);
+	
+	auto& new_element = array.data[array.count++];
+	new_element = value;
+	
+	return new_element;
+}
+
+template<typename T>
+static void ArrayFree(Array<T>& array) {
+	if (array.data) free(array.data);
+	array.data     = nullptr;
+	array.count    = 0;
+	array.capacity = 0;
+}
+
+template<typename T>
+struct ArrayView {
+	T* data = nullptr;
+	u32 count = 0;
+	
+	T& operator[] (u32 index) { assert(index < count); return data[index]; }
+	const T& operator[] (u32 index) const { assert(index < count); return data[index]; }
+};
+
+template<typename T>
+static ArrayView<T> CreateArrayView(ArrayView<T> array, u32 begin_index, u32 end_index) {
+	return { array.data + begin_index, end_index - begin_index };
+}
+
+template<typename T>
+static ArrayView<T> CreateArrayView(Array<T>& array) {
+	return { array.data, array.count };
+}
+
+
 struct VertexHashTable {
 	std::vector<VertexID> vertex_ids;
 };
@@ -331,6 +406,8 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 		auto vertex_id = HashTableAddOrFind(table, result_mesh.vertices, position);
 		src_vertex_index_to_vertex_id[vertex_index] = vertex_id;
 	}
+	mesh.vertex_count = (u32)result_mesh.vertices.size();
+	
 	
 	EdgeHashTable edge_table;
 	edge_table.edge_ids.resize(ComputeHashTableSize(triangle_mesh.indices.size()), EdgeID{ u32_max });
@@ -370,7 +447,7 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 		
 		
 		for (u32 corner_index = 0; corner_index < 3; corner_index += 1) {
-			auto corner_id = CornerID{ triangle_index * 3 + corner_index };
+			auto corner_id = CornerID{ face_id.index * 3 + corner_index };
 			
 			auto edge_id = HashTableAddOrFind(edge_table, result_mesh.edges, edge_keys[corner_index]);
 			
@@ -387,6 +464,7 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 		active_face_count += 1;
 	}
 	result_mesh.active_face_count = active_face_count;
+	mesh.edge_count = (u32)result_mesh.edges.size();
 	
 	return result_mesh;
 }
@@ -1483,3 +1561,401 @@ void DecimateMesh(MeshView mesh) {
 	printf("Face Count: %u\n", active_face_count);
 }
 
+
+struct alignas(16) KdTreeElement {
+	Vector3 position;
+	u32 partition_index;
+};
+static_assert(sizeof(KdTreeElement) == 16);
+
+struct KdTreeNode {
+	union {
+		float split;
+		u32 index = 0;	
+	};
+	
+	u32 axis    : 2;
+	u32 payload : 30; // Note that zero payload means that branch is pruned. This reduces the number of node visits by 5x.
+	
+	compile_const u32 leaf_axis = 3;
+	compile_const u32 leaf_size = 64;
+};
+
+struct KdTree {
+	Array<KdTreeElement> elements;
+	
+	Array<KdTreeNode> nodes;
+	Array<u32> node_indices;
+};
+
+static u32 KdTreeSplit(const ArrayView<KdTreeElement>& elements, ArrayView<u32> indices, KdTreeNode& node) {
+	Vector3 sum = { 0.f, 0.f, 0.f };
+	Vector3 min = { +FLT_MAX, +FLT_MAX, +FLT_MAX };
+	Vector3 max = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+	float indices_count = 0.f;
+	
+	for (u32 i = 0; i < indices.count; i += 1) {
+		auto& element = elements[indices[i]];
+		if (element.partition_index != u32_max) continue;
+		
+		for (u32 j = 0; j < 3; j += 1) {
+			min[j] = min[j] < element.position[j] ? min[j] : element.position[j];
+			max[j] = max[j] > element.position[j] ? max[j] : element.position[j];
+		}
+		sum = sum + element.position;
+		indices_count += 1.f;
+	}
+	
+	auto mean = (indices_count > 0.f) ? sum * (1.f / indices_count) : sum;
+	auto extent = max - min;
+	
+	u32 split_axis = 0;
+	for (u32 axis = 1; axis < 3; axis += 1) {
+		if (extent[axis] > extent[split_axis]) split_axis = axis;
+	}
+	float split_position = mean[split_axis];
+	
+	
+	u32 split_index = 0;
+	for (u32 i = 0; i < indices.count; i += 1) {
+		float position = elements[indices[i]].position[split_axis];
+		std::swap(indices[split_index], indices[i]);
+		if (position < split_position) split_index += 1;
+	}
+	
+	node.split = split_position;
+	node.axis  = split_axis;
+	
+	return split_index;
+}
+
+static u32 KdTreeBuildLeafNode(Array<KdTreeNode>& nodes, ArrayView<KdTreeElement> elements, const ArrayView<u32>& indices) {
+	u32 leaf_node_index = nodes.count;
+	
+	u32 indices_count = indices.count;
+	for (u32 i = 0; i < indices_count; i += 1) {
+		KdTreeNode node;
+		node.index   = indices[i];
+		node.axis    = KdTreeNode::leaf_axis;
+		node.payload = indices_count;
+		ArrayAppend(nodes, node);
+	}
+	
+	return leaf_node_index;
+}
+
+static u32 KdTreeBuildNode(Array<KdTreeNode>& nodes, ArrayView<KdTreeElement> elements, ArrayView<u32> indices) {
+	if (indices.count <= KdTreeNode::leaf_size) {
+		return KdTreeBuildLeafNode(nodes, elements, indices);
+	}
+	
+	KdTreeNode node;
+	u32 split_index = KdTreeSplit(elements, indices, node);
+	
+	// Faild to split the subtree. Create a single leaf to prevent infinite recursion.
+	if (split_index == 0 || split_index >= indices.count) {
+		return KdTreeBuildLeafNode(nodes, elements, indices);
+	}
+	
+	u32 node_index = nodes.count;
+	ArrayAppend(nodes, node);
+	
+	u32 node_index_0 = KdTreeBuildNode(nodes, elements, CreateArrayView(indices, 0, split_index));
+	u32 node_index_1 = KdTreeBuildNode(nodes, elements, CreateArrayView(indices, split_index, indices.count));
+	
+	assert(node_index_0 == node_index + 1); // Left node is always the next node after the local root.
+	assert(node_index_1 > node_index);      // Right node offset is non zero. Zero means branch is pruned.
+	
+	nodes[node_index].payload = node_index_1 - node_index;
+	
+	return node_index;
+}
+
+static void KdTreeBuild(KdTree& tree) {
+	ArrayResize(tree.node_indices, tree.elements.count);
+	ArrayReserve(tree.nodes, tree.elements.count * 2);
+	
+	for (u32 i = 0; i < tree.node_indices.count; i += 1) {
+		tree.node_indices[i] = i;
+	}
+	
+	KdTreeBuildNode(tree.nodes, CreateArrayView(tree.elements), CreateArrayView(tree.node_indices));
+}
+
+static void KdTreeFree(KdTree& tree) {
+	ArrayFree(tree.node_indices);
+	ArrayFree(tree.elements);
+	ArrayFree(tree.nodes);
+}
+
+#define COUNT_KD_TREE_LOOKUPS 0
+#define COUNT_KD_TREE_NODE_VISITS 0
+
+#if COUNT_KD_TREE_NODE_VISITS
+u32 kd_tree_node_visits = 0;
+#endif // COUNT_KD_TREE_NODE_VISITS
+
+static bool KdTreeFindClosestActiveElement(KdTree& kd_tree, const Vector3& point, u32& closest_index, float& min_distance, u32 root = 0) {
+	auto& node = kd_tree.nodes[root];
+	
+#if COUNT_KD_TREE_NODE_VISITS
+	kd_tree_node_visits += 1;
+#endif // COUNT_KD_TREE_NODE_VISITS
+	
+	// Prune empty branches of the tree for better traversal performance.
+	bool should_prune = true;
+	
+	if (node.axis == KdTreeNode::leaf_axis) {
+		u32 child_count = node.payload;
+		
+		for (u32 i = 0; i < child_count; i += 1) {
+#if COUNT_KD_TREE_NODE_VISITS
+			kd_tree_node_visits += 1;
+#endif // COUNT_KD_TREE_NODE_VISITS
+			
+			u32 index = kd_tree.nodes[root + i].index;
+			auto& element = kd_tree.elements[index];
+			
+			if (element.partition_index != u32_max) continue; // Element is already used, i.e. it's inactive for the sake of search.
+			should_prune = false; // Don't prune the branch if we have at least one active leaf element.
+			
+			auto point_to_element = element.position - point;
+			
+			auto distance = DotProduct(point_to_element, point_to_element);
+			if (distance < min_distance) {
+				min_distance = distance;
+				closest_index = index;
+			}
+		}
+	} else if (node.payload != 0) {
+		// Visit the closest node first.
+		float delta  = point[node.axis] - node.split;
+		u32 offset_0 = delta <= 0.f ? 1 : node.payload; // Left node is always the next node after the local root.
+		u32 offset_1 = delta <= 0.f ? node.payload : 1; // Right node offset is non zero. Zero means branch is pruned.
+		
+		bool prune_lh = KdTreeFindClosestActiveElement(kd_tree, point, closest_index, min_distance, root + offset_0);
+		bool prune_rh = false;
+		
+		if ((delta * delta) <= min_distance) {
+			prune_rh = KdTreeFindClosestActiveElement(kd_tree, point, closest_index, min_distance, root + offset_1);
+		} else {
+			prune_rh = (kd_tree.nodes[root + offset_1].payload == 0);
+		}
+		should_prune = prune_lh && prune_rh;
+	}
+	
+	if (should_prune) node.payload = 0;
+	
+	return should_prune;
+}
+
+static void KdTreeBuildElements(MeshView mesh, Array<KdTreeElement>& elements) {
+	ArrayResize(elements, mesh.face_count);
+	
+	for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
+		auto& element = elements[face_id.index];
+		auto& face    = mesh[face_id];
+		
+		if (face.corner_list_base.index != u32_max) {
+			Vector3 position = { 0.f, 0.f, 0.f };
+			float face_degree = 0.f;
+			IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
+				position = position + mesh[mesh[corner_id].vertex_id].position;
+				face_degree += 1.f;
+			});
+			
+			element.position = position * (1.f / face_degree);
+			element.partition_index = u32_max;
+		} else {
+			element.partition_index = u32_max - 1;
+		}
+	}
+}
+
+void BuildMeshlets(MeshView& mesh) {
+	KdTree kd_tree;
+	KdTreeBuildElements(mesh, kd_tree.elements);
+	KdTreeBuild(kd_tree);
+	
+	std::vector<u8> vertex_usage_map;
+	vertex_usage_map.resize(mesh.attribute_count, 0xFF);
+	
+	compile_const u32 max_vertex_count = 128;
+	compile_const u32 max_face_count   = 128;
+	
+	std::vector<FaceID> meshlet_faces;
+	std::vector<AttributesID> meshlet_vertices;
+	std::vector<FaceID> meshlet_candidate_elements;
+	
+	meshlet_faces.reserve(mesh.face_count);
+	meshlet_candidate_elements.reserve(512);
+	meshlet_vertices.reserve(512);
+	
+	std::vector<u32> meshlet_face_counts;
+	meshlet_face_counts.reserve((mesh.face_count + max_face_count - 1) / max_face_count);
+	
+	auto meshlet_aabb_min_ps  = _mm_set_ps1(+FLT_MAX);
+	auto meshlet_aabb_max_ps  = _mm_set_ps1(-FLT_MAX);
+	u32  meshlet_vertex_count = 0;
+	u32  meshlet_face_count   = 0;
+	
+#if COUNT_KD_TREE_LOOKUPS
+	u32 kd_tree_lookup_count = 0;
+#endif // COUNT_KD_TREE_LOOKUPS
+	
+	while (true) {
+		u32 best_face_index = u32_max;
+		u32 second_best_face_index = u32_max;
+		float smallest_surface_area = FLT_MAX;
+		
+		for (u32 i = 0; i < meshlet_candidate_elements.size(); i += 1) {
+			auto face_id = meshlet_candidate_elements[i];
+			
+			auto& element = kd_tree.elements[face_id.index];
+			if (element.partition_index != u32_max) continue;
+			auto position = _mm_load_ps(&element.position.x);
+			
+			auto new_aabb_min_ps = _mm_min_ps(meshlet_aabb_min_ps, position);
+			auto new_aabb_max_ps = _mm_max_ps(meshlet_aabb_max_ps, position);
+			auto new_aabb_extent_ps = _mm_sub_ps(new_aabb_max_ps, new_aabb_min_ps);
+			
+			// Half AABB surface area x*y + y*z + z*x
+			float surface_area = _mm_cvtss_f32(_mm_dp_ps(new_aabb_extent_ps, _mm_permute_ps(new_aabb_extent_ps, 0b00'10'01), 0x7F));
+			
+			if (smallest_surface_area > surface_area) {
+				smallest_surface_area = surface_area;
+				second_best_face_index = best_face_index != u32_max ? meshlet_candidate_elements[best_face_index].index : u32_max;
+				best_face_index = i;
+			}
+		}
+		
+		if (best_face_index != u32_max) {
+			auto it = meshlet_candidate_elements.begin() + best_face_index;
+			best_face_index = meshlet_candidate_elements[best_face_index].index;
+			
+			*it = meshlet_candidate_elements.back();
+			meshlet_candidate_elements.pop_back();
+		}
+		
+		if (best_face_index == u32_max) {
+			alignas(16) float center[4];
+			if (meshlet_face_count) {
+				auto center_ps = _mm_mul_ps(_mm_add_ps(meshlet_aabb_max_ps, meshlet_aabb_min_ps), _mm_set_ps1(0.5f));
+				_mm_store_ps(center, center_ps);
+			} else {
+				_mm_store_ps(center, _mm_setzero_ps());
+			}
+			
+			float min_distance = FLT_MAX;
+			KdTreeFindClosestActiveElement(kd_tree, *(Vector3*)center, best_face_index,  min_distance);
+			
+#if COUNT_KD_TREE_LOOKUPS
+			kd_tree_lookup_count += 1;
+#endif // COUNT_KD_TREE_LOOKUPS
+		}
+		
+		if (best_face_index == u32_max) {
+			break;
+		}
+		
+		
+		auto face_id = FaceID{ best_face_index };
+		auto& face = mesh[face_id];
+		
+		u32 new_vertex_count = 0;
+		IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
+			auto& corner = mesh[corner_id];
+			u8 vertex_index = vertex_usage_map[corner.attributes_id.index];
+			if (vertex_index == 0xFF) {
+				vertex_usage_map[corner.attributes_id.index] = meshlet_vertex_count + new_vertex_count;
+				meshlet_vertices.push_back(corner.attributes_id);
+				new_vertex_count += 1;
+			}
+			
+			IterateCornerList<ElementType::Edge>(mesh, corner_id, [&](CornerID corner_id) {
+				auto& corner = mesh[corner_id];
+				if (kd_tree.elements[corner.face_id.index].partition_index == u32_max) {
+					meshlet_candidate_elements.push_back(corner.face_id);
+				}
+			});
+		});
+		
+		
+		if ((meshlet_vertex_count + new_vertex_count > max_vertex_count) || (meshlet_face_count + 1 > max_face_count)) {
+			meshlet_vertex_count = 0;
+			meshlet_face_count   = 0;
+			meshlet_aabb_min_ps  = _mm_set_ps1(+FLT_MAX);
+			meshlet_aabb_max_ps  = _mm_set_ps1(-FLT_MAX);
+			
+			for (auto attributes_id : meshlet_vertices) {
+				vertex_usage_map[attributes_id.index] = 0xFF;
+			}
+			
+			meshlet_face_counts.push_back((u32)meshlet_faces.size());
+			
+			meshlet_vertices.clear();
+			meshlet_candidate_elements.clear();
+			if (second_best_face_index != u32_max) {
+				meshlet_candidate_elements.push_back(FaceID{ second_best_face_index });
+			}
+		}
+		
+		meshlet_faces.push_back(face_id);
+		meshlet_vertex_count += new_vertex_count;
+		meshlet_face_count   += 1;
+		
+		auto& element = kd_tree.elements[best_face_index];
+		element.partition_index = (u32)meshlet_face_counts.size();
+		
+		auto position = _mm_load_ps(&element.position.x);
+		meshlet_aabb_min_ps = _mm_min_ps(meshlet_aabb_min_ps, position);
+		meshlet_aabb_max_ps = _mm_max_ps(meshlet_aabb_max_ps, position);
+	}
+	
+	if (meshlet_face_count) {
+		meshlet_face_count = 0;
+		meshlet_face_counts.push_back((u32)meshlet_faces.size());
+	}
+	
+	assert(meshlet_faces.size() == mesh.active_face_count);
+	
+	static std::vector<Face> faces;
+	faces.resize(meshlet_faces.size());
+	
+	for (u32 i = 0; i < meshlet_faces.size(); i += 1) {
+		auto face_id = meshlet_faces[i];
+		faces[i] = mesh[face_id];
+	}
+	
+#if COUNT_KD_TREE_NODE_VISITS
+	printf("kd_tree_node_visits: %u\n", kd_tree_node_visits);
+#endif // COUNT_KD_TREE_NODE_VISITS
+#if COUNT_KD_TREE_LOOKUPS
+	printf("kd_tree_lookup_count: %u\n", kd_tree_lookup_count);
+#endif // COUNT_KD_TREE_LOOKUPS
+	
+	mesh.faces = faces.data();
+	mesh.face_count = (u32)faces.size();
+	
+	KdTreeFree(kd_tree);
+}
+
+void BuildVirtualGeometry() {
+	//
+	// 1. Build mesh data structure (faces, edges, vertices, corners).
+	// 2. Build meshlets from faces.
+	//  - Build KdTree over triangles.
+	//  - Combine sequences of 128 Morton codes into meshlets.
+	// 3. Build meshlet groups.
+	//  - Build meshlet adjacency.
+	//  - Build KdTree over meshlets.
+	//  - Greedily add meshlets using the number of shared edges as the main metric.
+	// 4. Simplify meshlet groups.
+	//  - Iterate over all vertices and mark the ones shared by multiple groups as locked.
+	//  - Run meshlet simplification.
+	//  - Make sure locked vertex data is preserved and respected.
+	//  - Make sure all groups are simplified by 1/2
+	// 5. Output meshlet data.
+	//  - For each meshlet there should be two errors. One for high quality version of the group, one for low quality.
+	//
+}

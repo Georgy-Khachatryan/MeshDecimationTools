@@ -62,6 +62,8 @@ struct Vector3 {
 	float z = 0.f;
 	
 	friend bool operator== (const Vector3& lh, const Vector3& rh) { return lh.x == rh.x && lh.y == rh.y && lh.z == rh.z; }
+	float& operator[] (u32 index) { return (&x)[index]; }
+	float operator[] (u32 index) const { return (&x)[index]; }
 };
 
 struct Vector2 {
@@ -138,7 +140,7 @@ struct Corner {
 };
 static_assert(sizeof(Corner) == 40, "Invalid Corner size.");
 
-struct Vertex {
+struct alignas(16) Vertex {
 	Vector3 position;
 	CornerID corner_list_base; // Corner list around a vertex.
 };
@@ -191,5 +193,6 @@ ObjTriangleMesh EditableMeshToObjMesh(MeshView mesh);
 MeshView MeshToMeshView(Mesh& mesh);
 
 void DecimateMesh(MeshView mesh);
+void BuildMeshlets(MeshView& mesh);
 
 #endif // MESHDECIMATION_H
