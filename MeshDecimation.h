@@ -193,6 +193,6 @@ ObjTriangleMesh EditableMeshToObjMesh(MeshView mesh);
 MeshView MeshToMeshView(Mesh& mesh);
 
 void DecimateMesh(MeshView mesh);
-void BuildMeshlets(MeshView& mesh);
+void BuildVirtualGeometry(MeshView& mesh);
 
 #endif // MESHDECIMATION_H

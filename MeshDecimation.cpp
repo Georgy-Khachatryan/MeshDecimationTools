@@ -182,43 +182,59 @@ static void* AllocateMemoryBlock(Allocator& allocator, void* old_memory_block, u
 	return memory_block;
 }
 
-static void AllocatorFreeAllMemoryBlocks(Allocator& allocator) {
-	for (u32 i = allocator.memory_block_count; i > 0; i -= 1) {
+static void AllocatorFreeMemoryBlocks(Allocator& allocator, u32 last_memory_block_index = 0) {
+	for (u32 i = allocator.memory_block_count; i > last_memory_block_index; i -= 1) {
 		free(allocator.memory_blocks[i - 1]);
 	}
+	allocator.memory_block_count = last_memory_block_index;
 }
+
+
+#define ARRAY_OPERATORS \
+T& operator[] (u32 index) { assert(index < count); return data[index]; } \
+const T& operator[] (u32 index) const { assert(index < count); return data[index]; } \
+\
+T* begin() { return data; } \
+T* end() { return data + count; } \
+const T* begin() const { return data; } \
+const T* end() const { return data + count; }
+
 
 // Should be used only with simple types.
 template<typename T>
 struct Array {
+	using ValueType = T;
+	
 	T* data = nullptr;
 	u32 count    = 0;
 	u32 capacity = 0;
 	
-	T& operator[] (u32 index) { assert(index < count); return data[index]; }
-	const T& operator[] (u32 index) const { assert(index < count); return data[index]; }
-	
-	T* begin() { return data; }
-	T* end() { return data + count; }
-	const T* begin() const { return data; }
-	const T* end() const { return data + count; }
+	ARRAY_OPERATORS
 };
 static_assert(sizeof(Array<u32>) == 16);
 
 template<typename T>
 struct ArrayView {
+	using ValueType = T;
+	
 	T* data = nullptr;
 	u32 count = 0;
 	
-	T& operator[] (u32 index) { assert(index < count); return data[index]; }
-	const T& operator[] (u32 index) const { assert(index < count); return data[index]; }
-	
-	T* begin() { return data; }
-	T* end() { return data + count; }
-	const T* begin() const { return data; }
-	const T* end() const { return data + count; }
+	ARRAY_OPERATORS
 };
 static_assert(sizeof(ArrayView<u32>) == 16);
+
+template<typename T, u32 compile_time_capacity>
+struct FixedSizeArray {
+	using ValueType = T;
+	compile_const u32 capacity = compile_time_capacity;
+	
+	T data[capacity] = {};
+	u32 count = 0;
+
+	ARRAY_OPERATORS
+};
+#undef ARRAY_OPERATORS
 
 static u32 ArrayComputeNewCapacity(u32 old_capacity, u32 required_capacity = 0) {
 	u32 new_capacity = old_capacity ? (old_capacity + old_capacity / 2) : 16;
@@ -245,35 +261,35 @@ static void ArrayResizeMemset(Array<T>& array, Allocator& allocator, u32 new_cou
 	memset(array.data, pattern, new_count * sizeof(T));
 }
 
-template<typename T>
-static void ArrayAppend(Array<T>& array, T value) {
+template<typename ArrayT>
+static void ArrayAppend(ArrayT& array, typename ArrayT::ValueType value) {
 	assert(array.count < array.capacity);
 	array.data[array.count++] = value;
 }
 
 template<typename T>
 static void ArrayAppendMaybeGrow(Array<T>& array, Allocator& allocator, T value) {
-	if ((array.count >= array.capacity)) {
+	if (array.count >= array.capacity) {
 		ArrayReserve(array, allocator, ArrayComputeNewCapacity(array.capacity, array.count + 1));
 	}
 	array.data[array.count++] = value;
 }
 
-template<typename T>
-static void ArrayEraseSwap(Array<T>& array, u32 index) {
+template<typename ArrayT>
+static void ArrayEraseSwap(ArrayT& array, u32 index) {
 	assert(index < array.count);
 	
 	array.data[index] = array.data[array.count - 1];
 	array.count -= 1;
 }
 
-template<typename T>
-static ArrayView<T> CreateArrayView(ArrayView<T> array, u32 begin_index, u32 end_index) {
+template<typename ArrayT>
+static ArrayView<typename ArrayT::ValueType> CreateArrayView(ArrayT array, u32 begin_index, u32 end_index) {
 	return { array.data + begin_index, end_index - begin_index };
 }
 
-template<typename T>
-static ArrayView<T> CreateArrayView(Array<T>& array) {
+template<typename ArrayT>
+static ArrayView<typename ArrayT::ValueType> CreateArrayView(ArrayT& array) {
 	return { array.data, array.count };
 }
 
@@ -1784,7 +1800,19 @@ static bool KdTreeFindClosestActiveElement(KdTree& kd_tree, const Vector3& point
 	return should_prune;
 }
 
-static void KdTreeBuildElements(MeshView mesh, Allocator& allocator, Array<KdTreeElement>& elements) {
+compile_const u32 meshlet_max_vertex_count = 128;
+compile_const u32 meshlet_max_face_count   = 128;
+compile_const u32 meshlet_max_face_degree  = 3;
+compile_const u32 meshlet_group_max_meshlets = 32;
+
+struct alignas(16) Meshlet {
+	Vector3 aabb_min;
+	u32 current_group_index = 0;
+	Vector3 aabb_max;
+	u32 coarser_group_index = 0;
+};
+
+static void KdTreeBuildElementsForFaces(MeshView mesh, Allocator& allocator, Array<KdTreeElement>& elements) {
 	ArrayResize(elements, allocator, mesh.face_count);
 	
 	for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
@@ -1807,33 +1835,64 @@ static void KdTreeBuildElements(MeshView mesh, Allocator& allocator, Array<KdTre
 	}
 }
 
-void BuildMeshlets(MeshView& mesh) {
-	Allocator allocator;
+static void KdTreeBuildElementsForMeshlets(ArrayView<Meshlet> meshlets, Allocator& allocator, Array<KdTreeElement>& elements) {
+	ArrayResize(elements, allocator, meshlets.count);
 	
+	for (u32 meshlet_index = 0; meshlet_index < meshlets.count; meshlet_index += 1) {
+		auto& element = elements[meshlet_index];
+		auto& meshlet = meshlets[meshlet_index];
+		
+		auto aabb_min_ps = _mm_load_ps(&meshlet.aabb_min.x);
+		auto aabb_max_ps = _mm_load_ps(&meshlet.aabb_max.x);
+		auto center_ps   = _mm_mul_ps(_mm_add_ps(aabb_min_ps, aabb_max_ps), _mm_set_ps1(0.5f));
+		
+		_mm_store_ps(&element.position.x, center_ps);
+		element.partition_index = u32_max;
+	}
+}
+
+
+struct MeshletAdjacencyInfo {
+	u32 meshlet_index     = 0;
+	u32 shared_edge_count = 0;
+};
+
+struct MeshletAdjacency {
+	ArrayView<u32> prefix_sum;
+	ArrayView<MeshletAdjacencyInfo> infos;
+};
+
+struct MeshletBuildResult {
+	ArrayView<FaceID>  meshlet_faces;
+	ArrayView<u32>     meshlet_face_prefix_sum;
+	ArrayView<Meshlet> meshlets;
+	
+	MeshletAdjacency meshlet_adjacency;
+};
+
+static MeshletAdjacency BuildMeshletAdjacency(MeshView mesh, Allocator& allocator, ArrayView<u32> meshlet_face_prefix_sum, ArrayView<FaceID> meshlet_faces, ArrayView<KdTreeElement> kd_tree_elements);
+
+static MeshletBuildResult BuildMeshlets(MeshView mesh, Allocator& allocator) {
 	KdTree kd_tree;
-	KdTreeBuildElements(mesh, allocator, kd_tree.elements);
+	KdTreeBuildElementsForFaces(mesh, allocator, kd_tree.elements);
 	KdTreeBuild(kd_tree, allocator);
 	
 	Array<u8> vertex_usage_map;
 	ArrayResizeMemset(vertex_usage_map, allocator, mesh.attribute_count, 0xFF);
 	
-	compile_const u32 max_vertex_count = 128;
-	compile_const u32 max_face_count   = 128;
-	compile_const u32 max_face_degree  = 3;
 	compile_const u32 candidates_per_face = 4;
 	
 	// TODO: Use an irregular 2D array.
 	Array<FaceID> meshlet_faces;
 	Array<u32> meshlet_face_prefix_sum;
+	Array<Meshlet> meshlets;
+	
 	ArrayReserve(meshlet_faces, allocator, mesh.face_count);
 	ArrayReserve(meshlet_face_prefix_sum, allocator, mesh.face_count);
+	ArrayReserve(meshlets, allocator, mesh.face_count);
 	
-	// TODO: Use fixed size arrays.
-	Array<AttributesID> meshlet_vertices;
-	Array<FaceID> meshlet_candidate_elements;
-	ArrayReserve(meshlet_candidate_elements, allocator, max_face_count * candidates_per_face);
-	ArrayReserve(meshlet_vertices, allocator, max_vertex_count + max_face_degree);
-	
+	FixedSizeArray<AttributesID, meshlet_max_face_count * candidates_per_face> meshlet_vertices;
+	FixedSizeArray<FaceID, meshlet_max_vertex_count + meshlet_max_face_degree> meshlet_candidate_elements;
 	
 	auto meshlet_aabb_min_ps  = _mm_set_ps1(+FLT_MAX);
 	auto meshlet_aabb_max_ps  = _mm_set_ps1(-FLT_MAX);
@@ -1923,7 +1982,12 @@ void BuildMeshlets(MeshView& mesh) {
 		});
 		
 		
-		if ((meshlet_vertex_count + new_vertex_count > max_vertex_count) || (meshlet_face_count + 1 > max_face_count)) {
+		if ((meshlet_vertex_count + new_vertex_count > meshlet_max_vertex_count) || (meshlet_face_count + 1 > meshlet_max_face_count)) {
+			// TODO: Create AABB over vertices.
+			Meshlet meshlet;
+			_mm_store_ps(&meshlet.aabb_min.x, meshlet_aabb_min_ps);
+			_mm_store_ps(&meshlet.aabb_max.x, meshlet_aabb_max_ps);
+			
 			meshlet_vertex_count = 0;
 			meshlet_face_count   = 0;
 			meshlet_aabb_min_ps  = _mm_set_ps1(+FLT_MAX);
@@ -1934,6 +1998,7 @@ void BuildMeshlets(MeshView& mesh) {
 			}
 			
 			ArrayAppend(meshlet_face_prefix_sum, meshlet_faces.count);
+			ArrayAppend(meshlets, meshlet);
 			
 			meshlet_vertices.count = 0;
 			meshlet_candidate_elements.count = 0;
@@ -1956,20 +2021,38 @@ void BuildMeshlets(MeshView& mesh) {
 	}
 	
 	if (meshlet_face_count) {
+		// TODO: Create AABB over vertices.
+		Meshlet meshlet;
+		_mm_store_ps(&meshlet.aabb_min.x, meshlet_aabb_min_ps);
+		_mm_store_ps(&meshlet.aabb_max.x, meshlet_aabb_max_ps);
+		
 		meshlet_face_count = 0;
 		ArrayAppend(meshlet_face_prefix_sum, meshlet_faces.count);
+		ArrayAppend(meshlets, meshlet);
 	}
 	
 	assert(meshlet_faces.count == mesh.active_face_count);
 	
-#if 1
+	MeshletBuildResult result;
+	result.meshlet_faces           = CreateArrayView(meshlet_faces);
+	result.meshlet_face_prefix_sum = CreateArrayView(meshlet_face_prefix_sum);
+	result.meshlets                = CreateArrayView(meshlets);
+	result.meshlet_adjacency       = BuildMeshletAdjacency(mesh, allocator, result.meshlet_face_prefix_sum, result.meshlet_faces, CreateArrayView(kd_tree.elements));
+	
+#if COUNT_KD_TREE_NODE_VISITS
+	printf("BuildMeshlets: kd_tree_node_visits: %u\n", kd_tree_node_visits);
+#endif // COUNT_KD_TREE_NODE_VISITS
+	
+#if COUNT_KD_TREE_LOOKUPS
+	printf("BuildMeshlets: kd_tree_lookup_count: %u\n", kd_tree_lookup_count);
+#endif // COUNT_KD_TREE_LOOKUPS
+	
+	return result;
+}
+
+static MeshletAdjacency BuildMeshletAdjacency(MeshView mesh, Allocator& allocator, ArrayView<u32> meshlet_face_prefix_sum, ArrayView<FaceID> meshlet_faces, ArrayView<KdTreeElement> kd_tree_elements) {
 	Array<u32> meshlet_adjacency_info_indices;
 	ArrayResizeMemset(meshlet_adjacency_info_indices, allocator, meshlet_face_prefix_sum.count, 0xFF);
-	
-	struct MeshletAdjacencyInfo {
-		u32 meshlet_index     = 0;
-		u32 shared_edge_count = 0;
-	};
 	
 	Array<u32> meshlet_adjacency_prefix_sum;
 	Array<MeshletAdjacencyInfo> meshlet_adjacency_infos;
@@ -1982,7 +2065,7 @@ void BuildMeshlets(MeshView& mesh) {
 		u32 face_end_index = meshlet_face_prefix_sum[meshlet_index];
 		
 		// At least reserve one meshlet per face edge. Do this upfront instead of adding code in the inner loop to improve performance.
-		compile_const u32 reserve_size = max_face_count * max_face_degree;
+		compile_const u32 reserve_size = meshlet_max_face_count * meshlet_max_face_degree;
 		if (meshlet_adjacency_infos.count + reserve_size >= meshlet_adjacency_infos.capacity) {
 			ArrayReserve(meshlet_adjacency_infos, allocator, ArrayComputeNewCapacity(meshlet_adjacency_infos.capacity, meshlet_adjacency_infos.capacity + reserve_size));
 		}
@@ -1994,7 +2077,7 @@ void BuildMeshlets(MeshView& mesh) {
 			IterateCornerList<ElementType::Face>(mesh, mesh[face_id].corner_list_base, [&](CornerID corner_id) {
 				IterateCornerList<ElementType::Edge>(mesh, corner_id, [&](CornerID corner_id) {
 					auto other_face_id = mesh[corner_id].face_id;
-					u32 other_meshlet_index = kd_tree.elements[other_face_id.index].partition_index;
+					u32 other_meshlet_index = kd_tree_elements[other_face_id.index].partition_index;
 					if (other_meshlet_index == meshlet_index) return;
 					
 					assert(other_meshlet_index != u32_max); // Face isn't a part of any meshlet.
@@ -2029,30 +2112,143 @@ void BuildMeshlets(MeshView& mesh) {
 		
 		face_begin_index = face_end_index;
 	}
-#endif
 	
-	static std::vector<Face> faces;
-	faces.resize(meshlet_faces.count);
+	MeshletAdjacency meshlet_adjacency;
+	meshlet_adjacency.prefix_sum = CreateArrayView(meshlet_adjacency_prefix_sum);
+	meshlet_adjacency.infos      = CreateArrayView(meshlet_adjacency_infos);
 	
-	for (u32 i = 0; i < meshlet_faces.count; i += 1) {
-		auto face_id = meshlet_faces[i];
-		faces[i] = mesh[face_id];
-	}
-	
-#if COUNT_KD_TREE_NODE_VISITS
-	printf("kd_tree_node_visits: %u\n", kd_tree_node_visits);
-#endif // COUNT_KD_TREE_NODE_VISITS
-#if COUNT_KD_TREE_LOOKUPS
-	printf("kd_tree_lookup_count: %u\n", kd_tree_lookup_count);
-#endif // COUNT_KD_TREE_LOOKUPS
-	
-	mesh.faces = faces.data();
-	mesh.face_count = (u32)faces.size();
-	
-	AllocatorFreeAllMemoryBlocks(allocator);
+	return meshlet_adjacency;
 }
 
-void BuildVirtualGeometry() {
+static u32 CountMeshletGroupSharedEdges(MeshletAdjacency meshlet_adjacency, Array<KdTreeElement> kd_tree_elements, u32 meshlet_index, u32 targent_group_index) {
+	u32 meshlet_begin_index = meshlet_index > 0 ? meshlet_adjacency.prefix_sum[meshlet_index - 1] : 0;
+	u32 meshlet_end_index   = meshlet_adjacency.prefix_sum[meshlet_index];
+	
+	u32 shared_edge_count = 0;
+	for (u32 adjacency_info_index = meshlet_begin_index; adjacency_info_index < meshlet_end_index; adjacency_info_index += 1) {
+		auto adjacency_info = meshlet_adjacency.infos[adjacency_info_index];
+		
+		auto& element = kd_tree_elements[adjacency_info.meshlet_index];
+		if (element.partition_index == targent_group_index) {
+			shared_edge_count += adjacency_info.shared_edge_count;
+		}
+	}
+	
+	return shared_edge_count;
+}
+
+struct MeshletGroupBuildResult {
+	ArrayView<u32> meshlet_indices;
+	ArrayView<u32> prefix_sum;
+};
+
+static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allocator, ArrayView<Meshlet> meshlets, MeshletAdjacency meshlet_adjacency) {
+	KdTree kd_tree;
+	KdTreeBuildElementsForMeshlets(meshlets, allocator, kd_tree.elements);
+	KdTreeBuild(kd_tree, allocator);
+	
+	FixedSizeArray<u32, meshlet_group_max_meshlets> meshlet_group;
+	
+	Array<u32> meshlet_group_meshlet_indices;
+	Array<u32> meshlet_group_prefix_sum;
+	ArrayReserve(meshlet_group_meshlet_indices, allocator, meshlets.count);
+	ArrayReserve(meshlet_group_prefix_sum, allocator, (meshlets.count + meshlet_group_max_meshlets - 1) / meshlet_group_max_meshlets);
+	
+	auto meshlet_group_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
+	auto meshlet_group_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
+	
+#if COUNT_KD_TREE_LOOKUPS
+	u32 kd_tree_lookup_count = 0;
+#endif // COUNT_KD_TREE_LOOKUPS
+	
+	while (true) {
+		u32 best_candidate_meshlet_index = u32_max;
+		u32 max_shared_edge_count = 0;
+		
+		for (u32 i = 0; i < meshlet_group.count; i += 1) {
+			u32 meshlet_index = meshlet_group[i];
+			
+			u32 meshlet_begin_index = meshlet_index > 0 ? meshlet_adjacency.prefix_sum[meshlet_index - 1] : 0;
+			u32 meshlet_end_index   = meshlet_adjacency.prefix_sum[meshlet_index];
+			
+			for (u32 adjacency_info_index = meshlet_begin_index; adjacency_info_index < meshlet_end_index; adjacency_info_index += 1) {
+				auto adjacency_info = meshlet_adjacency.infos[adjacency_info_index];
+				
+				auto& element = kd_tree.elements[adjacency_info.meshlet_index];
+				if (element.partition_index != u32_max) continue; // Meshlet is already assigned to a group.
+				
+				u32 shared_edge_count = CountMeshletGroupSharedEdges(meshlet_adjacency, kd_tree.elements, adjacency_info.meshlet_index, meshlet_group_prefix_sum.count);
+				
+				if (max_shared_edge_count < shared_edge_count) {
+					max_shared_edge_count = shared_edge_count;
+					best_candidate_meshlet_index = adjacency_info.meshlet_index;
+				}
+			}
+		}
+		
+		if (best_candidate_meshlet_index == u32_max) {
+			alignas(16) float center[4];
+			if (meshlet_group.count) {
+				auto center_ps = _mm_mul_ps(_mm_add_ps(meshlet_group_aabb_max_ps, meshlet_group_aabb_min_ps), _mm_set_ps1(0.5f));
+				_mm_store_ps(center, center_ps);
+			} else {
+				_mm_store_ps(center, _mm_setzero_ps());
+			}
+			
+			float min_distance = FLT_MAX;
+			KdTreeFindClosestActiveElement(kd_tree, *(Vector3*)center, best_candidate_meshlet_index, min_distance);
+			
+#if COUNT_KD_TREE_LOOKUPS
+			kd_tree_lookup_count += 1;
+#endif // COUNT_KD_TREE_LOOKUPS
+		}
+		
+		if (best_candidate_meshlet_index == u32_max) {
+			break;
+		}
+		
+		if (meshlet_group.count >= meshlet_group.capacity) {
+			meshlet_group_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
+			meshlet_group_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
+			
+			ArrayAppend(meshlet_group_prefix_sum, meshlet_group_meshlet_indices.count);
+			meshlet_group.count = 0;
+		}
+		
+		ArrayAppend(meshlet_group_meshlet_indices, best_candidate_meshlet_index);
+		ArrayAppend(meshlet_group, best_candidate_meshlet_index);
+		
+		auto& element = kd_tree.elements[best_candidate_meshlet_index];
+		element.partition_index = meshlet_group_prefix_sum.count;
+		
+		auto position = _mm_load_ps(&element.position.x);
+		meshlet_group_aabb_min_ps = _mm_min_ps(meshlet_group_aabb_min_ps, position);
+		meshlet_group_aabb_max_ps = _mm_max_ps(meshlet_group_aabb_max_ps, position);
+	}
+	
+	if (meshlet_group.count) {
+		meshlet_group.count = 0;
+		ArrayAppend(meshlet_group_prefix_sum, meshlet_group_meshlet_indices.count);
+	}
+	
+	assert(meshlet_group_meshlet_indices.count == meshlets.count);
+	
+	MeshletGroupBuildResult result;
+	result.meshlet_indices = CreateArrayView(meshlet_group_meshlet_indices);
+	result.prefix_sum      = CreateArrayView(meshlet_group_prefix_sum);
+	
+#if COUNT_KD_TREE_NODE_VISITS
+	printf("BuildMeshletGroups: kd_tree_node_visits: %u\n", kd_tree_node_visits);
+#endif // COUNT_KD_TREE_NODE_VISITS
+	
+#if COUNT_KD_TREE_LOOKUPS
+	printf("BuildMeshletGroups: kd_tree_lookup_count: %u\n", kd_tree_lookup_count);
+#endif // COUNT_KD_TREE_LOOKUPS
+	
+	return result;
+}
+
+void BuildVirtualGeometry(MeshView& mesh) {
 	//
 	// 1. Build mesh data structure (faces, edges, vertices, corners).
 	// 2. Build meshlets from faces.
@@ -2070,4 +2266,35 @@ void BuildVirtualGeometry() {
 	// 5. Output meshlet data.
 	//  - For each meshlet there should be two errors. One for high quality version of the group, one for low quality.
 	//
+	
+	Allocator allocator;
+	
+	for (u32 level = 0; level < 1; level += 1) {
+		u32 allocator_high_water = allocator.memory_block_count;
+		
+		auto meshlet_build_result = BuildMeshlets(mesh, allocator);
+		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, CreateArrayView(meshlet_build_result.meshlets), meshlet_build_result.meshlet_adjacency);
+		
+#if 0
+		// TODO: Remove this debug only code, replace it with a nicer visualization using vertex colors.
+		{
+			auto meshlet_faces = state.meshlet_faces;
+		
+			static std::vector<Face> faces;
+			faces.resize(meshlet_faces.count);
+		
+			for (u32 i = 0; i < meshlet_faces.count; i += 1) {
+				auto face_id = meshlet_faces[i];
+				faces[i] = mesh[face_id];
+			}
+		
+			mesh.faces = faces.data();
+			mesh.face_count = (u32)faces.size();
+		}
+#endif
+		
+		AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
+	}
+	
+	AllocatorFreeMemoryBlocks(allocator);
 }
