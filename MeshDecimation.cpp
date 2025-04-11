@@ -169,16 +169,20 @@ struct Allocator {
 	u32 memory_block_count = 0;
 };
 
-static void* AllocateMemory(Allocator& allocator, u64 size) {
-	assert(allocator.memory_block_count < Allocator::max_memory_block_count);
+static void* AllocateMemoryBlock(Allocator& allocator, void* old_memory_block, u64 size_bytes) {
+	assert(old_memory_block != nullptr || allocator.memory_block_count < Allocator::max_memory_block_count);
+	assert(old_memory_block == nullptr || allocator.memory_block_count > 0);
+	assert(old_memory_block == nullptr || allocator.memory_blocks[allocator.memory_block_count - 1] == old_memory_block);
 	
-	void* memory_block = malloc(size);
-	allocator.memory_blocks[allocator.memory_block_count++] = memory_block;
+	void* memory_block = realloc(old_memory_block, size_bytes);
+	u32 memory_block_index = old_memory_block ? allocator.memory_block_count - 1 : allocator.memory_block_count++;
+	
+	allocator.memory_blocks[memory_block_index] = memory_block;
 	
 	return memory_block;
 }
 
-static void AllocatorFreeAll(Allocator& allocator) {
+static void AllocatorFreeAllMemoryBlocks(Allocator& allocator) {
 	for (u32 i = allocator.memory_block_count; i > 0; i -= 1) {
 		free(allocator.memory_blocks[i - 1]);
 	}
@@ -216,12 +220,16 @@ struct ArrayView {
 };
 static_assert(sizeof(ArrayView<u32>) == 16);
 
+static u32 ArrayComputeNewCapacity(u32 old_capacity, u32 required_capacity = 0) {
+	u32 new_capacity = old_capacity ? (old_capacity + old_capacity / 2) : 16;
+	return new_capacity > required_capacity ? new_capacity : required_capacity;
+}
+
 template<typename T>
 static void ArrayReserve(Array<T>& array, Allocator& allocator, u32 capacity) {
-	assert(array.count == 0);
-	assert(array.capacity == 0);
+	if (array.capacity >= capacity) return;
 	
-	array.data     = (T*)AllocateMemory(allocator, capacity * sizeof(T));
+	array.data     = (T*)AllocateMemoryBlock(allocator, array.data, capacity * sizeof(T));
 	array.capacity = capacity;
 }
 
@@ -238,13 +246,17 @@ static void ArrayResizeMemset(Array<T>& array, Allocator& allocator, u32 new_cou
 }
 
 template<typename T>
-static T& ArrayAppend(Array<T>& array, const T& value) {
+static void ArrayAppend(Array<T>& array, T value) {
 	assert(array.count < array.capacity);
-	
-	auto& new_element = array.data[array.count++];
-	new_element = value;
-	
-	return new_element;
+	array.data[array.count++] = value;
+}
+
+template<typename T>
+static void ArrayAppendMaybeGrow(Array<T>& array, Allocator& allocator, T value) {
+	if ((array.count >= array.capacity)) {
+		ArrayReserve(array, allocator, ArrayComputeNewCapacity(array.capacity, array.count + 1));
+	}
+	array.data[array.count++] = value;
 }
 
 template<typename T>
@@ -1962,11 +1974,18 @@ void BuildMeshlets(MeshView& mesh) {
 	Array<u32> meshlet_adjacency_prefix_sum;
 	Array<MeshletAdjacencyInfo> meshlet_adjacency_infos;
 	ArrayReserve(meshlet_adjacency_prefix_sum, allocator, meshlet_face_prefix_sum.count);
-	ArrayReserve(meshlet_adjacency_infos, allocator, meshlet_face_prefix_sum.count * (max_face_count * 3)); // TODO: This might overflow.
+	// Must be the last allocation on the memory block stack as it might grow.
+	ArrayReserve(meshlet_adjacency_infos, allocator, meshlet_face_prefix_sum.count * 8);
 	
 	u32 face_begin_index = 0;
 	for (u32 meshlet_index = 0; meshlet_index < meshlet_face_prefix_sum.count; meshlet_index += 1) {
 		u32 face_end_index = meshlet_face_prefix_sum[meshlet_index];
+		
+		// At least reserve one meshlet per face edge. Do this upfront instead of adding code in the inner loop to improve performance.
+		compile_const u32 reserve_size = max_face_count * max_face_degree;
+		if (meshlet_adjacency_infos.count + reserve_size >= meshlet_adjacency_infos.capacity) {
+			ArrayReserve(meshlet_adjacency_infos, allocator, ArrayComputeNewCapacity(meshlet_adjacency_infos.capacity, meshlet_adjacency_infos.capacity + reserve_size));
+		}
 		
 		u32 begin_adjacency_info_index = meshlet_adjacency_infos.count;
 		for (u32 face_index = face_begin_index; face_index < face_end_index; face_index += 1) {
@@ -1983,7 +2002,10 @@ void BuildMeshlets(MeshView& mesh) {
 					u32 adjacency_info_index = meshlet_adjacency_info_indices[other_meshlet_index];
 					if (adjacency_info_index == u32_max) {
 						adjacency_info_index = meshlet_adjacency_infos.count;
-						if (adjacency_info_index >= meshlet_adjacency_infos.capacity) return;
+						
+						// Enough memory should be reserved upfront. Reserving directly in this loop
+						// slows down adjacency search by 40% even if we never need to grow the array.
+						if (meshlet_adjacency_infos.count >= meshlet_adjacency_infos.capacity) return;
 						
 						meshlet_adjacency_info_indices[other_meshlet_index] = meshlet_adjacency_infos.count;
 						
@@ -2027,7 +2049,7 @@ void BuildMeshlets(MeshView& mesh) {
 	mesh.faces = faces.data();
 	mesh.face_count = (u32)faces.size();
 	
-	AllocatorFreeAll(allocator);
+	AllocatorFreeAllMemoryBlocks(allocator);
 }
 
 void BuildVirtualGeometry() {
