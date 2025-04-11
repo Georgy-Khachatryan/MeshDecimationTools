@@ -1315,14 +1315,14 @@ static void EdgeCollapseHeapSiftDown(EdgeCollapseHeap& heap, u32 node_index) {
 
 static EdgeID EdgeCollapseHeapPop(EdgeCollapseHeap& heap) {
 	auto edge_id = heap.heap_index_to_edge_id.front();
-	
-	if (heap.edge_collapse_errors.size() > 1) {
+
+	if (heap.edge_collapse_errors.size() > 0) {
 		heap.edge_collapse_errors[0]  = heap.edge_collapse_errors.back();
 		heap.heap_index_to_edge_id[0] = heap.heap_index_to_edge_id.back();
-	
-		heap.edge_id_to_heap_index[edge_id.index] = u32_max;
-		heap.edge_id_to_heap_index[heap.heap_index_to_edge_id[0].index] = 0;
 	}
+	
+	heap.edge_id_to_heap_index[heap.heap_index_to_edge_id[0].index] = 0;
+	heap.edge_id_to_heap_index[edge_id.index] = u32_max;
 
 	heap.edge_collapse_errors.pop_back();
 	heap.heap_index_to_edge_id.pop_back();
@@ -1345,9 +1345,10 @@ static void EdgeCollapseHeapRemove(EdgeCollapseHeap& heap, u32 heap_index) {
 		float new_error = heap.edge_collapse_errors[heap_index];
 		sift_up = new_error < prev_error;
 	
-		heap.edge_id_to_heap_index[edge_id.index] = u32_max;
-		heap.edge_id_to_heap_index[heap.heap_index_to_edge_id[heap_index].index] = heap_index;
 	}
+	
+	heap.edge_id_to_heap_index[heap.heap_index_to_edge_id[heap_index].index] = heap_index;
+	heap.edge_id_to_heap_index[edge_id.index] = u32_max;
 
 	heap.edge_collapse_errors.pop_back();
 	heap.heap_index_to_edge_id.pop_back();
@@ -1398,20 +1399,13 @@ static void EdgeCollapseHeapValidate(EdgeCollapseHeap& heap) {
 }
 #endif // ENABLE_EDGE_COLLAPSE_HEAP_VALIDATION
 
-//
-// TODO:
-// - Optimization of vertex location.
-// - Scale mesh and attributes before simplification.
-// - Memory-less quadrics.
-// - Output an obj sequence for edge to verify edge collapses.
-//
-void DecimateMesh(MeshView mesh) {
-	MeshDecimationState state;
+static void InitializeMehsDecimationState(MeshView mesh, MeshDecimationState& state) {
 	state.vertex_edge_quadrics.resize(mesh.vertex_count);
 	state.attribute_face_quadrics.resize(mesh.attribute_count);
 	state.wedge_quadrics.reserve(64);
 	state.wedge_attributes.reserve(64 * attribute_stride_dwords);
 	state.wedge_attributes_ids.reserve(64 * attribute_stride_dwords);
+	state.edge_duplicate_map.keys_values.resize(ComputeHashTableSize(128u));
 	
 	memset(state.vertex_edge_quadrics.data(), 0, state.vertex_edge_quadrics.size() * sizeof(Quadric));
 	memset(state.attribute_face_quadrics.data(), 0, state.attribute_face_quadrics.size() * sizeof(QuadricWithAttributes));
@@ -1485,36 +1479,13 @@ void DecimateMesh(MeshView mesh) {
 			AccumulateQuadric(state.vertex_edge_quadrics[v1.index], quadric);
 		}
 	}
-	
-	
-	EdgeCollapseHeap edge_collapse_heap;
-	edge_collapse_heap.edge_collapse_errors.resize(mesh.edge_count);
-	edge_collapse_heap.edge_id_to_heap_index.resize(mesh.edge_count);
-	edge_collapse_heap.heap_index_to_edge_id.resize(mesh.edge_count);
-	
-	{
-		// ScopedTimer t("- Rank Edge Collapses");
-		
-		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
-			EdgeSelectInfo select_info;
-			ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
-			
-			edge_collapse_heap.edge_collapse_errors[edge_id.index]  = select_info.min_error;
-			edge_collapse_heap.edge_id_to_heap_index[edge_id.index] = edge_id.index;
-			edge_collapse_heap.heap_index_to_edge_id[edge_id.index] = edge_id;
-		}
-		
-		EdgeCollapseHeapInitialize(edge_collapse_heap);
-	}
-	
-	u32 target_face_count = mesh.face_count / 138;
-	u32 active_face_count = mesh.active_face_count;
+}
+
+static void DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, EdgeCollapseHeap& edge_collapse_heap, u32 target_face_count, u32 active_face_count) {
 	s32 next_report_target = active_face_count + 1;
 	
 	u64 time0 = 0;
 	u64 time1 = 0;
-	
-	state.edge_duplicate_map.keys_values.resize(ComputeHashTableSize(128u));
 	
 	float max_error = 0.f;
 	while (active_face_count > target_face_count && edge_collapse_heap.edge_collapse_errors.size()) {
@@ -1615,7 +1586,164 @@ void DecimateMesh(MeshView mesh) {
 	
 	printf("%.3f\n", (float)time0 / (float)time1);
 	printf("Max Error: %e\n", max_error);
-	printf("Face Count: %u\n", active_face_count);
+	printf("Face Count: %u/%u\n", active_face_count, target_face_count);
+}
+
+//
+// TODO:
+// - Optimization of vertex location.
+// - Scale mesh and attributes before simplification.
+// - Memory-less quadrics.
+// - Output an obj sequence for edge to verify edge collapses.
+//
+void DecimateMesh(MeshView mesh) {
+	MeshDecimationState state;
+	InitializeMehsDecimationState(mesh, state);
+	
+	
+	EdgeCollapseHeap edge_collapse_heap;
+	edge_collapse_heap.edge_collapse_errors.resize(mesh.edge_count);
+	edge_collapse_heap.edge_id_to_heap_index.resize(mesh.edge_count);
+	edge_collapse_heap.heap_index_to_edge_id.resize(mesh.edge_count);
+	
+	{
+		// ScopedTimer t("- Rank Edge Collapses");
+		
+		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
+			EdgeSelectInfo select_info;
+			ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
+			
+			edge_collapse_heap.edge_collapse_errors[edge_id.index]  = select_info.min_error;
+			edge_collapse_heap.edge_id_to_heap_index[edge_id.index] = edge_id.index;
+			edge_collapse_heap.heap_index_to_edge_id[edge_id.index] = edge_id;
+		}
+		
+		EdgeCollapseHeapInitialize(edge_collapse_heap);
+	}
+	
+	u32 target_face_count = mesh.face_count / 138;
+	u32 active_face_count = mesh.active_face_count;
+	DecimateMeshFaceGroup(mesh, state, edge_collapse_heap, target_face_count, active_face_count);
+}
+
+// TODO: Reduce the number of the allocations done here.
+// TODO: Simplify the code (maybe the caller can compute the neccessary group face counts, group edges, etc.)
+static void DecimateMeshFaceGroups(MeshView mesh, ArrayView<u32> face_id_to_group_index, u32 group_count) {
+	MeshDecimationState state;
+	InitializeMehsDecimationState(mesh, state);
+	
+	std::vector<u32> vertex_group_indices;
+	vertex_group_indices.resize(mesh.vertex_count, u32_max);
+	
+	std::vector<u32> group_face_counts;
+	group_face_counts.resize(group_count);
+	
+	compile_const u32 vertex_group_index_locked = u32_max - 1;
+	
+	{
+		for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
+			auto& face = mesh[face_id];
+			if (face.corner_list_base.index == u32_max) continue;
+			
+			u32 group_index = face_id_to_group_index[face_id.index];
+			group_face_counts[group_index] += 1;
+			
+			IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
+				auto& corner = mesh[corner_id];
+				u32& index = vertex_group_indices[corner.vertex_id.index];
+				
+				if (index == u32_max) {
+					index = group_index;
+				} else if (index != group_index) {
+					index = vertex_group_index_locked; // Lock the vertex.
+				}
+			});
+		}
+	}
+	
+	std::vector<EdgeID> group_edge_ids;
+	std::vector<u32> group_edge_counts;
+	{
+		group_edge_counts.resize(group_count);
+		
+		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
+			auto& edge = mesh[edge_id];
+			
+			u32 group_index_0 = vertex_group_indices[edge.vertex_0.index];
+			u32 group_index_1 = vertex_group_indices[edge.vertex_1.index];
+			
+			// TODO: Allow edge collapses when only one vertex is locked.
+			bool edge_is_locked = (group_index_0 == vertex_group_index_locked) || (group_index_1 == vertex_group_index_locked);
+			assert(edge_is_locked || group_index_0 == group_index_1);
+			
+			if (edge_is_locked == false) {
+				group_edge_counts[group_index_0] += 1;
+			}
+		}
+		
+		u32 prefix_sum = 0;
+		for (u32 i = 0; i < group_count; i += 1) {
+			u32 count = group_edge_counts[i];
+			group_edge_counts[i] = prefix_sum;
+			prefix_sum += count;
+		}
+		
+		group_edge_ids.resize(prefix_sum);
+		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
+			auto& edge = mesh[edge_id];
+			
+			u32 group_index_0 = vertex_group_indices[edge.vertex_0.index];
+			u32 group_index_1 = vertex_group_indices[edge.vertex_1.index];
+			
+			// TODO: Allow edge collapses when only one vertex is locked.
+			bool edge_is_locked = (group_index_0 == vertex_group_index_locked) || (group_index_1 == vertex_group_index_locked);
+			assert(edge_is_locked || group_index_0 == group_index_1);
+			
+			if (edge_is_locked == false) {
+				group_edge_ids[group_edge_counts[group_index_0]++] = edge_id;
+			}
+		}
+	}
+	
+	EdgeCollapseHeap edge_collapse_heap;
+	for (u32 i = 0; i < group_count; i += 1) {
+		u32 edge_begin_index = i > 0 ? group_edge_counts[i - 1] : 0;
+		u32 edge_end_index   = group_edge_counts[i];
+		
+		u32 face_count = group_face_counts[i];
+		u32 edge_count = edge_end_index - edge_begin_index;
+		
+		edge_collapse_heap.edge_collapse_errors.resize(edge_count);
+		edge_collapse_heap.edge_id_to_heap_index.resize(mesh.edge_count);
+		edge_collapse_heap.heap_index_to_edge_id.resize(edge_count);
+		
+		memset(edge_collapse_heap.edge_id_to_heap_index.data(), 0xFF, edge_collapse_heap.edge_id_to_heap_index.size() * sizeof(u32));
+		
+		{
+			// ScopedTimer t("- Rank Edge Collapses");
+			
+			for (u32 edge_index = edge_begin_index; edge_index < edge_end_index; edge_index += 1) {
+				auto edge_id = group_edge_ids[edge_index];
+				u32 local_edge_index = edge_index - edge_begin_index;
+				
+				EdgeSelectInfo select_info;
+				ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
+				
+				edge_collapse_heap.edge_collapse_errors[local_edge_index]  = select_info.min_error;
+				edge_collapse_heap.edge_id_to_heap_index[edge_id.index]    = local_edge_index;
+				edge_collapse_heap.heap_index_to_edge_id[local_edge_index] = edge_id;
+			}
+			
+			EdgeCollapseHeapInitialize(edge_collapse_heap);
+		}
+		
+		u32 target_face_count = face_count / 2;
+		u32 active_face_count = face_count;
+		DecimateMeshFaceGroup(mesh, state, edge_collapse_heap, target_face_count, active_face_count);
+		
+		HashTableClear(state.edge_duplicate_map);
+		state.removed_edge_array.clear();
+	}
 }
 
 
@@ -1628,7 +1756,7 @@ static_assert(sizeof(KdTreeElement) == 16);
 struct KdTreeNode {
 	union {
 		float split;
-		u32 index = 0;	
+		u32 index = 0;
 	};
 	
 	u32 axis    : 2;
@@ -2274,6 +2402,29 @@ void BuildVirtualGeometry(MeshView& mesh) {
 		
 		auto meshlet_build_result = BuildMeshlets(mesh, allocator);
 		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, CreateArrayView(meshlet_build_result.meshlets), meshlet_build_result.meshlet_adjacency);
+		
+		Array<u32> face_id_to_group_index;
+		ArrayResize(face_id_to_group_index, allocator, mesh.face_count);
+		
+		u32 group_meshlet_begin_index = 0;
+		for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
+			u32 group_meshlet_end_index = meshlet_group_build_result.prefix_sum[group_index];
+			
+			for (u32 group_meshlet_index = group_meshlet_begin_index; group_meshlet_index < group_meshlet_end_index; group_meshlet_index += 1) {
+				u32 meshlet_index = meshlet_group_build_result.meshlet_indices[group_meshlet_index];
+				
+				u32 face_begin_index = meshlet_index > 0 ? meshlet_build_result.meshlet_face_prefix_sum[meshlet_index - 1] : 0;
+				u32 face_end_index   = meshlet_build_result.meshlet_face_prefix_sum[meshlet_index];
+				for (u32 face_index = face_begin_index; face_index < face_end_index; face_index += 1) {
+					auto face_id = meshlet_build_result.meshlet_faces[face_index];
+					face_id_to_group_index[face_id.index] = group_index;
+				}
+			}
+			
+			group_meshlet_begin_index = group_meshlet_end_index;
+		}
+		
+		DecimateMeshFaceGroups(mesh, CreateArrayView(face_id_to_group_index), meshlet_group_build_result.prefix_sum.count);
 		
 #if 0
 		// TODO: Remove this debug only code, replace it with a nicer visualization using vertex colors.
