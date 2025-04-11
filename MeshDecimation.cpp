@@ -1892,10 +1892,8 @@ void BuildMeshlets(MeshView& mesh) {
 		}
 		
 		
-		auto& face = mesh[best_face_id];
-		
 		u32 new_vertex_count = 0;
-		IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
+		IterateCornerList<ElementType::Face>(mesh, mesh[best_face_id].corner_list_base, [&](CornerID corner_id) {
 			auto& corner = mesh[corner_id];
 			u8 vertex_index = vertex_usage_map[corner.attributes_id.index];
 			if (vertex_index == 0xFF) {
@@ -1951,6 +1949,65 @@ void BuildMeshlets(MeshView& mesh) {
 	}
 	
 	assert(meshlet_faces.count == mesh.active_face_count);
+	
+#if 1
+	Array<u32> meshlet_adjacency_info_indices;
+	ArrayResizeMemset(meshlet_adjacency_info_indices, allocator, meshlet_face_prefix_sum.count, 0xFF);
+	
+	struct MeshletAdjacencyInfo {
+		u32 meshlet_index     = 0;
+		u32 shared_edge_count = 0;
+	};
+	
+	Array<u32> meshlet_adjacency_prefix_sum;
+	Array<MeshletAdjacencyInfo> meshlet_adjacency_infos;
+	ArrayReserve(meshlet_adjacency_prefix_sum, allocator, meshlet_face_prefix_sum.count);
+	ArrayReserve(meshlet_adjacency_infos, allocator, meshlet_face_prefix_sum.count * (max_face_count * 3)); // TODO: This might overflow.
+	
+	u32 face_begin_index = 0;
+	for (u32 meshlet_index = 0; meshlet_index < meshlet_face_prefix_sum.count; meshlet_index += 1) {
+		u32 face_end_index = meshlet_face_prefix_sum[meshlet_index];
+		
+		u32 begin_adjacency_info_index = meshlet_adjacency_infos.count;
+		for (u32 face_index = face_begin_index; face_index < face_end_index; face_index += 1) {
+			auto face_id = meshlet_faces[face_index];
+			
+			IterateCornerList<ElementType::Face>(mesh, mesh[face_id].corner_list_base, [&](CornerID corner_id) {
+				IterateCornerList<ElementType::Edge>(mesh, corner_id, [&](CornerID corner_id) {
+					auto other_face_id = mesh[corner_id].face_id;
+					u32 other_meshlet_index = kd_tree.elements[other_face_id.index].partition_index;
+					if (other_meshlet_index == meshlet_index) return;
+					
+					assert(other_meshlet_index != u32_max); // Face isn't a part of any meshlet.
+					
+					u32 adjacency_info_index = meshlet_adjacency_info_indices[other_meshlet_index];
+					if (adjacency_info_index == u32_max) {
+						adjacency_info_index = meshlet_adjacency_infos.count;
+						if (adjacency_info_index >= meshlet_adjacency_infos.capacity) return;
+						
+						meshlet_adjacency_info_indices[other_meshlet_index] = meshlet_adjacency_infos.count;
+						
+						MeshletAdjacencyInfo info;
+						info.meshlet_index     = other_meshlet_index;
+						info.shared_edge_count = 1;
+						ArrayAppend(meshlet_adjacency_infos, info);
+					} else {
+						meshlet_adjacency_infos[adjacency_info_index].shared_edge_count += 1;
+					}
+				});
+			});
+		}
+		u32 end_adjacency_info_index = meshlet_adjacency_infos.count;
+		
+		ArrayAppend(meshlet_adjacency_prefix_sum, end_adjacency_info_index);
+		
+		for (u32 adjacency_info_index = begin_adjacency_info_index; adjacency_info_index < end_adjacency_info_index; adjacency_info_index += 1) {
+			meshlet_adjacency_info_indices[meshlet_adjacency_infos[adjacency_info_index].meshlet_index] = u32_max;
+		}
+		
+		face_begin_index = face_end_index;
+	}
+#endif
 	
 	static std::vector<Face> faces;
 	faces.resize(meshlet_faces.count);
