@@ -1585,6 +1585,9 @@ static void DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, Edg
 		time1 += (t2 - t0);
 	}
 	
+	HashTableClear(state.edge_duplicate_map);
+	state.removed_edge_array.clear();
+	
 #if REPORT_DECIMATION_PROGRESS
 	printf("%.3f\n", (float)time0 / (float)time1);
 	printf("Max Error: %e\n", max_error);
@@ -1631,43 +1634,45 @@ void DecimateMesh(MeshView mesh) {
 
 // TODO: Reduce the number of the allocations done here.
 // TODO: Simplify the code (maybe the caller can compute the neccessary group face counts, group edges, etc.)
-static void DecimateMeshFaceGroups(MeshView mesh, ArrayView<u32> face_id_to_group_index, u32 group_count) {
+static void DecimateMeshFaceGroups(MeshView mesh, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum) {
 	MeshDecimationState state;
 	InitializeMehsDecimationState(mesh, state);
 	
+	compile_const u32 vertex_group_index_locked = u32_max - 1;
+
 	std::vector<u32> vertex_group_indices;
 	vertex_group_indices.resize(mesh.vertex_count, u32_max);
 	
-	std::vector<u32> group_face_counts;
-	group_face_counts.resize(group_count);
-	
-	compile_const u32 vertex_group_index_locked = u32_max - 1;
-	
 	{
-		for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
-			auto& face = mesh[face_id];
-			if (face.corner_list_base.index == u32_max) continue;
+		u32 begin_face_index = 0;
+		for (u32 group_index = 0; group_index < meshlet_group_face_prefix_sum.count; group_index += 1) {
+			u32 end_face_index = meshlet_group_face_prefix_sum[group_index];
 			
-			u32 group_index = face_id_to_group_index[face_id.index];
-			group_face_counts[group_index] += 1;
-			
-			IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
-				auto& corner = mesh[corner_id];
-				u32& index = vertex_group_indices[corner.vertex_id.index];
+			for (u32 face_index = begin_face_index; face_index < end_face_index; face_index += 1) {
+				auto face_id = meshlet_group_faces[face_index];
+				auto& face = mesh[face_id];
+				if (face.corner_list_base.index == u32_max) continue;
 				
-				if (index == u32_max) {
-					index = group_index;
-				} else if (index != group_index) {
-					index = vertex_group_index_locked; // Lock the vertex.
-				}
-			});
+				IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
+					auto& corner = mesh[corner_id];
+					u32& index = vertex_group_indices[corner.vertex_id.index];
+					
+					if (index == u32_max) {
+						index = group_index;
+					} else if (index != group_index) {
+						index = vertex_group_index_locked; // Lock the vertex.
+					}
+				});
+			}
+			
+			begin_face_index = end_face_index;
 		}
 	}
 	
-	std::vector<EdgeID> group_edge_ids;
-	std::vector<u32> group_edge_counts;
+	std::vector<EdgeID> meshlet_group_edge_ids;
+	std::vector<u32> meshlet_group_edge_prefix_sum;
 	{
-		group_edge_counts.resize(group_count);
+		meshlet_group_edge_prefix_sum.resize(meshlet_group_face_prefix_sum.count);
 		
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
@@ -1681,18 +1686,18 @@ static void DecimateMeshFaceGroups(MeshView mesh, ArrayView<u32> face_id_to_grou
 			assert(edge_is_locked || group_index_0 == group_index_1);
 			
 			if (edge_is_locked == false) {
-				group_edge_counts[group_index_0] += 1;
+				meshlet_group_edge_prefix_sum[group_index_0] += 1;
 			}
 		}
 		
 		u32 prefix_sum = 0;
-		for (u32 i = 0; i < group_count; i += 1) {
-			u32 count = group_edge_counts[i];
-			group_edge_counts[i] = prefix_sum;
+		for (u32 i = 0; i < meshlet_group_face_prefix_sum.count; i += 1) {
+			u32 count = meshlet_group_edge_prefix_sum[i];
+			meshlet_group_edge_prefix_sum[i] = prefix_sum;
 			prefix_sum += count;
 		}
 		
-		group_edge_ids.resize(prefix_sum);
+		meshlet_group_edge_ids.resize(prefix_sum);
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
 			if (edge.corner_list_base.index == u32_max) continue;
@@ -1705,18 +1710,22 @@ static void DecimateMeshFaceGroups(MeshView mesh, ArrayView<u32> face_id_to_grou
 			assert(edge_is_locked || group_index_0 == group_index_1);
 			
 			if (edge_is_locked == false) {
-				group_edge_ids[group_edge_counts[group_index_0]++] = edge_id;
+				meshlet_group_edge_ids[meshlet_group_edge_prefix_sum[group_index_0]++] = edge_id;
 			}
 		}
 	}
 	
+	
 	EdgeCollapseHeap edge_collapse_heap;
-	for (u32 i = 0; i < group_count; i += 1) {
-		u32 edge_begin_index = i > 0 ? group_edge_counts[i - 1] : 0;
-		u32 edge_end_index   = group_edge_counts[i];
+	
+	u32 edge_begin_index = 0;
+	u32 face_begin_index = 0;
+	for (u32 group_index = 0; group_index < meshlet_group_face_prefix_sum.count; group_index += 1) {
+		u32 edge_end_index = meshlet_group_edge_prefix_sum[group_index];
+		u32 face_end_index = meshlet_group_face_prefix_sum[group_index];
 		
-		u32 face_count = group_face_counts[i];
 		u32 edge_count = edge_end_index - edge_begin_index;
+		u32 face_count = face_end_index - face_begin_index;
 		
 		edge_collapse_heap.edge_collapse_errors.resize(edge_count);
 		edge_collapse_heap.edge_id_to_heap_index.resize(mesh.edge_count);
@@ -1728,7 +1737,7 @@ static void DecimateMeshFaceGroups(MeshView mesh, ArrayView<u32> face_id_to_grou
 			// ScopedTimer t("- Rank Edge Collapses");
 			
 			for (u32 edge_index = edge_begin_index; edge_index < edge_end_index; edge_index += 1) {
-				auto edge_id = group_edge_ids[edge_index];
+				auto edge_id = meshlet_group_edge_ids[edge_index];
 				u32 local_edge_index = edge_index - edge_begin_index;
 				
 				EdgeSelectInfo select_info;
@@ -1746,8 +1755,8 @@ static void DecimateMeshFaceGroups(MeshView mesh, ArrayView<u32> face_id_to_grou
 		u32 active_face_count = face_count;
 		DecimateMeshFaceGroup(mesh, state, edge_collapse_heap, target_face_count, active_face_count);
 		
-		HashTableClear(state.edge_duplicate_map);
-		state.removed_edge_array.clear();
+		edge_begin_index = edge_end_index;
+		face_begin_index = face_end_index;
 	}
 }
 
@@ -1860,17 +1869,15 @@ static u32 KdTreeBuildNode(Array<KdTreeNode>& nodes, ArrayView<KdTreeElement> el
 	return node_index;
 }
 
-static void KdTreeReserve(KdTree& tree, Allocator& allocator) {
+static void KdTreeBuild(KdTree& tree, Allocator& allocator) {
 	ArrayResize(tree.element_indices, allocator, tree.elements.count);
 	ArrayReserve(tree.nodes, allocator, tree.elements.count * 2);
-}
-
-static void KdTreeBuild(KdTree& tree, u32 begin_element_index, u32 end_element_index) {
+	
 	for (u32 i = 0; i < tree.element_indices.count; i += 1) {
 		tree.element_indices[i] = i;
 	}
 	
-	KdTreeBuildNode(tree.nodes, CreateArrayView(tree.elements, begin_element_index, end_element_index), CreateArrayView(tree.element_indices));
+	KdTreeBuildNode(tree.nodes, CreateArrayView(tree.elements), CreateArrayView(tree.element_indices));
 }
 
 #define COUNT_KD_TREE_LOOKUPS 0
@@ -2006,7 +2013,7 @@ struct MeshletBuildResult {
 
 static MeshletAdjacency BuildMeshletAdjacency(MeshView mesh, Allocator& allocator, ArrayView<u32> meshlet_face_prefix_sum, ArrayView<FaceID> meshlet_faces, ArrayView<KdTreeElement> kd_tree_elements);
 
-static void BuildMeshletsForGroup(
+static void BuildMeshletsForFaceGroup(
 	MeshView mesh,
 	KdTree kd_tree,
 	Array<u8> vertex_usage_map,
@@ -2162,68 +2169,47 @@ static void BuildMeshletsForGroup(
 }
 	
 
-static MeshletBuildResult BuildMeshlets(MeshView mesh, Allocator& allocator, ArrayView<u32> face_id_to_group_index, u32 group_count) {
+// Note that FaceIDs inside groups are going to be scrambled inside groups during KdTree build. This leaves prefix sum in a valid, but different state.
+static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& allocator, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum) {
 	KdTree kd_tree;
 	KdTreeBuildElementsForFaces(mesh, allocator, kd_tree.elements);
-	KdTreeReserve(kd_tree, allocator);
+	ArrayReserve(kd_tree.nodes, allocator, kd_tree.elements.count * 2);
+	
+	// Use meshlet group faces as source element indices to build meshlets in groups.
+	// KdTree elements during meshlet generation are just faces, so element indices and FaceIDs are the same.
+	kd_tree.element_indices.data     = (u32*)meshlet_group_faces.data;
+	kd_tree.element_indices.count    = meshlet_group_faces.count;
+	kd_tree.element_indices.capacity = meshlet_group_faces.capacity;
+	static_assert(sizeof(FaceID) == sizeof(u32));
+	assert(kd_tree.elements.count == meshlet_group_faces.count);
+	
 	
 	Array<u8> vertex_usage_map;
 	ArrayResizeMemset(vertex_usage_map, allocator, mesh.attribute_count, 0xFF);
 	
-	// TODO: Use an irregular 2D array.
 	Array<FaceID> meshlet_faces;
 	Array<u32> meshlet_face_prefix_sum;
 	Array<Meshlet> meshlets;
-	Array<u32> group_face_prefix_sum;
 	
 	ArrayReserve(meshlet_faces, allocator, mesh.face_count);
 	ArrayReserve(meshlet_face_prefix_sum, allocator, mesh.face_count);
 	ArrayReserve(meshlets, allocator, mesh.face_count);
-	ArrayResizeMemset(group_face_prefix_sum, allocator, group_count, 0);
-	
-	{
-		for (u32 i = 0; i < face_id_to_group_index.count; i += 1) {
-			auto face = mesh.faces[i];
-			if (face.corner_list_base.index == u32_max) continue;
-			
-			u32 group_index = face_id_to_group_index[i];
-			group_face_prefix_sum[group_index] += 1;
-		}
-		
-		u32 prefix_sum = 0;
-		for (u32 i = 0; i < group_count; i += 1) {
-			u32 count = group_face_prefix_sum[i];
-			group_face_prefix_sum[i] = prefix_sum;
-			prefix_sum += count;
-		}
-		
-		for (u32 i = 0; i < face_id_to_group_index.count; i += 1) {
-			auto face = mesh.faces[i];
-			if (face.corner_list_base.index == u32_max) continue;
-			
-			u32 group_index = face_id_to_group_index[i];
-			u32 element_index = group_face_prefix_sum[group_index]++;
-			
-			kd_tree.element_indices[element_index] = i;
-		}
-	}
 	
 	u32 begin_element_index = 0;
-	for (u32 i = 0; i < group_count; i += 1) {
-		u32 end_element_index = group_face_prefix_sum[i];
+	for (u32 group_index = 0; group_index < meshlet_group_face_prefix_sum.count; group_index += 1) {
+		u32 end_element_index = meshlet_group_face_prefix_sum[group_index];
 		
 		kd_tree.nodes.count = 0;
 		auto element_indices = CreateArrayView(kd_tree.element_indices, begin_element_index, end_element_index);
-		auto elements        = CreateArrayView(kd_tree.elements);
 		
 		for (u32 index : element_indices) {
 			// Mark elements of the current group as eligible for meshlet generation.
-			elements[index].partition_index = u32_max;
+			kd_tree.elements[index].partition_index = u32_max;
 		}
 		
-		KdTreeBuildNode(kd_tree.nodes, elements, element_indices);
+		KdTreeBuildNode(kd_tree.nodes, CreateArrayView(kd_tree.elements), element_indices);
 	
-		BuildMeshletsForGroup(
+		BuildMeshletsForFaceGroup(
 			mesh,
 			kd_tree,
 			vertex_usage_map,
@@ -2246,11 +2232,11 @@ static MeshletBuildResult BuildMeshlets(MeshView mesh, Allocator& allocator, Arr
 	result.meshlet_adjacency       = BuildMeshletAdjacency(mesh, allocator, result.meshlet_face_prefix_sum, result.meshlet_faces, CreateArrayView(kd_tree.elements));
 	
 #if COUNT_KD_TREE_NODE_VISITS
-	printf("BuildMeshlets: kd_tree_node_visits: %u\n", kd_tree_node_visits);
+	printf("BuildMeshletsForFaceGroups: kd_tree_node_visits: %u\n", kd_tree_node_visits);
 #endif // COUNT_KD_TREE_NODE_VISITS
 	
 #if COUNT_KD_TREE_LOOKUPS
-	printf("BuildMeshlets: kd_tree_lookup_count: %u\n", kd_tree_lookup_count);
+	printf("BuildMeshletsForFaceGroups: kd_tree_lookup_count: %u\n", kd_tree_lookup_count);
 #endif // COUNT_KD_TREE_LOOKUPS
 	
 	return result;
@@ -2351,8 +2337,7 @@ struct MeshletGroupBuildResult {
 static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allocator, ArrayView<Meshlet> meshlets, MeshletAdjacency meshlet_adjacency) {
 	KdTree kd_tree;
 	KdTreeBuildElementsForMeshlets(meshlets, allocator, kd_tree.elements);
-	KdTreeReserve(kd_tree, allocator);
-	KdTreeBuild(kd_tree, 0, kd_tree.elements.count);
+	KdTreeBuild(kd_tree, allocator);
 	
 	FixedSizeArray<u32, meshlet_group_max_meshlets> meshlet_group;
 	
@@ -2455,8 +2440,12 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 	return result;
 }
 
-static void BuildFaceIdToGroupIndexMap(MeshView mesh, Allocator& allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, ArrayView<u32> face_id_to_group_index) {
-	assert(face_id_to_group_index.count >= mesh.face_count);
+static void ConvertMeshletGroupsToFaceGroups(MeshView mesh, Allocator& allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<FaceID>& meshlet_group_faces, Array<u32>& meshlet_group_face_prefix_sum) {
+	assert(meshlet_group_faces.capacity >= mesh.face_count);
+	assert(meshlet_group_face_prefix_sum.capacity >= mesh.face_count);
+	
+	meshlet_group_faces.count = 0;
+	meshlet_group_face_prefix_sum.count = 0;
 	
 	u32 group_meshlet_begin_index = 0;
 	for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
@@ -2468,10 +2457,10 @@ static void BuildFaceIdToGroupIndexMap(MeshView mesh, Allocator& allocator, Mesh
 			u32 face_begin_index = meshlet_index > 0 ? meshlet_build_result.meshlet_face_prefix_sum[meshlet_index - 1] : 0;
 			u32 face_end_index   = meshlet_build_result.meshlet_face_prefix_sum[meshlet_index];
 			for (u32 face_index = face_begin_index; face_index < face_end_index; face_index += 1) {
-				auto face_id = meshlet_build_result.meshlet_faces[face_index];
-				face_id_to_group_index[face_id.index] = group_index;
+				ArrayAppend(meshlet_group_faces, meshlet_build_result.meshlet_faces[face_index]);
 			}
 		}
+		ArrayAppend(meshlet_group_face_prefix_sum, meshlet_group_faces.count);
 		
 		group_meshlet_begin_index = group_meshlet_end_index;
 	}
@@ -2498,19 +2487,18 @@ static u32 CreateMeshElementRemap(MeshView mesh, Array<ElementID> old_element_id
 	return new_element_count;
 }
 
-static void CompactMesh(MeshView& mesh, Array<u32>& face_id_to_group_index, Allocator& allocator) {
+static void CompactMesh(MeshView& mesh, Allocator& allocator, Array<FaceID>& meshlet_group_faces, Array<u32>& meshlet_group_face_prefix_sum) {
 	Array<FaceID> old_face_id_to_new_face_id;
 	ArrayResize(old_face_id_to_new_face_id, allocator, mesh.face_count);
 	
 	Array<EdgeID> old_edge_id_to_new_edge_id;
 	ArrayResize(old_edge_id_to_new_edge_id, allocator, mesh.edge_count);
 	
-	u32 new_face_count = CreateMeshElementRemap<FaceID>(mesh, old_face_id_to_new_face_id);
-	u32 new_edge_count = CreateMeshElementRemap<EdgeID>(mesh, old_edge_id_to_new_edge_id);
+	mesh.face_count = CreateMeshElementRemap<FaceID>(mesh, old_face_id_to_new_face_id);
+	mesh.edge_count = CreateMeshElementRemap<EdgeID>(mesh, old_edge_id_to_new_edge_id);
 	
-	mesh.face_count = new_face_count;
-	mesh.edge_count = new_edge_count;
 	
+	// Remap mesh corners.
 	for (u32 i = 0; i < mesh.corner_count; i += 1) {
 		auto& corner = mesh.corners[i];
 		if (corner.face_id.index != u32_max) {
@@ -2522,13 +2510,29 @@ static void CompactMesh(MeshView& mesh, Array<u32>& face_id_to_group_index, Allo
 		}
 	}
 	
-	for (u32 i = 0; i < old_face_id_to_new_face_id.count; i += 1) {
-		auto new_face_id = old_face_id_to_new_face_id[i];
-		if (new_face_id.index == u32_max) continue;
+	
+	// Remap meshlet group faces.
+	{
+		u32 new_prefix_sum = 0;
 		
-		face_id_to_group_index[new_face_id.index] = face_id_to_group_index[i];
+		u32 begin_face_index = 0;
+		for (u32 group_index = 0; group_index < meshlet_group_face_prefix_sum.count; group_index += 1) {
+			u32 end_face_index = meshlet_group_face_prefix_sum[group_index];
+			
+			for (u32 face_index = begin_face_index; face_index < end_face_index; face_index += 1) {
+				auto old_face_id = meshlet_group_faces[face_index];
+				auto new_face_id = old_face_id_to_new_face_id[old_face_id.index];
+				if (new_face_id.index == u32_max) continue;
+				
+				meshlet_group_faces[new_prefix_sum++] = new_face_id;
+			}
+			meshlet_group_face_prefix_sum[group_index] = new_prefix_sum;
+			
+			begin_face_index = end_face_index;
+		}
+		
+		meshlet_group_faces.count = new_prefix_sum;
 	}
-	face_id_to_group_index.count = new_face_count;
 }
 
 void BuildVirtualGeometry(MeshView& mesh) {
@@ -2547,23 +2551,29 @@ void BuildVirtualGeometry(MeshView& mesh) {
 	
 	Allocator allocator;
 	
-	Array<u32> face_id_to_group_index;
-	ArrayResizeMemset(face_id_to_group_index, allocator, mesh.face_count, 0);
-	u32 group_count = 1;
+	Array<FaceID> meshlet_group_faces;
+	Array<u32> meshlet_group_face_prefix_sum;
+	ArrayResize(meshlet_group_faces, allocator, mesh.face_count);
+	ArrayReserve(meshlet_group_face_prefix_sum, allocator, mesh.face_count);
+	
+	for (u32 i = 0; i < meshlet_group_faces.count; i += 1) {
+		meshlet_group_faces[i].index = i;
+	}
+	ArrayAppend(meshlet_group_face_prefix_sum, meshlet_group_faces.count);
+	
 	
 	for (u32 level = 0; level < 16; level += 1) {
 		u32 allocator_high_water = allocator.memory_block_count;
 		
-		auto meshlet_build_result       = BuildMeshlets(mesh, allocator, CreateArrayView(face_id_to_group_index), group_count);
+		auto meshlet_build_result       = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum);
 		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, meshlet_build_result.meshlets, meshlet_build_result.meshlet_adjacency);
-		group_count = meshlet_group_build_result.prefix_sum.count;
 		
-		BuildFaceIdToGroupIndexMap(mesh, allocator, meshlet_build_result, meshlet_group_build_result, CreateArrayView(face_id_to_group_index));
+		ConvertMeshletGroupsToFaceGroups(mesh, allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_faces, meshlet_group_face_prefix_sum);
 		
-		DecimateMeshFaceGroups(mesh, CreateArrayView(face_id_to_group_index), group_count);
+		DecimateMeshFaceGroups(mesh, meshlet_group_faces, meshlet_group_face_prefix_sum);
 		
 		// Compact the mesh after decimation to remove unused faces and edges. TODO: Ensure source mesh is compacted and replace face and edge validity checks with asserts.
-		CompactMesh(mesh, face_id_to_group_index, allocator);
+		CompactMesh(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum);
 		
 		AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 		
