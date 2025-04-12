@@ -455,7 +455,7 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 	
 	VertexHashTable table;
 	table.vertex_ids.resize(ComputeHashTableSize(triangle_mesh.vertices.size()), VertexID{ u32_max });
-
+	
 	for (u32 vertex_index = 0; vertex_index < triangle_mesh.vertices.size(); vertex_index += 1) {
 		auto& position = triangle_mesh.vertices[vertex_index].position;
 		memcpy(mesh[AttributesID{ vertex_index }], (float*)&triangle_mesh.vertices[vertex_index] + 3, attribute_stride_dwords * sizeof(u32));
@@ -471,8 +471,6 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 	
 	u32 active_face_count = 0;
 	for (u32 triangle_index = 0; triangle_index < triangle_count; triangle_index += 1) {
-		auto face_id = FaceID{ triangle_index };
-		
 		u32 indices[3] = {
 			triangle_mesh.indices[triangle_index * 3 + 0],
 			triangle_mesh.indices[triangle_index * 3 + 1],
@@ -491,9 +489,6 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 			PackEdgeKey(vertex_ids[2], vertex_ids[0]),
 		};
 		
-		auto& face = mesh[face_id];
-		face.corner_list_base.index = u32_max;
-		
 		bool has_duplicate_vertices = 
 			vertex_ids[0].index == vertex_ids[1].index ||
 			vertex_ids[0].index == vertex_ids[2].index ||
@@ -502,6 +497,11 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 		// Skip primitives that reduce to a single line or a point. PerformEdgeCollapse(...) can't reliably handle them.
 		if (has_duplicate_vertices) continue;
 		
+		
+		auto face_id = FaceID{ active_face_count };
+		active_face_count += 1;
+		
+		mesh[face_id].corner_list_base.index = u32_max;
 		
 		for (u32 corner_index = 0; corner_index < 3; corner_index += 1) {
 			auto corner_id = CornerID{ face_id.index * 3 + corner_index };
@@ -518,10 +518,8 @@ Mesh ObjMeshToEditableMesh(ObjTriangleMesh triangle_mesh) {
 			CornerListInsert<EdgeID>(mesh, corner.edge_id, corner_id);
 			CornerListInsert<FaceID>(mesh, corner.face_id, corner_id);
 		}
-		active_face_count += 1;
 	}
-	result_mesh.active_face_count = active_face_count;
-	mesh.edge_count = (u32)result_mesh.edges.size();
+	result_mesh.faces.resize(active_face_count);
 	
 	return result_mesh;
 }
@@ -595,7 +593,6 @@ MeshView MeshToMeshView(Mesh& mesh) {
 	view.vertex_count    = (u32)mesh.vertices.size();
 	view.corner_count    = (u32)mesh.corners.size();
 	view.attribute_count = (u32)mesh.attributes.size() / attribute_stride_dwords;
-	view.active_face_count = mesh.active_face_count;
 	return view;
 }
 
@@ -1628,7 +1625,7 @@ void DecimateMesh(MeshView mesh) {
 	}
 	
 	u32 target_face_count = mesh.face_count / 138;
-	u32 active_face_count = mesh.active_face_count;
+	u32 active_face_count = mesh.face_count;
 	DecimateMeshFaceGroup(mesh, state, edge_collapse_heap, target_face_count, active_face_count);
 }
 
@@ -2240,7 +2237,7 @@ static MeshletBuildResult BuildMeshlets(MeshView mesh, Allocator& allocator, Arr
 		begin_element_index = end_element_index;
 	}
 	
-	assert(meshlet_faces.count == mesh.active_face_count);
+	assert(meshlet_faces.count == mesh.face_count);
 	
 	MeshletBuildResult result;
 	result.meshlet_faces           = CreateArrayView(meshlet_faces);
@@ -2513,7 +2510,6 @@ static void CompactMesh(MeshView& mesh, Array<u32>& face_id_to_group_index, Allo
 	
 	mesh.face_count = new_face_count;
 	mesh.edge_count = new_edge_count;
-	mesh.active_face_count = new_face_count;
 	
 	for (u32 i = 0; i < mesh.corner_count; i += 1) {
 		auto& corner = mesh.corners[i];
@@ -2571,7 +2567,7 @@ void BuildVirtualGeometry(MeshView& mesh) {
 		
 		AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 		
-		if (mesh.active_face_count <= 1024) break;
+		if (mesh.face_count <= 1024) break;
 	}
 	
 	AllocatorFreeMemoryBlocks(allocator);

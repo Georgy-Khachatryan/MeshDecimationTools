@@ -122,7 +122,7 @@ ObjTriangleMesh ParseWavefrontObj(const char* string) {
 }
 
 void WriteWavefrontObjFile(const ObjTriangleMesh& mesh) {
-	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/Output/NonManifoldCorner.obj", "wb");
+	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/Output/StanfordDragon.obj", "wb");
 	if (file == nullptr) return;
 	
 	fprintf(file, "# MeshDecimation\n");
@@ -145,8 +145,12 @@ void WriteWavefrontObjFile(const ObjTriangleMesh& mesh) {
 	fclose(file);
 }
 
+#include <chrono>
+
 int main() {
-	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/NonManifoldCorner.obj", "rb");
+	auto t0 = std::chrono::high_resolution_clock::now();
+	
+	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/StanfordDragon.obj", "rb");
 	if (file == nullptr) return -1;
 	
 	fseek(file, 0, SEEK_END);
@@ -158,12 +162,29 @@ int main() {
 	fread(file_data.data(), 1, file_size, file);
 	file_data[file_size] = 0;
 	
-	auto triangle_mesh = ParseWavefrontObj(file_data.data());
-	auto editable_mesh = ObjMeshToEditableMesh(triangle_mesh);
-
-	auto mesh_view = MeshToMeshView(editable_mesh);
-	DecimateMesh(mesh_view);
+	auto t1 = std::chrono::high_resolution_clock::now();
+	printf("Read File Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 	
+	t0 = std::chrono::high_resolution_clock::now();
+	auto triangle_mesh = ParseWavefrontObj(file_data.data());
+	t1 = std::chrono::high_resolution_clock::now();
+	printf("Parse File Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+	
+
+	t0 = std::chrono::high_resolution_clock::now();
+	auto editable_mesh = ObjMeshToEditableMesh(triangle_mesh);
+	t1 = std::chrono::high_resolution_clock::now();
+	printf("To Editable Mesh Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+	
+	t0 = std::chrono::high_resolution_clock::now();
+	auto mesh_view = MeshToMeshView(editable_mesh);
+	
+	// DecimateMesh(mesh_view);
+	BuildVirtualGeometry(mesh_view);
+	
+	t1 = std::chrono::high_resolution_clock::now();
+	printf("Decimation Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+
 	WriteWavefrontObjFile(EditableMeshToObjMesh(mesh_view));
 	
 	fclose(file);
