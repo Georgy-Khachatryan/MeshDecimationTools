@@ -1481,6 +1481,8 @@ static void InitializeMehsDecimationState(MeshView mesh, MeshDecimationState& st
 	}
 }
 
+#define REPORT_DECIMATION_PROGRESS 0
+
 static void DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, EdgeCollapseHeap& edge_collapse_heap, u32 target_face_count, u32 active_face_count) {
 	s32 next_report_target = active_face_count + 1;
 	
@@ -1490,8 +1492,10 @@ static void DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, Edg
 	float max_error = 0.f;
 	while (active_face_count > target_face_count && edge_collapse_heap.edge_collapse_errors.size()) {
 		if ((s32)active_face_count < next_report_target) {
+#if REPORT_DECIMATION_PROGRESS
 			printf("Remaining Faces: %u\n", active_face_count - target_face_count);
 			next_report_target -= 10000;
+#endif // REPORT_DECIMATION_PROGRESS
 			
 #if ENABLE_EDGE_COLLAPSE_HEAP_VALIDATION
 			EdgeCollapseHeapValidate(edge_collapse_heap);
@@ -1584,9 +1588,11 @@ static void DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, Edg
 		time1 += (t2 - t0);
 	}
 	
+#if REPORT_DECIMATION_PROGRESS
 	printf("%.3f\n", (float)time0 / (float)time1);
 	printf("Max Error: %e\n", max_error);
 	printf("Face Count: %u/%u\n", active_face_count, target_face_count);
+#endif // REPORT_DECIMATION_PROGRESS
 }
 
 //
@@ -1668,6 +1674,7 @@ static void DecimateMeshFaceGroups(MeshView mesh, ArrayView<u32> face_id_to_grou
 		
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
+			if (edge.corner_list_base.index == u32_max) continue;
 			
 			u32 group_index_0 = vertex_group_indices[edge.vertex_0.index];
 			u32 group_index_1 = vertex_group_indices[edge.vertex_1.index];
@@ -1691,6 +1698,7 @@ static void DecimateMeshFaceGroups(MeshView mesh, ArrayView<u32> face_id_to_grou
 		group_edge_ids.resize(prefix_sum);
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
+			if (edge.corner_list_base.index == u32_max) continue;
 			
 			u32 group_index_0 = vertex_group_indices[edge.vertex_0.index];
 			u32 group_index_1 = vertex_group_indices[edge.vertex_1.index];
@@ -2376,6 +2384,78 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 	return result;
 }
 
+static ArrayView<u32> BuildFaceIdToGroupIndexMap(MeshView mesh, Allocator& allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result) {
+	Array<u32> face_id_to_group_index;
+	ArrayResize(face_id_to_group_index, allocator, mesh.face_count);
+	
+	u32 group_meshlet_begin_index = 0;
+	for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
+		u32 group_meshlet_end_index = meshlet_group_build_result.prefix_sum[group_index];
+		
+		for (u32 group_meshlet_index = group_meshlet_begin_index; group_meshlet_index < group_meshlet_end_index; group_meshlet_index += 1) {
+			u32 meshlet_index = meshlet_group_build_result.meshlet_indices[group_meshlet_index];
+			
+			u32 face_begin_index = meshlet_index > 0 ? meshlet_build_result.meshlet_face_prefix_sum[meshlet_index - 1] : 0;
+			u32 face_end_index   = meshlet_build_result.meshlet_face_prefix_sum[meshlet_index];
+			for (u32 face_index = face_begin_index; face_index < face_end_index; face_index += 1) {
+				auto face_id = meshlet_build_result.meshlet_faces[face_index];
+				face_id_to_group_index[face_id.index] = group_index;
+			}
+		}
+		
+		group_meshlet_begin_index = group_meshlet_end_index;
+	}
+	
+	return CreateArrayView(face_id_to_group_index);
+}
+
+template<typename ElementID>
+static u32 CreateMeshElementRemap(MeshView mesh, Array<ElementID> old_element_id_to_new_element_id) {
+	u32 old_element_count = old_element_id_to_new_element_id.count;
+	u32 new_element_count = 0;
+	
+	for (ElementID old_element_id = { 0 }; old_element_id.index < old_element_count; old_element_id.index += 1) {
+		auto element = mesh[old_element_id];
+		
+		ElementID new_element_id = { u32_max };
+		if (element.corner_list_base.index != u32_max) {
+			new_element_id = { new_element_count };
+			new_element_count += 1;
+		
+			mesh[new_element_id] = element;
+		}
+		old_element_id_to_new_element_id[old_element_id.index] = new_element_id;
+	}
+	
+	return new_element_count;
+}
+
+static void CompactMesh(MeshView& mesh, Allocator& allocator) {
+	Array<FaceID> old_face_id_to_new_face_id;
+	ArrayResize(old_face_id_to_new_face_id, allocator, mesh.face_count);
+	
+	Array<EdgeID> old_edge_id_to_new_edge_id;
+	ArrayResize(old_edge_id_to_new_edge_id, allocator, mesh.edge_count);
+	
+	u32 new_face_count = CreateMeshElementRemap<FaceID>(mesh, old_face_id_to_new_face_id);
+	u32 new_edge_count = CreateMeshElementRemap<EdgeID>(mesh, old_edge_id_to_new_edge_id);
+	
+	mesh.face_count = new_face_count;
+	mesh.edge_count = new_edge_count;
+	mesh.active_face_count = new_face_count;
+	
+	for (u32 i = 0; i < mesh.corner_count; i += 1) {
+		auto& corner = mesh.corners[i];
+		if (corner.face_id.index != u32_max) {
+			corner.face_id = old_face_id_to_new_face_id[corner.face_id.index];
+		}
+		
+		if (corner.edge_id.index != u32_max) {
+			corner.edge_id = old_edge_id_to_new_edge_id[corner.edge_id.index];
+		}
+	}
+}
+
 void BuildVirtualGeometry(MeshView& mesh) {
 	//
 	// 1. Build mesh data structure (faces, edges, vertices, corners).
@@ -2397,54 +2477,22 @@ void BuildVirtualGeometry(MeshView& mesh) {
 	
 	Allocator allocator;
 	
-	for (u32 level = 0; level < 1; level += 1) {
+	for (u32 level = 0; level < 16; level += 1) {
 		u32 allocator_high_water = allocator.memory_block_count;
 		
-		auto meshlet_build_result = BuildMeshlets(mesh, allocator);
-		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, CreateArrayView(meshlet_build_result.meshlets), meshlet_build_result.meshlet_adjacency);
+		auto meshlet_build_result       = BuildMeshlets(mesh, allocator);
+		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, meshlet_build_result.meshlets, meshlet_build_result.meshlet_adjacency);
+		auto face_id_to_group_index     = BuildFaceIdToGroupIndexMap(mesh, allocator, meshlet_build_result, meshlet_group_build_result);
 		
-		Array<u32> face_id_to_group_index;
-		ArrayResize(face_id_to_group_index, allocator, mesh.face_count);
+		DecimateMeshFaceGroups(mesh, face_id_to_group_index, meshlet_group_build_result.prefix_sum.count);
 		
-		u32 group_meshlet_begin_index = 0;
-		for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
-			u32 group_meshlet_end_index = meshlet_group_build_result.prefix_sum[group_index];
-			
-			for (u32 group_meshlet_index = group_meshlet_begin_index; group_meshlet_index < group_meshlet_end_index; group_meshlet_index += 1) {
-				u32 meshlet_index = meshlet_group_build_result.meshlet_indices[group_meshlet_index];
-				
-				u32 face_begin_index = meshlet_index > 0 ? meshlet_build_result.meshlet_face_prefix_sum[meshlet_index - 1] : 0;
-				u32 face_end_index   = meshlet_build_result.meshlet_face_prefix_sum[meshlet_index];
-				for (u32 face_index = face_begin_index; face_index < face_end_index; face_index += 1) {
-					auto face_id = meshlet_build_result.meshlet_faces[face_index];
-					face_id_to_group_index[face_id.index] = group_index;
-				}
-			}
-			
-			group_meshlet_begin_index = group_meshlet_end_index;
-		}
+		// Compact the mesh after decimation to remove unused faces and edges. TODO: Ensure source mesh is compacted and replace face and edge validity checks with asserts.
+		CompactMesh(mesh, allocator);
 		
-		DecimateMeshFaceGroups(mesh, CreateArrayView(face_id_to_group_index), meshlet_group_build_result.prefix_sum.count);
-		
-#if 0
-		// TODO: Remove this debug only code, replace it with a nicer visualization using vertex colors.
-		{
-			auto meshlet_faces = state.meshlet_faces;
-		
-			static std::vector<Face> faces;
-			faces.resize(meshlet_faces.count);
-		
-			for (u32 i = 0; i < meshlet_faces.count; i += 1) {
-				auto face_id = meshlet_faces[i];
-				faces[i] = mesh[face_id];
-			}
-		
-			mesh.faces = faces.data();
-			mesh.face_count = (u32)faces.size();
-		}
-#endif
 		
 		AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
+		
+		if (mesh.active_face_count <= 1024) break;
 	}
 	
 	AllocatorFreeMemoryBlocks(allocator);
