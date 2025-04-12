@@ -1776,9 +1776,8 @@ struct KdTreeNode {
 
 struct KdTree {
 	Array<KdTreeElement> elements;
-	
+	Array<u32> element_indices;
 	Array<KdTreeNode> nodes;
-	Array<u32> node_indices;
 };
 
 static u32 KdTreeSplit(const ArrayView<KdTreeElement>& elements, ArrayView<u32> indices, KdTreeNode& node) {
@@ -1864,15 +1863,17 @@ static u32 KdTreeBuildNode(Array<KdTreeNode>& nodes, ArrayView<KdTreeElement> el
 	return node_index;
 }
 
-static void KdTreeBuild(KdTree& tree, Allocator& allocator) {
-	ArrayResize(tree.node_indices, allocator, tree.elements.count);
+static void KdTreeReserve(KdTree& tree, Allocator& allocator) {
+	ArrayResize(tree.element_indices, allocator, tree.elements.count);
 	ArrayReserve(tree.nodes, allocator, tree.elements.count * 2);
-	
-	for (u32 i = 0; i < tree.node_indices.count; i += 1) {
-		tree.node_indices[i] = i;
+}
+
+static void KdTreeBuild(KdTree& tree, u32 begin_element_index, u32 end_element_index) {
+	for (u32 i = 0; i < tree.element_indices.count; i += 1) {
+		tree.element_indices[i] = i;
 	}
 	
-	KdTreeBuildNode(tree.nodes, CreateArrayView(tree.elements), CreateArrayView(tree.node_indices));
+	KdTreeBuildNode(tree.nodes, CreateArrayView(tree.elements, begin_element_index, end_element_index), CreateArrayView(tree.element_indices));
 }
 
 #define COUNT_KD_TREE_LOOKUPS 0
@@ -1964,7 +1965,7 @@ static void KdTreeBuildElementsForFaces(MeshView mesh, Allocator& allocator, Arr
 			});
 			
 			element.position = position * (1.f / face_degree);
-			element.partition_index = u32_max;
+			element.partition_index = u32_max - 1; // Face elements are inactive by default. We mark them as active per group when generating meshlets.
 		} else {
 			element.partition_index = u32_max - 1;
 		}
@@ -2008,25 +2009,15 @@ struct MeshletBuildResult {
 
 static MeshletAdjacency BuildMeshletAdjacency(MeshView mesh, Allocator& allocator, ArrayView<u32> meshlet_face_prefix_sum, ArrayView<FaceID> meshlet_faces, ArrayView<KdTreeElement> kd_tree_elements);
 
-static MeshletBuildResult BuildMeshlets(MeshView mesh, Allocator& allocator) {
-	KdTree kd_tree;
-	KdTreeBuildElementsForFaces(mesh, allocator, kd_tree.elements);
-	KdTreeBuild(kd_tree, allocator);
-	
-	Array<u8> vertex_usage_map;
-	ArrayResizeMemset(vertex_usage_map, allocator, mesh.attribute_count, 0xFF);
+static void BuildMeshletsForGroup(
+	MeshView mesh,
+	KdTree kd_tree,
+	Array<u8> vertex_usage_map,
+	Array<FaceID>& meshlet_faces,
+	Array<u32>& meshlet_face_prefix_sum,
+	Array<Meshlet>& meshlets) {
 	
 	compile_const u32 candidates_per_face = 4;
-	
-	// TODO: Use an irregular 2D array.
-	Array<FaceID> meshlet_faces;
-	Array<u32> meshlet_face_prefix_sum;
-	Array<Meshlet> meshlets;
-	
-	ArrayReserve(meshlet_faces, allocator, mesh.face_count);
-	ArrayReserve(meshlet_face_prefix_sum, allocator, mesh.face_count);
-	ArrayReserve(meshlets, allocator, mesh.face_count);
-	
 	FixedSizeArray<AttributesID, meshlet_max_face_count * candidates_per_face> meshlet_vertices;
 	FixedSizeArray<FaceID, meshlet_max_vertex_count + meshlet_max_face_degree> meshlet_candidate_elements;
 	
@@ -2110,9 +2101,10 @@ static MeshletBuildResult BuildMeshlets(MeshView mesh, Allocator& allocator) {
 			}
 			
 			IterateCornerList<ElementType::Edge>(mesh, corner_id, [&](CornerID corner_id) {
-				auto& corner = mesh[corner_id];
-				if (kd_tree.elements[corner.face_id.index].partition_index == u32_max && meshlet_candidate_elements.count < meshlet_candidate_elements.capacity) {
-					ArrayAppend(meshlet_candidate_elements, corner.face_id);
+				auto face_id = mesh[corner_id].face_id;
+				
+				if (kd_tree.elements[face_id.index].partition_index == u32_max && meshlet_candidate_elements.count < meshlet_candidate_elements.capacity) {
+					ArrayAppend(meshlet_candidate_elements, face_id);
 				}
 			});
 		});
@@ -2161,10 +2153,91 @@ static MeshletBuildResult BuildMeshlets(MeshView mesh, Allocator& allocator) {
 		Meshlet meshlet;
 		_mm_store_ps(&meshlet.aabb_min.x, meshlet_aabb_min_ps);
 		_mm_store_ps(&meshlet.aabb_max.x, meshlet_aabb_max_ps);
+
+		for (auto attributes_id : meshlet_vertices) {
+			vertex_usage_map[attributes_id.index] = 0xFF;
+		}
 		
 		meshlet_face_count = 0;
 		ArrayAppend(meshlet_face_prefix_sum, meshlet_faces.count);
 		ArrayAppend(meshlets, meshlet);
+	}
+}
+	
+
+static MeshletBuildResult BuildMeshlets(MeshView mesh, Allocator& allocator, ArrayView<u32> face_id_to_group_index, u32 group_count) {
+	KdTree kd_tree;
+	KdTreeBuildElementsForFaces(mesh, allocator, kd_tree.elements);
+	KdTreeReserve(kd_tree, allocator);
+	
+	Array<u8> vertex_usage_map;
+	ArrayResizeMemset(vertex_usage_map, allocator, mesh.attribute_count, 0xFF);
+	
+	// TODO: Use an irregular 2D array.
+	Array<FaceID> meshlet_faces;
+	Array<u32> meshlet_face_prefix_sum;
+	Array<Meshlet> meshlets;
+	Array<u32> group_face_prefix_sum;
+	
+	ArrayReserve(meshlet_faces, allocator, mesh.face_count);
+	ArrayReserve(meshlet_face_prefix_sum, allocator, mesh.face_count);
+	ArrayReserve(meshlets, allocator, mesh.face_count);
+	ArrayResizeMemset(group_face_prefix_sum, allocator, group_count, 0);
+	
+	{
+		for (u32 i = 0; i < face_id_to_group_index.count; i += 1) {
+			auto face = mesh.faces[i];
+			if (face.corner_list_base.index == u32_max) continue;
+			
+			u32 group_index = face_id_to_group_index[i];
+			group_face_prefix_sum[group_index] += 1;
+		}
+		
+		u32 prefix_sum = 0;
+		for (u32 i = 0; i < group_count; i += 1) {
+			u32 count = group_face_prefix_sum[i];
+			group_face_prefix_sum[i] = prefix_sum;
+			prefix_sum += count;
+		}
+		
+		for (u32 i = 0; i < face_id_to_group_index.count; i += 1) {
+			auto face = mesh.faces[i];
+			if (face.corner_list_base.index == u32_max) continue;
+			
+			u32 group_index = face_id_to_group_index[i];
+			u32 element_index = group_face_prefix_sum[group_index]++;
+			
+			kd_tree.element_indices[element_index] = i;
+		}
+	}
+	
+	u32 begin_element_index = 0;
+	for (u32 i = 0; i < group_count; i += 1) {
+		u32 end_element_index = group_face_prefix_sum[i];
+		
+		kd_tree.nodes.count = 0;
+		auto element_indices = CreateArrayView(kd_tree.element_indices, begin_element_index, end_element_index);
+		auto elements        = CreateArrayView(kd_tree.elements);
+		
+		for (u32 index : element_indices) {
+			// Mark elements of the current group as eligible for meshlet generation.
+			elements[index].partition_index = u32_max;
+		}
+		
+		KdTreeBuildNode(kd_tree.nodes, elements, element_indices);
+	
+		BuildMeshletsForGroup(
+			mesh,
+			kd_tree,
+			vertex_usage_map,
+			meshlet_faces,
+			meshlet_face_prefix_sum,
+			meshlets
+		);
+		
+		assert(meshlet_faces.count == end_element_index);
+		
+		begin_element_index = end_element_index;
 	}
 	
 	assert(meshlet_faces.count == mesh.active_face_count);
@@ -2281,7 +2354,8 @@ struct MeshletGroupBuildResult {
 static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allocator, ArrayView<Meshlet> meshlets, MeshletAdjacency meshlet_adjacency) {
 	KdTree kd_tree;
 	KdTreeBuildElementsForMeshlets(meshlets, allocator, kd_tree.elements);
-	KdTreeBuild(kd_tree, allocator);
+	KdTreeReserve(kd_tree, allocator);
+	KdTreeBuild(kd_tree, 0, kd_tree.elements.count);
 	
 	FixedSizeArray<u32, meshlet_group_max_meshlets> meshlet_group;
 	
@@ -2384,9 +2458,8 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 	return result;
 }
 
-static ArrayView<u32> BuildFaceIdToGroupIndexMap(MeshView mesh, Allocator& allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result) {
-	Array<u32> face_id_to_group_index;
-	ArrayResize(face_id_to_group_index, allocator, mesh.face_count);
+static void BuildFaceIdToGroupIndexMap(MeshView mesh, Allocator& allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, ArrayView<u32> face_id_to_group_index) {
+	assert(face_id_to_group_index.count >= mesh.face_count);
 	
 	u32 group_meshlet_begin_index = 0;
 	for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
@@ -2405,8 +2478,6 @@ static ArrayView<u32> BuildFaceIdToGroupIndexMap(MeshView mesh, Allocator& alloc
 		
 		group_meshlet_begin_index = group_meshlet_end_index;
 	}
-	
-	return CreateArrayView(face_id_to_group_index);
 }
 
 template<typename ElementID>
@@ -2430,7 +2501,7 @@ static u32 CreateMeshElementRemap(MeshView mesh, Array<ElementID> old_element_id
 	return new_element_count;
 }
 
-static void CompactMesh(MeshView& mesh, Allocator& allocator) {
+static void CompactMesh(MeshView& mesh, Array<u32>& face_id_to_group_index, Allocator& allocator) {
 	Array<FaceID> old_face_id_to_new_face_id;
 	ArrayResize(old_face_id_to_new_face_id, allocator, mesh.face_count);
 	
@@ -2454,21 +2525,24 @@ static void CompactMesh(MeshView& mesh, Allocator& allocator) {
 			corner.edge_id = old_edge_id_to_new_edge_id[corner.edge_id.index];
 		}
 	}
+	
+	for (u32 i = 0; i < old_face_id_to_new_face_id.count; i += 1) {
+		auto new_face_id = old_face_id_to_new_face_id[i];
+		if (new_face_id.index == u32_max) continue;
+		
+		face_id_to_group_index[new_face_id.index] = face_id_to_group_index[i];
+	}
+	face_id_to_group_index.count = new_face_count;
 }
 
 void BuildVirtualGeometry(MeshView& mesh) {
 	//
+	// Virtual Geometry TODO:
+	//
 	// 1. Build mesh data structure (faces, edges, vertices, corners).
-	// 2. Build meshlets from faces.
-	//  - Build KdTree over triangles.
-	//  - Combine sequences of 128 Morton codes into meshlets.
+	// 2. Build meshlets from meshlet group faces.
 	// 3. Build meshlet groups.
-	//  - Build meshlet adjacency.
-	//  - Build KdTree over meshlets.
-	//  - Greedily add meshlets using the number of shared edges as the main metric.
-	// 4. Simplify meshlet groups.
-	//  - Iterate over all vertices and mark the ones shared by multiple groups as locked.
-	//  - Run meshlet simplification.
+	// 4. Decimate meshlet groups.
 	//  - Make sure locked vertex data is preserved and respected.
 	//  - Make sure all groups are simplified by 1/2
 	// 5. Output meshlet data.
@@ -2477,18 +2551,23 @@ void BuildVirtualGeometry(MeshView& mesh) {
 	
 	Allocator allocator;
 	
+	Array<u32> face_id_to_group_index;
+	ArrayResizeMemset(face_id_to_group_index, allocator, mesh.face_count, 0);
+	u32 group_count = 1;
+	
 	for (u32 level = 0; level < 16; level += 1) {
 		u32 allocator_high_water = allocator.memory_block_count;
 		
-		auto meshlet_build_result       = BuildMeshlets(mesh, allocator);
+		auto meshlet_build_result       = BuildMeshlets(mesh, allocator, CreateArrayView(face_id_to_group_index), group_count);
 		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, meshlet_build_result.meshlets, meshlet_build_result.meshlet_adjacency);
-		auto face_id_to_group_index     = BuildFaceIdToGroupIndexMap(mesh, allocator, meshlet_build_result, meshlet_group_build_result);
+		group_count = meshlet_group_build_result.prefix_sum.count;
 		
-		DecimateMeshFaceGroups(mesh, face_id_to_group_index, meshlet_group_build_result.prefix_sum.count);
+		BuildFaceIdToGroupIndexMap(mesh, allocator, meshlet_build_result, meshlet_group_build_result, CreateArrayView(face_id_to_group_index));
+		
+		DecimateMeshFaceGroups(mesh, CreateArrayView(face_id_to_group_index), group_count);
 		
 		// Compact the mesh after decimation to remove unused faces and edges. TODO: Ensure source mesh is compacted and replace face and edge validity checks with asserts.
-		CompactMesh(mesh, allocator);
-		
+		CompactMesh(mesh, face_id_to_group_index, allocator);
 		
 		AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 		
