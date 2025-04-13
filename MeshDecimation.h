@@ -71,6 +71,16 @@ struct Vector2 {
 	float y = 0.f;
 };
 
+struct SphereBounds {
+	Vector3 center = { 0.f, 0.f, 0.f };
+	float   radius = 0.f;
+};
+
+struct ErrorMetric {
+	SphereBounds bounds = { 0.f, 0.f, 0.f };
+	float        error  = 0.f;
+};
+
 
 enum struct ElementType : u32 {
 	Vertex = 0,

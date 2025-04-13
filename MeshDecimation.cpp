@@ -727,6 +727,8 @@ static float DifferenceOfProducts(float a, float b, float c, float d) {
 static Vector3 operator+ (const Vector3& lh, const Vector3& rh) { return Vector3{ lh.x + rh.x, lh.y + rh.y, lh.z + rh.z }; }
 static Vector3 operator- (const Vector3& lh, const Vector3& rh) { return Vector3{ lh.x - rh.x, lh.y - rh.y, lh.z - rh.z }; }
 static Vector3 operator* (const Vector3& lh, float rh) { return Vector3{ lh.x * rh, lh.y * rh, lh.z * rh }; }
+static Vector3 operator+ (const Vector3& lh, float rh) { return Vector3{ lh.x + rh, lh.y + rh, lh.z + rh }; }
+static Vector3 operator- (const Vector3& lh, float rh) { return Vector3{ lh.x - rh, lh.y - rh, lh.z - rh }; }
 static float DotProduct(const Vector3& lh, const Vector3& rh) { return lh.x * rh.x + lh.y * rh.y + lh.z * rh.z; }
 static float Length(const Vector3& v) { return sqrtf(DotProduct(v, v)); }
 static Vector3 Normalize(const Vector3& v) { float length = Length(v); return length < FLT_EPSILON ? v : v * (1.f / length); }
@@ -1480,7 +1482,7 @@ static void InitializeMehsDecimationState(MeshView mesh, MeshDecimationState& st
 
 #define REPORT_DECIMATION_PROGRESS 0
 
-static void DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, EdgeCollapseHeap& edge_collapse_heap, u32 target_face_count, u32 active_face_count) {
+static float DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, EdgeCollapseHeap& edge_collapse_heap, u32 target_face_count, u32 active_face_count) {
 	s32 next_report_target = active_face_count + 1;
 	
 	u64 time0 = 0;
@@ -1593,6 +1595,8 @@ static void DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, Edg
 	printf("Max Error: %e\n", max_error);
 	printf("Face Count: %u/%u\n", active_face_count, target_face_count);
 #endif // REPORT_DECIMATION_PROGRESS
+	
+	return max_error;
 }
 
 //
@@ -1632,9 +1636,7 @@ void DecimateMesh(MeshView mesh) {
 	DecimateMeshFaceGroup(mesh, state, edge_collapse_heap, target_face_count, active_face_count);
 }
 
-// TODO: Reduce the number of the allocations done here.
-// TODO: Simplify the code (maybe the caller can compute the neccessary group face counts, group edges, etc.)
-static void DecimateMeshFaceGroups(MeshView mesh, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum) {
+static void DecimateMeshFaceGroups(MeshView mesh, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<ErrorMetric> meshlet_group_error_metrics) {
 	MeshDecimationState state;
 	InitializeMehsDecimationState(mesh, state);
 	
@@ -1753,7 +1755,10 @@ static void DecimateMeshFaceGroups(MeshView mesh, Array<FaceID> meshlet_group_fa
 		
 		u32 target_face_count = face_count / 2;
 		u32 active_face_count = face_count;
-		DecimateMeshFaceGroup(mesh, state, edge_collapse_heap, target_face_count, active_face_count);
+		float decimation_error = DecimateMeshFaceGroup(mesh, state, edge_collapse_heap, target_face_count, active_face_count);
+		
+		auto& error_metric = meshlet_group_error_metrics[group_index];
+		error_metric.error = error_metric.error > decimation_error ? error_metric.error : decimation_error;
 		
 		edge_begin_index = edge_end_index;
 		face_begin_index = face_end_index;
@@ -1947,11 +1952,79 @@ compile_const u32 meshlet_max_face_degree  = 3;
 compile_const u32 meshlet_group_max_meshlets = 32;
 
 struct alignas(16) Meshlet {
-	Vector3 aabb_min;
-	u32 current_group_index = 0;
-	Vector3 aabb_max;
-	u32 coarser_group_index = 0;
+	// Bounding box over meshlet vertex positions.
+	alignas(16) Vector3 aabb_min;
+	alignas(16) Vector3 aabb_max;
+	
+	// Bounding sphere over meshlet vertex positions.
+	SphereBounds geometric_sphere_bounds;
+	
+	// Error metric of this meshlet. Transferred from the group this meshlet was built from.
+	ErrorMetric current_level_error_metric;
+	
+	// Error metric of one level coarser representation of this meshlet. Transferred from the group that was built using this meshlet.
+	ErrorMetric coarser_level_error_metric;
 };
+
+static SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds) {
+	u32 aabb_min_index[3] = { 0, 0, 0 };
+	u32 aabb_max_index[3] = { 0, 0, 0 };
+	
+	float aabb_min[3] = { +FLT_MAX, +FLT_MAX, +FLT_MAX };
+	float aabb_max[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+	
+	for (u32 i = 0; i < source_sphere_bounds.count; i += 1) {
+		auto source_bounds = source_sphere_bounds[i];
+		
+		auto min = source_bounds.center - source_bounds.radius;
+		auto max = source_bounds.center + source_bounds.radius;
+		
+		for (u32 axis = 0; axis < 3; axis += 1) {
+			if (aabb_min[axis] > min[axis]) {
+				aabb_min[axis] = min[axis];
+				aabb_min_index[axis] = i;
+			}
+			
+			if (aabb_max[axis] < max[axis]) {
+				aabb_max[axis] = max[axis];
+				aabb_max_index[axis] = i;
+			}
+		}
+	}
+	
+	float max_axis_length = -FLT_MAX;
+	u32 max_axis_length_index = 0;
+	
+	for (u32 axis = 0; axis < 3; axis += 1) {
+		auto min_bounds = source_sphere_bounds[aabb_min_index[axis]];
+		auto max_bounds = source_sphere_bounds[aabb_max_index[axis]];
+		
+		float axis_length = Length(max_bounds.center - min_bounds.center) + min_bounds.radius + max_bounds.radius;
+		if (max_axis_length < axis_length) {
+			max_axis_length = axis_length;
+			max_axis_length_index = axis;
+		}
+	}
+	
+	SphereBounds result_bounds;
+	result_bounds.center = (source_sphere_bounds[aabb_min_index[max_axis_length_index]].center + source_sphere_bounds[aabb_max_index[max_axis_length_index]].center) * 0.5f;
+	result_bounds.radius = max_axis_length * 0.5f;
+	
+	for (u32 i = 0; i < source_sphere_bounds.count; i += 1) {
+		auto source_bounds = source_sphere_bounds[i];
+		
+		float distance = Length(source_bounds.center - result_bounds.center);
+		if (distance + source_bounds.radius > result_bounds.radius) {
+			float shift_t = distance > 0.f ? ((source_bounds.radius - result_bounds.radius) / distance) * 0.5f + 0.5f : 0.f;
+			
+			result_bounds.center = (result_bounds.center * (1.f - shift_t) + source_bounds.center * shift_t);
+			result_bounds.radius = (result_bounds.radius + source_bounds.radius + distance) * 0.5f;
+		}
+	}
+	
+	return result_bounds;
+}
+
 
 static void KdTreeBuildElementsForFaces(MeshView mesh, Allocator& allocator, Array<KdTreeElement>& elements) {
 	ArrayResize(elements, allocator, mesh.face_count);
@@ -2019,11 +2092,12 @@ static void BuildMeshletsForFaceGroup(
 	Array<u8> vertex_usage_map,
 	Array<FaceID>& meshlet_faces,
 	Array<u32>& meshlet_face_prefix_sum,
-	Array<Meshlet>& meshlets) {
+	Array<CornerID>& meshlet_corners,
+	Array<u32>& meshlet_corner_prefix_sum) {
 	
 	compile_const u32 candidates_per_face = 4;
-	FixedSizeArray<AttributesID, meshlet_max_face_count * candidates_per_face> meshlet_vertices;
-	FixedSizeArray<FaceID, meshlet_max_vertex_count + meshlet_max_face_degree> meshlet_candidate_elements;
+	FixedSizeArray<AttributesID, meshlet_max_face_count * meshlet_max_face_degree> meshlet_vertices;
+	FixedSizeArray<FaceID, meshlet_max_face_count * candidates_per_face> meshlet_candidate_elements;
 	
 	auto meshlet_aabb_min_ps  = _mm_set_ps1(+FLT_MAX);
 	auto meshlet_aabb_max_ps  = _mm_set_ps1(-FLT_MAX);
@@ -2036,7 +2110,6 @@ static void BuildMeshletsForFaceGroup(
 	
 	while (true) {
 		u32 best_candidate_face_index = u32_max;
-		u32 second_best_candidate_face_index  = u32_max;
 		float smallest_surface_area = FLT_MAX;
 		
 		for (u32 i = 0; i < meshlet_candidate_elements.count;) {
@@ -2047,10 +2120,10 @@ static void BuildMeshletsForFaceGroup(
 				ArrayEraseSwap(meshlet_candidate_elements, i);
 				continue;
 			}
-			auto position = _mm_load_ps(&element.position.x);
+			auto position_ps = _mm_load_ps(&element.position.x);
 			
-			auto new_aabb_min_ps = _mm_min_ps(meshlet_aabb_min_ps, position);
-			auto new_aabb_max_ps = _mm_max_ps(meshlet_aabb_max_ps, position);
+			auto new_aabb_min_ps = _mm_min_ps(meshlet_aabb_min_ps, position_ps);
+			auto new_aabb_max_ps = _mm_max_ps(meshlet_aabb_max_ps, position_ps);
 			auto new_aabb_extent_ps = _mm_sub_ps(new_aabb_max_ps, new_aabb_min_ps);
 			
 			// Half AABB surface area x*y + y*z + z*x
@@ -2058,17 +2131,15 @@ static void BuildMeshletsForFaceGroup(
 			
 			if (smallest_surface_area > surface_area) {
 				smallest_surface_area = surface_area;
-				second_best_candidate_face_index = best_candidate_face_index;
 				best_candidate_face_index = i;
 			}
 			
 			i += 1;
 		}
 		
-		auto best_face_id        = best_candidate_face_index        != u32_max ? meshlet_candidate_elements[best_candidate_face_index]        : FaceID{ u32_max };
-		auto second_best_face_id = second_best_candidate_face_index != u32_max ? meshlet_candidate_elements[second_best_candidate_face_index] : FaceID{ u32_max };
-		
+		auto best_face_id = FaceID{ u32_max };
 		if (best_candidate_face_index != u32_max) {
+			best_face_id = meshlet_candidate_elements[best_candidate_face_index];
 			ArrayEraseSwap(meshlet_candidate_elements, best_candidate_face_index);
 		}
 		
@@ -2098,9 +2169,39 @@ static void BuildMeshletsForFaceGroup(
 		IterateCornerList<ElementType::Face>(mesh, mesh[best_face_id].corner_list_base, [&](CornerID corner_id) {
 			auto& corner = mesh[corner_id];
 			u8 vertex_index = vertex_usage_map[corner.attributes_id.index];
+			if (vertex_index == 0xFF) new_vertex_count += 1;
+		});
+		
+		if ((meshlet_vertex_count + new_vertex_count > meshlet_max_vertex_count) || (meshlet_face_count + 1 > meshlet_max_face_count)) {
+			assert(meshlet_face_count   <= meshlet_max_face_count);
+			assert(meshlet_vertex_count <= meshlet_max_vertex_count);
+			
+			for (auto attributes_id : meshlet_vertices) {
+				vertex_usage_map[attributes_id.index] = 0xFF;
+			}
+			meshlet_vertices.count = 0;
+			
+			meshlet_vertex_count = 0;
+			meshlet_face_count   = 0;
+			
+			meshlet_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
+			meshlet_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
+			
+			ArrayAppend(meshlet_face_prefix_sum, meshlet_faces.count);
+			ArrayAppend(meshlet_corner_prefix_sum, meshlet_corners.count);
+			
+			meshlet_candidate_elements.count = 0;
+		}
+		
+		
+		new_vertex_count = 0;
+		IterateCornerList<ElementType::Face>(mesh, mesh[best_face_id].corner_list_base, [&](CornerID corner_id) {
+			auto& corner = mesh[corner_id];
+			u8 vertex_index = vertex_usage_map[corner.attributes_id.index];
 			if (vertex_index == 0xFF) {
 				vertex_usage_map[corner.attributes_id.index] = meshlet_vertex_count + new_vertex_count;
 				ArrayAppend(meshlet_vertices, corner.attributes_id);
+				ArrayAppend(meshlet_corners, corner_id);
 				new_vertex_count += 1;
 			}
 			
@@ -2112,33 +2213,6 @@ static void BuildMeshletsForFaceGroup(
 				}
 			});
 		});
-		
-		
-		if ((meshlet_vertex_count + new_vertex_count > meshlet_max_vertex_count) || (meshlet_face_count + 1 > meshlet_max_face_count)) {
-			// TODO: Create AABB over vertices.
-			Meshlet meshlet;
-			_mm_store_ps(&meshlet.aabb_min.x, meshlet_aabb_min_ps);
-			_mm_store_ps(&meshlet.aabb_max.x, meshlet_aabb_max_ps);
-			
-			meshlet_vertex_count = 0;
-			meshlet_face_count   = 0;
-			meshlet_aabb_min_ps  = _mm_set_ps1(+FLT_MAX);
-			meshlet_aabb_max_ps  = _mm_set_ps1(-FLT_MAX);
-			
-			for (auto attributes_id : meshlet_vertices) {
-				vertex_usage_map[attributes_id.index] = 0xFF;
-			}
-			
-			ArrayAppend(meshlet_face_prefix_sum, meshlet_faces.count);
-			ArrayAppend(meshlets, meshlet);
-			
-			meshlet_vertices.count = 0;
-			meshlet_candidate_elements.count = 0;
-			
-			if (second_best_face_id.index != u32_max) {
-				ArrayAppend(meshlet_candidate_elements, second_best_face_id);
-			}
-		}
 		
 		ArrayAppend(meshlet_faces, best_face_id);
 		meshlet_vertex_count += new_vertex_count;
@@ -2153,24 +2227,21 @@ static void BuildMeshletsForFaceGroup(
 	}
 	
 	if (meshlet_face_count) {
-		// TODO: Create AABB over vertices.
-		Meshlet meshlet;
-		_mm_store_ps(&meshlet.aabb_min.x, meshlet_aabb_min_ps);
-		_mm_store_ps(&meshlet.aabb_max.x, meshlet_aabb_max_ps);
-
+		assert(meshlet_face_count   <= meshlet_max_face_count);
+		assert(meshlet_vertex_count <= meshlet_max_vertex_count);
+		
 		for (auto attributes_id : meshlet_vertices) {
 			vertex_usage_map[attributes_id.index] = 0xFF;
 		}
+		meshlet_vertices.count = 0;
 		
-		meshlet_face_count = 0;
 		ArrayAppend(meshlet_face_prefix_sum, meshlet_faces.count);
-		ArrayAppend(meshlets, meshlet);
+		ArrayAppend(meshlet_corner_prefix_sum, meshlet_corners.count);
 	}
 }
-	
 
 // Note that FaceIDs inside groups are going to be scrambled inside groups during KdTree build. This leaves prefix sum in a valid, but different state.
-static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& allocator, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum) {
+static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& allocator, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<ErrorMetric> meshlet_group_error_metrics) {
 	KdTree kd_tree;
 	KdTreeBuildElementsForFaces(mesh, allocator, kd_tree.elements);
 	ArrayReserve(kd_tree.nodes, allocator, kd_tree.elements.count * 2);
@@ -2188,12 +2259,17 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 	ArrayResizeMemset(vertex_usage_map, allocator, mesh.attribute_count, 0xFF);
 	
 	Array<FaceID> meshlet_faces;
-	Array<u32> meshlet_face_prefix_sum;
-	Array<Meshlet> meshlets;
-	
+	Array<CornerID> meshlet_corners;
 	ArrayReserve(meshlet_faces, allocator, mesh.face_count);
+	ArrayReserve(meshlet_corners, allocator, mesh.face_count * meshlet_max_face_degree);
+	
+	Array<u32> meshlet_face_prefix_sum;
+	Array<u32> meshlet_corner_prefix_sum;
 	ArrayReserve(meshlet_face_prefix_sum, allocator, mesh.face_count);
-	ArrayReserve(meshlets, allocator, mesh.face_count);
+	ArrayReserve(meshlet_corner_prefix_sum, allocator, mesh.face_count);
+	
+	Array<u32> meshlet_group_meshlet_prefix_sum;
+	ArrayReserve(meshlet_group_meshlet_prefix_sum, allocator, meshlet_group_face_prefix_sum.count);
 	
 	u32 begin_element_index = 0;
 	for (u32 group_index = 0; group_index < meshlet_group_face_prefix_sum.count; group_index += 1) {
@@ -2208,15 +2284,18 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 		}
 		
 		KdTreeBuildNode(kd_tree.nodes, CreateArrayView(kd_tree.elements), element_indices);
-	
+		
 		BuildMeshletsForFaceGroup(
 			mesh,
 			kd_tree,
 			vertex_usage_map,
 			meshlet_faces,
 			meshlet_face_prefix_sum,
-			meshlets
+			meshlet_corners,
+			meshlet_corner_prefix_sum
 		);
+		
+		ArrayAppend(meshlet_group_meshlet_prefix_sum, meshlet_face_prefix_sum.count);
 		
 		assert(meshlet_faces.count == end_element_index);
 		
@@ -2224,6 +2303,63 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 	}
 	
 	assert(meshlet_faces.count == mesh.face_count);
+	
+	
+	Array<Meshlet> meshlets;
+	ArrayResize(meshlets, allocator, meshlet_corner_prefix_sum.count);
+	
+	u32 begin_corner_index = 0;
+	for (u32 meshlet_index = 0; meshlet_index < meshlet_corner_prefix_sum.count; meshlet_index += 1) {
+		u32 end_corner_index = meshlet_corner_prefix_sum[meshlet_index];
+		
+		auto meshlet_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
+		auto meshlet_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
+		
+		FixedSizeArray<SphereBounds, meshlet_max_vertex_count> vertex_sphere_bounds;
+		assert(end_corner_index - begin_corner_index <= meshlet_max_vertex_count);
+		
+		for (u32 corner_index = begin_corner_index; corner_index < end_corner_index; corner_index += 1) {
+			auto corner_id = meshlet_corners[corner_index];
+			auto vertex_id = mesh[corner_id].vertex_id;
+			
+			auto position_ps = _mm_load_ps(&mesh[vertex_id].position.x);
+			meshlet_aabb_min_ps = _mm_min_ps(meshlet_aabb_min_ps, position_ps);
+			meshlet_aabb_max_ps = _mm_max_ps(meshlet_aabb_max_ps, position_ps);
+			
+			SphereBounds bounds;
+			bounds.center = mesh[vertex_id].position;
+			bounds.radius = 0.f;
+			ArrayAppend(vertex_sphere_bounds, bounds);
+		}
+		
+		auto& meshlet = meshlets[meshlet_index];
+		_mm_store_ps(&meshlet.aabb_min.x, meshlet_aabb_min_ps);
+		_mm_store_ps(&meshlet.aabb_max.x, meshlet_aabb_max_ps);
+		
+		auto meshlet_sphere_bounds = ComputeSphereBoundsUnion(CreateArrayView(vertex_sphere_bounds));
+		meshlet.geometric_sphere_bounds = meshlet_sphere_bounds;
+		
+		// Will be overridden in the loop below if we have source meshlet_group_error_metrics.
+		// For the level zero we don't have them, so this error metric will be kept as is.
+		meshlet.current_level_error_metric.bounds = meshlet_sphere_bounds;
+		meshlet.current_level_error_metric.error  = 0.f;
+		
+		begin_corner_index = end_corner_index;
+	}
+	
+	u32 meshlet_begin_index = 0;
+	for (u32 group_index = 0; group_index < meshlet_group_error_metrics.count; group_index += 1) {
+		u32 meshlet_end_index = meshlet_group_meshlet_prefix_sum[group_index];
+		
+		auto source_meshlet_group_error_metric = meshlet_group_error_metrics[group_index];
+		for (u32 meshlet_index = meshlet_begin_index; meshlet_index < meshlet_end_index; meshlet_index += 1) {
+			auto& meshlet = meshlets[meshlet_index];
+			meshlet.current_level_error_metric = source_meshlet_group_error_metric;
+		}
+
+		meshlet_begin_index = meshlet_end_index;
+	}
+	
 	
 	MeshletBuildResult result;
 	result.meshlet_faces           = CreateArrayView(meshlet_faces);
@@ -2440,16 +2576,29 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 	return result;
 }
 
-static void ConvertMeshletGroupsToFaceGroups(MeshView mesh, Allocator& allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<FaceID>& meshlet_group_faces, Array<u32>& meshlet_group_face_prefix_sum) {
-	assert(meshlet_group_faces.capacity >= mesh.face_count);
-	assert(meshlet_group_face_prefix_sum.capacity >= mesh.face_count);
+static void ConvertMeshletGroupsToFaceGroups(
+	MeshView mesh,
+	Allocator& allocator,
+	MeshletBuildResult meshlet_build_result,
+	MeshletGroupBuildResult meshlet_group_build_result,
+	Array<FaceID>& meshlet_group_faces,
+	Array<u32>& meshlet_group_face_prefix_sum,
+	Array<ErrorMetric>& meshlet_group_error_metrics) {
 	
-	meshlet_group_faces.count = 0;
+	assert(meshlet_group_faces.capacity           >= mesh.face_count);
+	assert(meshlet_group_face_prefix_sum.capacity >= mesh.face_count);
+	assert(meshlet_group_error_metrics.capacity   >= mesh.face_count);
+	
+	meshlet_group_faces.count           = 0;
 	meshlet_group_face_prefix_sum.count = 0;
+	meshlet_group_error_metrics.count   = 0;
 	
 	u32 group_meshlet_begin_index = 0;
 	for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
 		u32 group_meshlet_end_index = meshlet_group_build_result.prefix_sum[group_index];
+		
+		FixedSizeArray<SphereBounds, meshlet_group_max_meshlets> meshlet_error_sphere_bounds;
+		float max_error = 0.f;
 		
 		for (u32 group_meshlet_index = group_meshlet_begin_index; group_meshlet_index < group_meshlet_end_index; group_meshlet_index += 1) {
 			u32 meshlet_index = meshlet_group_build_result.meshlet_indices[group_meshlet_index];
@@ -2459,8 +2608,36 @@ static void ConvertMeshletGroupsToFaceGroups(MeshView mesh, Allocator& allocator
 			for (u32 face_index = face_begin_index; face_index < face_end_index; face_index += 1) {
 				ArrayAppend(meshlet_group_faces, meshlet_build_result.meshlet_faces[face_index]);
 			}
+			
+			auto& meshlet = meshlet_build_result.meshlets[meshlet_index];
+			ArrayAppend(meshlet_error_sphere_bounds, meshlet.current_level_error_metric.bounds);
+			max_error = meshlet.current_level_error_metric.error > max_error ? meshlet.current_level_error_metric.error : max_error;
 		}
 		ArrayAppend(meshlet_group_face_prefix_sum, meshlet_group_faces.count);
+		
+		// Coarser level meshlets should have at least the same error as their children (finer representation).
+		// This error metric might get increased during meshlet group decimation.
+		ErrorMetric meshlet_group_minimum_error_metric;
+		meshlet_group_minimum_error_metric.bounds = ComputeSphereBoundsUnion(CreateArrayView(meshlet_error_sphere_bounds));
+		meshlet_group_minimum_error_metric.error  = max_error;
+		ArrayAppend(meshlet_group_error_metrics, meshlet_group_minimum_error_metric);
+		
+		group_meshlet_begin_index = group_meshlet_end_index;
+	}
+}
+
+static void UpdateMeshletCoarserLevelErrorMetrics(MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<ErrorMetric> meshlet_group_error_metrics) {
+	u32 group_meshlet_begin_index = 0;
+	for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
+		u32 group_meshlet_end_index = meshlet_group_build_result.prefix_sum[group_index];
+		
+		auto error_metric = meshlet_group_error_metrics[group_index];
+		for (u32 group_meshlet_index = group_meshlet_begin_index; group_meshlet_index < group_meshlet_end_index; group_meshlet_index += 1) {
+			u32 meshlet_index = meshlet_group_build_result.meshlet_indices[group_meshlet_index];
+			
+			auto& meshlet = meshlet_build_result.meshlets[meshlet_index];
+			meshlet.coarser_level_error_metric = error_metric;
+		}
 		
 		group_meshlet_begin_index = group_meshlet_end_index;
 	}
@@ -2553,9 +2730,13 @@ void BuildVirtualGeometry(MeshView& mesh) {
 	
 	Array<FaceID> meshlet_group_faces;
 	Array<u32> meshlet_group_face_prefix_sum;
+	Array<ErrorMetric> meshlet_group_error_metrics;
 	ArrayResize(meshlet_group_faces, allocator, mesh.face_count);
 	ArrayReserve(meshlet_group_face_prefix_sum, allocator, mesh.face_count);
+	ArrayReserve(meshlet_group_error_metrics, allocator, mesh.face_count);
 	
+	// Note that we're not adding an initial error metric to meshlet_group_error_metrics.
+	// Meshlets built from the first group will use current_level_error_metric.bounds set to the geometric_sphere_bounds with zero error.
 	for (u32 i = 0; i < meshlet_group_faces.count; i += 1) {
 		meshlet_group_faces[i].index = i;
 	}
@@ -2565,14 +2746,15 @@ void BuildVirtualGeometry(MeshView& mesh) {
 	for (u32 level = 0; level < 16; level += 1) {
 		u32 allocator_high_water = allocator.memory_block_count;
 		
-		auto meshlet_build_result       = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum);
+		auto meshlet_build_result       = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics);
 		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, meshlet_build_result.meshlets, meshlet_build_result.meshlet_adjacency);
 		
-		ConvertMeshletGroupsToFaceGroups(mesh, allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_faces, meshlet_group_face_prefix_sum);
+		ConvertMeshletGroupsToFaceGroups(mesh, allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics);
 		
-		DecimateMeshFaceGroups(mesh, meshlet_group_faces, meshlet_group_face_prefix_sum);
+		DecimateMeshFaceGroups(mesh, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics);
+		UpdateMeshletCoarserLevelErrorMetrics(meshlet_build_result, meshlet_group_build_result, meshlet_group_error_metrics);
 		
-		// Compact the mesh after decimation to remove unused faces and edges. TODO: Ensure source mesh is compacted and replace face and edge validity checks with asserts.
+		// Compact the mesh after decimation to remove unused faces and edges. TODO: Replace face and edge validity checks with asserts.
 		CompactMesh(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum);
 		
 		AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
