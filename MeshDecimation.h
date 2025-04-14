@@ -222,6 +222,11 @@ struct alignas(16) Meshlet {
 	u32 coarser_level_bvh_node_index = 0;
 	
 	// TODO: Output vertices, meshlet vertex indices, and meshlet triangles. Store ranges of vertex indices and meshlet triangles here.
+	u32 begin_vertex_indices_index = 0;
+	u32 end_vertex_indices_index   = 0;
+	
+	u32 begin_meshlet_triangles_index = 0;
+	u32 end_meshlet_triangles_index   = 0;
 };
 
 struct alignas(16) MeshletGroupBvhNode {

@@ -145,6 +145,41 @@ void WriteWavefrontObjFile(const ObjTriangleMesh& mesh) {
 	fclose(file);
 }
 
+void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
+	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/Output/StanfordDragon.obj", "wb");
+	if (file == nullptr) return;
+	
+	fprintf(file, "# MeshDecimation\n");
+	fprintf(file, "o Object\n");
+	
+	for (u32 index = 0; index < mesh.vertices.size(); index += 1) {
+		auto& v = mesh.vertices[index];
+		fprintf(file, "v %f %f %f\n", v.position.x, v.position.y, v.position.z);
+		fprintf(file, "vn %f %f %f\n", v.normal.x, v.normal.y, v.normal.z);
+		fprintf(file, "vt %f %f\n", v.texcoord.x, v.texcoord.y);
+	}
+	
+	u32 group_index = u32_max;
+	for (u32 meshlet_index = 0; meshlet_index < mesh.meshlets.size(); meshlet_index += 1) {
+		auto& meshlet = mesh.meshlets[meshlet_index];
+		
+		if (group_index != meshlet.coarser_level_bvh_node_index) {
+			group_index = meshlet.coarser_level_bvh_node_index;
+			fprintf(file, "o Group%u\n", group_index);
+		}
+		
+		for (u32 i = meshlet.begin_meshlet_triangles_index; i < meshlet.end_meshlet_triangles_index; i += 3) {
+			u32 i0 = mesh.meshlet_vertex_indices[mesh.meshlet_triangles[i + 0] + meshlet.begin_vertex_indices_index] + 1;
+			u32 i1 = mesh.meshlet_vertex_indices[mesh.meshlet_triangles[i + 1] + meshlet.begin_vertex_indices_index] + 1;
+			u32 i2 = mesh.meshlet_vertex_indices[mesh.meshlet_triangles[i + 2] + meshlet.begin_vertex_indices_index] + 1;
+			
+			fprintf(file, "f %u/%u/%u %u/%u/%u %u/%u/%u\n", i0, i0, i0, i1, i1, i1, i2, i2, i2);
+		}
+	}
+	
+	fclose(file);
+}
+
 #include <chrono>
 
 int main() {
@@ -187,7 +222,8 @@ int main() {
 	t1 = std::chrono::high_resolution_clock::now();
 	printf("Decimation Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 
-	WriteWavefrontObjFile(EditableMeshToObjMesh(mesh_view));
+	// WriteWavefrontObjFile(EditableMeshToObjMesh(mesh_view));
+	WriteWavefrontObjFile(virtual_geometry);
 	
 	fclose(file);
 	
