@@ -201,6 +201,57 @@ ObjTriangleMesh EditableMeshToObjMesh(MeshView mesh);
 MeshView MeshToMeshView(Mesh& mesh);
 
 void DecimateMesh(MeshView mesh);
-void BuildVirtualGeometry(MeshView& mesh);
+
+
+struct alignas(16) Meshlet {
+	// Bounding box over meshlet vertex positions.
+	alignas(16) Vector3 aabb_min;
+	alignas(16) Vector3 aabb_max;
+	
+	// Bounding sphere over meshlet vertex positions.
+	SphereBounds geometric_sphere_bounds;
+	
+	// Error metric of this meshlet. Transferred from the group this meshlet was built from.
+	ErrorMetric current_level_error_metric;
+	// current_level_error_metric is extracted from this BVH node.
+	u32 current_level_bvh_node_index = 0;
+	
+	// Error metric of one level coarser representation of this meshlet. Transferred from the group that was built using this meshlet.
+	ErrorMetric coarser_level_error_metric;
+	// coarser_level_error_metric is extracted from this BVH node.
+	u32 coarser_level_bvh_node_index = 0;
+	
+	// TODO: Output vertices, meshlet vertex indices, and meshlet triangles. Store ranges of vertex indices and meshlet triangles here.
+};
+
+struct alignas(16) MeshletGroupBvhNode {
+	// Bounding box over child bounding boxes.
+	alignas(16) Vector3 aabb_min;
+	alignas(16) Vector3 aabb_max;
+	
+	// Bounding sphere over child bounding spheres.
+	SphereBounds geometric_sphere_bounds;
+	
+	// Internal nodes store union of child node error metrics.
+	// Leaf nodes store coarser_level_error_metric from child meshlets (it is the same by construction).
+	ErrorMetric error_metric;
+	
+	// Internal nodes store indices of child meshlet group BVH nodes.
+	// Leaf nodes store indices of meshlets.
+	u32 begin_child_index = 0;
+	u32 end_child_index   = 0;
+	
+	bool is_leaf_node = false;
+};
+
+struct VirtualGeometryBuildResult {
+	std::vector<MeshletGroupBvhNode> bvh_nodes;
+	std::vector<Meshlet> meshlets;
+	std::vector<u32> meshlet_vertex_indices;
+	std::vector<u8>  meshlet_triangles;
+	std::vector<ObjVertex> vertices;
+};
+
+void BuildVirtualGeometry(MeshView& mesh, VirtualGeometryBuildResult& result);
 
 #endif // MESHDECIMATION_H

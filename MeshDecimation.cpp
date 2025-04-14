@@ -1596,7 +1596,7 @@ static float DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, Ed
 	printf("Face Count: %u/%u\n", active_face_count, target_face_count);
 #endif // REPORT_DECIMATION_PROGRESS
 	
-	return max_error;
+	return sqrtf(max_error);
 }
 
 //
@@ -1951,21 +1951,6 @@ compile_const u32 meshlet_max_face_count   = 128;
 compile_const u32 meshlet_max_face_degree  = 3;
 compile_const u32 meshlet_group_max_meshlets = 32;
 
-struct alignas(16) Meshlet {
-	// Bounding box over meshlet vertex positions.
-	alignas(16) Vector3 aabb_min;
-	alignas(16) Vector3 aabb_max;
-	
-	// Bounding sphere over meshlet vertex positions.
-	SphereBounds geometric_sphere_bounds;
-	
-	// Error metric of this meshlet. Transferred from the group this meshlet was built from.
-	ErrorMetric current_level_error_metric;
-	
-	// Error metric of one level coarser representation of this meshlet. Transferred from the group that was built using this meshlet.
-	ErrorMetric coarser_level_error_metric;
-};
-
 static SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds) {
 	u32 aabb_min_index[3] = { 0, 0, 0 };
 	u32 aabb_max_index[3] = { 0, 0, 0 };
@@ -2241,7 +2226,7 @@ static void BuildMeshletsForFaceGroup(
 }
 
 // Note that FaceIDs inside groups are going to be scrambled inside groups during KdTree build. This leaves prefix sum in a valid, but different state.
-static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& allocator, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<ErrorMetric> meshlet_group_error_metrics) {
+static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& allocator, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<ErrorMetric> meshlet_group_error_metrics, u32 group_index_to_bvh_node_index) {
 	KdTree kd_tree;
 	KdTreeBuildElementsForFaces(mesh, allocator, kd_tree.elements);
 	ArrayReserve(kd_tree.nodes, allocator, kd_tree.elements.count * 2);
@@ -2343,6 +2328,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 		// For the level zero we don't have them, so this error metric will be kept as is.
 		meshlet.current_level_error_metric.bounds = meshlet_sphere_bounds;
 		meshlet.current_level_error_metric.error  = 0.f;
+		meshlet.current_level_bvh_node_index      = u32_max;
 		
 		begin_corner_index = end_corner_index;
 	}
@@ -2354,7 +2340,8 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 		auto source_meshlet_group_error_metric = meshlet_group_error_metrics[group_index];
 		for (u32 meshlet_index = meshlet_begin_index; meshlet_index < meshlet_end_index; meshlet_index += 1) {
 			auto& meshlet = meshlets[meshlet_index];
-			meshlet.current_level_error_metric = source_meshlet_group_error_metric;
+			meshlet.current_level_error_metric   = source_meshlet_group_error_metric;
+			meshlet.current_level_bvh_node_index = group_index + group_index_to_bvh_node_index;
 		}
 
 		meshlet_begin_index = meshlet_end_index;
@@ -2626,21 +2613,58 @@ static void ConvertMeshletGroupsToFaceGroups(
 	}
 }
 
-static void UpdateMeshletCoarserLevelErrorMetrics(MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<ErrorMetric> meshlet_group_error_metrics) {
+static u32 BuildMeshletsAndMeshletGroupBvhNodes(MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<ErrorMetric> meshlet_group_error_metrics, VirtualGeometryBuildResult& result) {
+	if (result.bvh_nodes.capacity() == 0) {
+		result.bvh_nodes.reserve(meshlet_group_build_result.prefix_sum.count * 4);
+	}
+	
+	if (result.meshlets.capacity() == 0) {
+		result.meshlets.reserve(meshlet_build_result.meshlets.count * 4);
+	}
+	
+	u32 group_index_to_bvh_node_index = (u32)result.bvh_nodes.size();
+	
 	u32 group_meshlet_begin_index = 0;
 	for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
 		u32 group_meshlet_end_index = meshlet_group_build_result.prefix_sum[group_index];
 		
-		auto error_metric = meshlet_group_error_metrics[group_index];
+		auto meshlet_group_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
+		auto meshlet_group_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
+		
+		FixedSizeArray<SphereBounds, meshlet_group_max_meshlets> meshlet_sphere_bounds;
+		auto meshlet_group_error_metric = meshlet_group_error_metrics[group_index];
+		
+		u32 begin_child_index = (u32)result.meshlets.size();
 		for (u32 group_meshlet_index = group_meshlet_begin_index; group_meshlet_index < group_meshlet_end_index; group_meshlet_index += 1) {
 			u32 meshlet_index = meshlet_group_build_result.meshlet_indices[group_meshlet_index];
 			
 			auto& meshlet = meshlet_build_result.meshlets[meshlet_index];
-			meshlet.coarser_level_error_metric = error_metric;
+			meshlet.coarser_level_error_metric   = meshlet_group_error_metric;
+			meshlet.coarser_level_bvh_node_index = group_index + group_index_to_bvh_node_index;
+			
+			meshlet_group_aabb_min_ps = _mm_min_ps(meshlet_group_aabb_min_ps, _mm_load_ps(&meshlet.aabb_min.x));
+			meshlet_group_aabb_max_ps = _mm_max_ps(meshlet_group_aabb_max_ps, _mm_load_ps(&meshlet.aabb_max.x));
+			
+			ArrayAppend(meshlet_sphere_bounds, meshlet.geometric_sphere_bounds);
+			
+			result.meshlets.push_back(meshlet);
 		}
+		u32 end_child_index = (u32)result.meshlets.size();
+		
+		auto& bvh_node = result.bvh_nodes.emplace_back();
+		_mm_store_ps(&bvh_node.aabb_min.x, meshlet_group_aabb_min_ps);
+		_mm_store_ps(&bvh_node.aabb_max.x, meshlet_group_aabb_max_ps);
+		
+		bvh_node.geometric_sphere_bounds = ComputeSphereBoundsUnion(CreateArrayView(meshlet_sphere_bounds));
+		bvh_node.error_metric            = meshlet_group_error_metric;
+		bvh_node.begin_child_index       = begin_child_index;
+		bvh_node.end_child_index         = end_child_index;
+		bvh_node.is_leaf_node            = true;
 		
 		group_meshlet_begin_index = group_meshlet_end_index;
 	}
+
+	return group_index_to_bvh_node_index;
 }
 
 template<typename ElementID>
@@ -2712,7 +2736,7 @@ static void CompactMesh(MeshView& mesh, Allocator& allocator, Array<FaceID>& mes
 	}
 }
 
-void BuildVirtualGeometry(MeshView& mesh) {
+void BuildVirtualGeometry(MeshView& mesh, VirtualGeometryBuildResult& result) {
 	//
 	// Virtual Geometry TODO:
 	//
@@ -2742,25 +2766,40 @@ void BuildVirtualGeometry(MeshView& mesh) {
 	}
 	ArrayAppend(meshlet_group_face_prefix_sum, meshlet_group_faces.count);
 	
+	u32 group_index_to_bvh_node_index = 0;
 	
-	for (u32 level = 0; level < 16; level += 1) {
+	compile_const u32 max_levels_of_detail = 16;
+	for (u32 level = 0; level < max_levels_of_detail; level += 1) {
 		u32 allocator_high_water = allocator.memory_block_count;
 		
-		auto meshlet_build_result       = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics);
+		auto meshlet_build_result       = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, group_index_to_bvh_node_index);
 		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, meshlet_build_result.meshlets, meshlet_build_result.meshlet_adjacency);
 		
 		ConvertMeshletGroupsToFaceGroups(mesh, allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics);
 		
-		DecimateMeshFaceGroups(mesh, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics);
-		UpdateMeshletCoarserLevelErrorMetrics(meshlet_build_result, meshlet_group_build_result, meshlet_group_error_metrics);
+		// TODO: Output vertices, meshlet vertex indices, and meshlet triangles before decimation.
 		
-		// Compact the mesh after decimation to remove unused faces and edges. TODO: Replace face and edge validity checks with asserts.
-		CompactMesh(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum);
+		bool is_last_level = (level + 1 == max_levels_of_detail) || (mesh.face_count <= 1024);
+		if (is_last_level == false) {
+			DecimateMeshFaceGroups(mesh, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics);
+			
+			// Compact the mesh after decimation to remove unused faces and edges. TODO: Replace face and edge validity checks with asserts.
+			CompactMesh(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum);
+		} else {
+			// There is no coarser version of the mesh. Set meshlet group errors to FLT_MAX to make sure LOD
+			// culling test always succeeds for last level meshlets (i.e. coarser level is always too coarse).
+			for (auto& error_metric : meshlet_group_error_metrics) error_metric.error = FLT_MAX;
+		}
+		
+		
+		group_index_to_bvh_node_index = BuildMeshletsAndMeshletGroupBvhNodes(meshlet_build_result, meshlet_group_build_result, meshlet_group_error_metrics, result);
 		
 		AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 		
-		if (mesh.face_count <= 1024) break;
+		if (is_last_level) break;
 	}
+	
+	// TODO: Generate internal meshlet group BVH nodes.
 	
 	AllocatorFreeMemoryBlocks(allocator);
 }

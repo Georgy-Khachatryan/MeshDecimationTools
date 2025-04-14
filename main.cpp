@@ -180,7 +180,9 @@ int main() {
 	auto mesh_view = MeshToMeshView(editable_mesh);
 	
 	// DecimateMesh(mesh_view);
-	BuildVirtualGeometry(mesh_view);
+	
+	VirtualGeometryBuildResult virtual_geometry;
+	BuildVirtualGeometry(mesh_view, virtual_geometry);
 	
 	t1 = std::chrono::high_resolution_clock::now();
 	printf("Decimation Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
