@@ -221,7 +221,6 @@ struct alignas(16) Meshlet {
 	// coarser_level_error_metric is extracted from this BVH node.
 	u32 coarser_level_bvh_node_index = 0;
 	
-	// TODO: Output vertices, meshlet vertex indices, and meshlet triangles. Store ranges of vertex indices and meshlet triangles here.
 	u32 begin_vertex_indices_index = 0;
 	u32 end_vertex_indices_index   = 0;
 	
