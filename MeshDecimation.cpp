@@ -1133,18 +1133,18 @@ struct AttributeWedgeMap {
 	u32 count = 0;
 };
 
-static void AttributeWedgeMapAdd(AttributeWedgeMap& small_set, AttributesID key, u8 value) {
+static void AttributeWedgeMapAdd(AttributeWedgeMap& small_set, AttributesID key, u32 value) {
 	u32 index = (small_set.count < AttributeWedgeMap::capacity) ? small_set.count++ : (AttributeWedgeMap::capacity - 1);
 	small_set.keys[index]   = key;
-	small_set.values[index] = value;
+	small_set.values[index] = (u8)value;
 }
 
-static u8 AttributeWedgeMapFind(AttributeWedgeMap& small_set, AttributesID key) {
+static u32 AttributeWedgeMapFind(AttributeWedgeMap& small_set, AttributesID key) {
 	for (u32 i = 0; i < small_set.count; i += 1) {
 		if (small_set.keys[i].index == key.index) return small_set.values[i];
 	}
 	
-	return 0;
+	return u32_max;
 }
 
 static void ResetAttributeWedgeMap(AttributeWedgeMap& small_set) {
@@ -1185,31 +1185,31 @@ void ComputeEdgeCollapseError(MeshView mesh, MeshDecimationState& state, EdgeID 
 		auto& corner_0 = mesh[corner_id];
 		auto& corner_1 = mesh[corner_0.corner_list_around[(u32)ElementType::Face].next];
 		
-		u8 wedge_index_0 = AttributeWedgeMapFind(state.wedge_attribute_set, corner_0.attributes_id);
-		u8 wedge_index_1 = AttributeWedgeMapFind(state.wedge_attribute_set, corner_1.attributes_id);
+		u32 wedge_index_0 = AttributeWedgeMapFind(state.wedge_attribute_set, corner_0.attributes_id);
+		u32 wedge_index_1 = AttributeWedgeMapFind(state.wedge_attribute_set, corner_1.attributes_id);
 		
-		if (wedge_index_0 == 0 && wedge_index_1 == 0) {
-			u8 index = (u8)(state.wedge_quadrics.size() + 1);
-			AttributeWedgeMapAdd(state.wedge_attribute_set, corner_0.attributes_id, index);
-			AttributeWedgeMapAdd(state.wedge_attribute_set, corner_1.attributes_id, index);
+		if (wedge_index_0 == u32_max && wedge_index_1 == u32_max) {
+			u32 wedge_index = (u32)state.wedge_quadrics.size();
+			AttributeWedgeMapAdd(state.wedge_attribute_set, corner_0.attributes_id, wedge_index);
+			AttributeWedgeMapAdd(state.wedge_attribute_set, corner_1.attributes_id, wedge_index);
 			
 			state.wedge_attributes_ids.emplace_back(corner_0.attributes_id);
 			auto& quadric = state.wedge_quadrics.emplace_back(state.attribute_face_quadrics[corner_0.attributes_id.index]);
 			AccumulateQuadricWithAttributes(quadric, state.attribute_face_quadrics[corner_1.attributes_id.index]);
-		} else if (wedge_index_0 == 0 && wedge_index_1 != 0) {
+		} else if (wedge_index_0 == u32_max && wedge_index_1 != u32_max) {
 			AttributeWedgeMapAdd(state.wedge_attribute_set, corner_0.attributes_id, wedge_index_1);
-			AccumulateQuadricWithAttributes(state.wedge_quadrics[wedge_index_1 - 1], state.attribute_face_quadrics[corner_0.attributes_id.index]);
-		} else if (wedge_index_0 != 0 && wedge_index_1 == 0) {
+			AccumulateQuadricWithAttributes(state.wedge_quadrics[wedge_index_1], state.attribute_face_quadrics[corner_0.attributes_id.index]);
+		} else if (wedge_index_0 != u32_max && wedge_index_1 == u32_max) {
 			AttributeWedgeMapAdd(state.wedge_attribute_set, corner_1.attributes_id, wedge_index_0);
-			AccumulateQuadricWithAttributes(state.wedge_quadrics[wedge_index_0 - 1], state.attribute_face_quadrics[corner_1.attributes_id.index]);
+			AccumulateQuadricWithAttributes(state.wedge_quadrics[wedge_index_0], state.attribute_face_quadrics[corner_1.attributes_id.index]);
 		}
 	});
 	
 	auto accumulate_quadrics = [&](CornerID corner_id) {
 		auto attribute_id = mesh[corner_id].attributes_id;
 		
-		if (AttributeWedgeMapFind(state.wedge_attribute_set, attribute_id) == 0) {
-			AttributeWedgeMapAdd(state.wedge_attribute_set, attribute_id, (u8)(state.wedge_quadrics.size() + 1));
+		if (AttributeWedgeMapFind(state.wedge_attribute_set, attribute_id) == u32_max) {
+			AttributeWedgeMapAdd(state.wedge_attribute_set, attribute_id, (u32)state.wedge_quadrics.size());
 			state.wedge_quadrics.push_back(state.attribute_face_quadrics[attribute_id.index]);
 			state.wedge_attributes_ids.emplace_back(attribute_id);
 		}
@@ -1586,8 +1586,8 @@ static float DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, Ed
 			}
 			
 			IterateCornerList<ElementType::Vertex>(mesh, mesh[remaning_vertex_id].corner_list_base, [&](CornerID corner_id) {
-				u8 index = AttributeWedgeMapFind(state.wedge_attribute_set, mesh[corner_id].attributes_id);
-				if (index != 0) mesh[corner_id].attributes_id = state.wedge_attributes_ids[index - 1];
+				u32 index = AttributeWedgeMapFind(state.wedge_attribute_set, mesh[corner_id].attributes_id);
+				if (index != u32_max) mesh[corner_id].attributes_id = state.wedge_attributes_ids[index];
 			});
 		}
 #endif // ENABLE_ATTRIBUTE_SUPPORT
