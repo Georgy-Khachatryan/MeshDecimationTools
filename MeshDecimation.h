@@ -228,6 +228,15 @@ struct alignas(16) Meshlet {
 	u32 end_meshlet_triangles_index   = 0;
 };
 
+struct MeshletGroupInternalBvhNodeData {
+	u32 child_indices[4];
+};
+
+struct MeshletGroupLeafBvhNodeData {
+	u32 begin_child_index;
+	u32 end_child_index;
+};
+
 struct alignas(16) MeshletGroupBvhNode {
 	// Bounding box over child bounding boxes.
 	alignas(16) Vector3 aabb_min;
@@ -240,10 +249,13 @@ struct alignas(16) MeshletGroupBvhNode {
 	// Leaf nodes store coarser_level_error_metric from child meshlets (it is the same by construction).
 	ErrorMetric error_metric;
 	
-	// Internal nodes store indices of child meshlet group BVH nodes.
-	// Leaf nodes store indices of meshlets.
-	u32 begin_child_index = 0;
-	u32 end_child_index   = 0;
+	union {
+		// Internal nodes store indices of child meshlet group BVH nodes.
+		MeshletGroupInternalBvhNodeData internal;
+		
+		// Leaf nodes store a range of meshlet indices.
+		MeshletGroupLeafBvhNodeData leaf;
+	};
 	
 	bool is_leaf_node = false;
 };
@@ -254,6 +266,8 @@ struct VirtualGeometryBuildResult {
 	std::vector<u32> meshlet_vertex_indices;
 	std::vector<u8>  meshlet_triangles;
 	std::vector<ObjVertex> vertices;
+	
+	u32 meshlet_group_bvh_root_node_index = 0;
 };
 
 void BuildVirtualGeometry(MeshView& mesh, VirtualGeometryBuildResult& result);

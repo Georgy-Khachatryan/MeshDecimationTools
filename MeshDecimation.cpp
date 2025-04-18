@@ -1962,6 +1962,7 @@ compile_const u32 meshlet_max_vertex_count = 128;
 compile_const u32 meshlet_max_face_count   = 128;
 compile_const u32 meshlet_max_face_degree  = 3;
 compile_const u32 meshlet_group_max_meshlets = 32;
+compile_const u32 mehslet_group_max_bvh_branching_factor = 4;
 
 static SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds) {
 	u32 aabb_min_index[3] = { 0, 0, 0 };
@@ -2685,8 +2686,8 @@ static u32 BuildMeshletsAndMeshletGroupBvhNodes(MeshletBuildResult meshlet_build
 		
 		bvh_node.geometric_sphere_bounds = ComputeSphereBoundsUnion(CreateArrayView(meshlet_sphere_bounds));
 		bvh_node.error_metric            = meshlet_group_error_metric;
-		bvh_node.begin_child_index       = begin_child_index;
-		bvh_node.end_child_index         = end_child_index;
+		bvh_node.leaf.begin_child_index  = begin_child_index;
+		bvh_node.leaf.end_child_index    = end_child_index;
 		bvh_node.is_leaf_node            = true;
 		
 		group_meshlet_begin_index = group_meshlet_end_index;
@@ -2832,18 +2833,89 @@ static void AppendChangedVertices(MeshView mesh, Array<VertexID> changed_attribu
 	}
 }
 
+static u32 CreateInternalMeshletGroupBvhNode(std::vector<MeshletGroupBvhNode>& bvh_nodes, ArrayView<u32> node_indices) {
+	assert(node_indices.count <= mehslet_group_max_bvh_branching_factor);
+	
+	auto bvh_node_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
+	auto bvh_node_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
+	
+	FixedSizeArray<SphereBounds, mehslet_group_max_bvh_branching_factor> bvh_node_sphere_bounds;
+	FixedSizeArray<SphereBounds, mehslet_group_max_bvh_branching_factor> bvh_node_error_sphere_bounds;
+	
+	float max_error = 0.f;
+	for (u32 bvh_node_index : node_indices) {
+		auto& bvh_node = bvh_nodes[bvh_node_index];
+		
+		bvh_node_aabb_min_ps = _mm_min_ps(bvh_node_aabb_min_ps, _mm_load_ps(&bvh_node.aabb_min.x));
+		bvh_node_aabb_max_ps = _mm_max_ps(bvh_node_aabb_max_ps, _mm_load_ps(&bvh_node.aabb_max.x));
+		
+		ArrayAppend(bvh_node_sphere_bounds, bvh_node.geometric_sphere_bounds);
+		ArrayAppend(bvh_node_error_sphere_bounds, bvh_node.error_metric.bounds);
+		max_error = bvh_node.error_metric.error > max_error ? bvh_node.error_metric.error : max_error;
+	}
+	
+	u32 node_index = (u32)bvh_nodes.size();
+	
+	auto& bvh_node = bvh_nodes.emplace_back();
+	_mm_store_ps(&bvh_node.aabb_min.x, bvh_node_aabb_min_ps);
+	_mm_store_ps(&bvh_node.aabb_max.x, bvh_node_aabb_max_ps);
+	
+	memset(bvh_node.internal.child_indices, 0, sizeof(bvh_node.internal.child_indices));
+	memcpy(bvh_node.internal.child_indices, node_indices.data, node_indices.count * sizeof(u32));
+	
+	bvh_node.geometric_sphere_bounds = ComputeSphereBoundsUnion(CreateArrayView(bvh_node_sphere_bounds));
+	bvh_node.error_metric.bounds     = ComputeSphereBoundsUnion(CreateArrayView(bvh_node_error_sphere_bounds));
+	bvh_node.error_metric.error      = max_error;
+	bvh_node.is_leaf_node            = false;
+	
+	return node_index;
+}
+
+static u32 ComputeChildSubtreeLeafCount(u32 total_leaf_count, u32 bvh_branching_factor) {
+	// Compute subtree_size such that the subtree is guaranteed to be full.
+	u32 subtree_size = bvh_branching_factor;
+	while (subtree_size * bvh_branching_factor < total_leaf_count) subtree_size *= bvh_branching_factor;
+	
+	return subtree_size;
+}
+
+static u32 BuildMeshletGroupBvh(std::vector<MeshletGroupBvhNode>& bvh_nodes, ArrayView<u32> node_indices) {
+	compile_const u32 max_child_count = mehslet_group_max_bvh_branching_factor;
+	
+	if (node_indices.count == 1)               return node_indices[0];
+	if (node_indices.count <= max_child_count) return CreateInternalMeshletGroupBvhNode(bvh_nodes, node_indices);
+	
+	u32 subtree_size = ComputeChildSubtreeLeafCount(node_indices.count, max_child_count);
+	
+	// TODO: Sort leaf nodes according to position or error.
+	
+	FixedSizeArray<u32, max_child_count> child_node_indices;
+	for (u32 i = 0; i < max_child_count; i += 1) {
+		u32 begin_index = (i + 0) * subtree_size;
+		u32 end_index   = (i + 1) * subtree_size;
+		
+		bool is_last_child = (end_index >= node_indices.count);
+		if (is_last_child) end_index = node_indices.count;
+		
+		u32 child_node_index = BuildMeshletGroupBvh(bvh_nodes, CreateArrayView(node_indices, begin_index, end_index));
+		ArrayAppend(child_node_indices, child_node_index);
+
+		if (is_last_child) break;
+	}
+	
+	return CreateInternalMeshletGroupBvhNode(bvh_nodes, CreateArrayView(child_node_indices));
+}
+
 void BuildVirtualGeometry(MeshView& mesh, VirtualGeometryBuildResult& result) {
 	//
 	// Virtual Geometry TODO:
 	//
-	// 1. Build mesh data structure (faces, edges, vertices, corners).
-	// 2. Build meshlets from meshlet group faces.
-	// 3. Build meshlet groups.
-	// 4. Decimate meshlet groups.
-	//  - Make sure locked vertex data is preserved and respected.
-	//  - Make sure all groups are simplified by 1/2
-	// 5. Output meshlet data.
-	//  - For each meshlet there should be two errors. One for high quality version of the group, one for low quality.
+	// - Build a BVH over groups.
+	// - Improve user facing API. Remove editable mesh from the header.
+	// - Implement per face geometry index. Validate that edge quadrics are inserted between faces with different geometry indices.
+	// - Don't allow more than one geometry per meshlet.
+	// - Allow arbitrary vertex formats (<32 DWORDs). Expose a callback for handling newly generated attributes.
+	// - Rework allocation patterns. Minimize size, number, and duration of allocations. Implement allocator for growable outputs.
 	//
 	
 	Allocator allocator;
@@ -2920,7 +2992,15 @@ void BuildVirtualGeometry(MeshView& mesh, VirtualGeometryBuildResult& result) {
 		if (is_last_level) break;
 	}
 	
-	// TODO: Generate internal meshlet group BVH nodes.
+	{
+		Array<u32> bvh_node_indices;
+		ArrayResize(bvh_node_indices, allocator, (u32)result.bvh_nodes.size());
+		
+		for (u32 i = 0; i < bvh_node_indices.count; i += 1) bvh_node_indices[i] = i;
+		
+		u32 root_node_index = BuildMeshletGroupBvh(result.bvh_nodes, CreateArrayView(bvh_node_indices));
+		result.meshlet_group_bvh_root_node_index = root_node_index;
+	}
 	
 	AllocatorFreeMemoryBlocks(allocator);
 }
