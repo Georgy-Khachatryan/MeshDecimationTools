@@ -130,7 +130,7 @@ static ElementID CornerListMerge(MeshView mesh, ElementID element_0, ElementID e
 	compile_const ElementType element_type_t = ElementID::element_type;
 	compile_const u32 element_type = (u32)element_type_t;
 	
-	auto remaning_element_id = ElementID{ u32_max };
+	auto remaining_element_id = ElementID{ u32_max };
 	if (base_id_0.index != u32_max && base_id_1.index != u32_max) {
 		IterateCornerList<element_type_t>(mesh, base_id_1, [&](CornerID corner_id) {
 			if constexpr (element_type_t == ElementType::Vertex) {
@@ -161,14 +161,14 @@ static ElementID CornerListMerge(MeshView mesh, ElementID element_0, ElementID e
 		
 		mesh[element_1].corner_list_base.index = u32_max;
 		
-		remaning_element_id = element_0;
+		remaining_element_id = element_0;
 	} else if (base_id_0.index != u32_max) {
-		remaning_element_id = element_0;
+		remaining_element_id = element_0;
 	} else if (base_id_1.index != u32_max) {
-		remaning_element_id = element_1;
+		remaining_element_id = element_1;
 	}
 	
-	return remaning_element_id;
+	return remaining_element_id;
 }
 
 struct Allocator {
@@ -607,7 +607,7 @@ MeshView MeshToMeshView(Mesh& mesh) {
 using RemovedEdgeArray = std::vector<EdgeID>;
 
 struct EdgeCollapseResult {
-	VertexID remaning_vertex_id;
+	VertexID remaining_vertex_id;
 	u32 removed_face_count = 0;
 };
 
@@ -639,12 +639,12 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Edg
 		});
 	});
 	
-	auto remaning_vertex_id = CornerListMerge<VertexID>(mesh, edge.vertex_0, edge.vertex_1);
+	auto remaining_vertex_id = CornerListMerge<VertexID>(mesh, edge.vertex_0, edge.vertex_1);
 
-	if (remaning_vertex_id.index != u32_max) {
-		auto remaning_base_id = mesh[remaning_vertex_id].corner_list_base;
+	if (remaining_vertex_id.index != u32_max) {
+		auto remaining_base_id = mesh[remaining_vertex_id].corner_list_base;
 		
-		IterateCornerList<ElementType::Vertex>(mesh, remaning_base_id, [&](CornerID corner_id) {
+		IterateCornerList<ElementType::Vertex>(mesh, remaining_base_id, [&](CornerID corner_id) {
 			// TODO: This can be iteration over just incoming and outgoing edges of a corner.
 			IterateCornerList<ElementType::Face>(mesh, corner_id, [&](CornerID corner_id) {
 				auto edge_id_1 = mesh[corner_id].edge_id;
@@ -658,9 +658,9 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Edg
 			});
 		});
 		
-		IterateCornerList<ElementType::Vertex>(mesh, remaning_base_id, [&](CornerID corner_id_0) {
+		IterateCornerList<ElementType::Vertex>(mesh, remaining_base_id, [&](CornerID corner_id_0) {
 			IterateCornerList<ElementType::Face>(mesh, corner_id_0, [&](CornerID corner_id_1) {
-				if (remaning_base_id.index == corner_id_1.index) return;
+				if (remaining_base_id.index == corner_id_1.index) return;
 				
 				IterateCornerList<ElementType::Vertex>(mesh, corner_id_1, [&](CornerID corner_id_2) {
 					if (corner_id_1.index == corner_id_2.index) return;
@@ -678,7 +678,7 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Edg
 	
 	
 	EdgeCollapseResult result;
-	result.remaning_vertex_id = remaning_vertex_id;
+	result.remaining_vertex_id = remaining_vertex_id;
 	result.removed_face_count = removed_face_count;
 	
 	return result;
@@ -1542,7 +1542,7 @@ static float DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, Ed
 		max_error = max_error < select_info.min_error ? select_info.min_error : max_error;
 		
 		// 15% of the execution time
-		auto [remaning_vertex_id, removed_face_count] = PerformEdgeCollapse(mesh, edge_id, state.edge_duplicate_map, state.removed_edge_array);
+		auto [remaining_vertex_id, removed_face_count] = PerformEdgeCollapse(mesh, edge_id, state.edge_duplicate_map, state.removed_edge_array);
 		active_face_count -= removed_face_count;
 		
 		for (auto edge_id : state.removed_edge_array) {
@@ -1565,7 +1565,7 @@ static float DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, Ed
 		
 #if ENABLE_ATTRIBUTE_SUPPORT
 		// Update attributes.
-		if (remaning_vertex_id.index != u32_max) {
+		if (remaining_vertex_id.index != u32_max) {
 			u32 wedge_count = (u32)state.wedge_quadrics.size();
 			
 			for (u32 i = 0; i < wedge_count; i += 1) {
@@ -1581,11 +1581,11 @@ static float DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, Ed
 				}
 				
 				if (changed_attribute_vertex_ids) {
-					changed_attribute_vertex_ids[attributes_id.index] = remaning_vertex_id;
+					changed_attribute_vertex_ids[attributes_id.index] = remaining_vertex_id;
 				}
 			}
 			
-			IterateCornerList<ElementType::Vertex>(mesh, mesh[remaning_vertex_id].corner_list_base, [&](CornerID corner_id) {
+			IterateCornerList<ElementType::Vertex>(mesh, mesh[remaining_vertex_id].corner_list_base, [&](CornerID corner_id) {
 				u32 index = AttributeWedgeMapFind(state.wedge_attribute_set, mesh[corner_id].attributes_id);
 				if (index != u32_max) mesh[corner_id].attributes_id = state.wedge_attributes_ids[index];
 			});
