@@ -39,7 +39,12 @@ static const char* EatWhiteSpaceAndComments(const char* string) {
 }
 
 
-ObjTriangleMesh ParseWavefrontObj(const char* string) {
+struct ObjTriangleMesh {
+	std::vector<u32> indices;
+	std::vector<ObjVertex> vertices;
+};
+
+static ObjTriangleMesh ParseWavefrontObj(const char* string) {
 	std::vector<Vector3> positions;
 	std::vector<Vector3> normals;
 	std::vector<Vector2> texcoords;
@@ -121,7 +126,7 @@ ObjTriangleMesh ParseWavefrontObj(const char* string) {
 	return mesh;
 }
 
-void WriteWavefrontObjFile(const ObjTriangleMesh& mesh) {
+void WriteWavefrontObjFile(const MeshDecimationResult& mesh) {
 	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/Output/StanfordDragon.obj", "wb");
 	if (file == nullptr) return;
 	
@@ -205,25 +210,36 @@ int main() {
 	t1 = std::chrono::high_resolution_clock::now();
 	printf("Parse File Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 	
-
 	t0 = std::chrono::high_resolution_clock::now();
-	auto editable_mesh = ObjMeshToEditableMesh(triangle_mesh);
-	t1 = std::chrono::high_resolution_clock::now();
-	printf("To Editable Mesh Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 	
-	t0 = std::chrono::high_resolution_clock::now();
-	auto mesh_view = MeshToMeshView(editable_mesh);
 	
-	// DecimateMesh(mesh_view);
+	TriangleGeometryDesc geometry_descs[1];
+	geometry_descs[0].indices = triangle_mesh.indices.data();
+	geometry_descs[0].index_count = (u32)triangle_mesh.indices.size();
+	geometry_descs[0].vertices = triangle_mesh.vertices.data();
+	geometry_descs[0].vertex_count = (u32)triangle_mesh.vertices.size();
 	
-	VirtualGeometryBuildResult virtual_geometry;
-	BuildVirtualGeometry(mesh_view, virtual_geometry);
+#if 1
+	VirtualGeometryBuildInputs inputs;
+	inputs.geometry_descs = geometry_descs;
+	inputs.geometry_desc_count = 1;
+	
+	VirtualGeometryBuildResult result;
+	BuildVirtualGeometry(inputs, result);
+#else
+	MeshDecimationInputs inputs;
+	inputs.geometry_descs = geometry_descs;
+	inputs.geometry_desc_count = 1;
+	inputs.target_face_count = (geometry_descs[0].index_count / 3) / 138;
+	
+	MeshDecimationResult result;
+	DecimateMesh(inputs, result);
+#endif
 	
 	t1 = std::chrono::high_resolution_clock::now();
 	printf("Decimation Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
-
-	// WriteWavefrontObjFile(EditableMeshToObjMesh(mesh_view));
-	WriteWavefrontObjFile(virtual_geometry);
+	
+	WriteWavefrontObjFile(result);
 	
 	fclose(file);
 	

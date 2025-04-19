@@ -120,6 +120,7 @@ compile_const u32 attribute_stride_dwords = 5; // 3 normal + 2 texcoords.
 
 struct Face {
 	CornerID corner_list_base; // Corner list around a face.
+	u32 geometry_index = 0;
 };
 
 struct Edge {
@@ -190,18 +191,43 @@ struct ObjVertex {
 	Vector3 normal;
 };
 
-struct ObjTriangleMesh {
-	std::vector<ObjVertex> vertices;
-	std::vector<u32>       indices;
+struct TriangleGeometryDesc {
+	const u32* indices = nullptr;
+	u32 index_count = 0;
+	
+	const ObjVertex* vertices = nullptr;
+	u32 vertex_count = 0;
 };
 
+struct VirtualGeometryBuildInputs {
+	const TriangleGeometryDesc* geometry_descs = nullptr;
+	u32 geometry_desc_count = 0;
+	
+	// TODO: Arbitrary vertex layout.
+	// u32 vertex_stride = 0;
+	
+	// TODO: Custom meshlet size.
+	// u32 meshlet_max_vertex_count   = 128;
+	// u32 meshlet_max_triangle_count = 128;
+	
+	// TODO: Custom BVH format.
+	// u32 mehslet_group_bvh_max_branching_factor = 4;
+};
 
-Mesh ObjMeshToEditableMesh(ObjTriangleMesh mesh);
-ObjTriangleMesh EditableMeshToObjMesh(MeshView mesh);
-MeshView MeshToMeshView(Mesh& mesh);
-
-void DecimateMesh(MeshView mesh);
-
+struct MeshDecimationInputs {
+	const TriangleGeometryDesc* geometry_descs = nullptr;
+	u32 geometry_desc_count = 0;
+	
+	// TODO: Arbitrary vertex layout.
+	// u32 vertex_stride = 0;
+	
+	u32 target_face_count = 0;
+	// TODO: Add support for error limit.
+	// float error_limit = 0.f;
+	
+	// TODO: Generate multiple levels of detail at once.
+	// u32 level_of_detail_count = 0;
+};
 
 struct alignas(16) Meshlet {
 	// Bounding box over meshlet vertex positions.
@@ -226,6 +252,8 @@ struct alignas(16) Meshlet {
 	
 	u32 begin_meshlet_triangles_index = 0;
 	u32 end_meshlet_triangles_index   = 0;
+	
+	// TODO: Store geometry index per meshlet. Don't allow triangles from more than one geometry to be combined into a meshlet.
 };
 
 struct MeshletGroupInternalBvhNodeData {
@@ -281,6 +309,14 @@ struct VirtualGeometryBuildResult {
 	u32 meshlet_group_bvh_root_node_index = 0;
 };
 
-void BuildVirtualGeometry(MeshView& mesh, VirtualGeometryBuildResult& result);
+struct MeshDecimationResult {
+	// TODO: Output per geometry index and vertex ranges.
+	std::vector<u32> indices;
+	std::vector<ObjVertex> vertices;
+	float max_error = 0.f;
+};
+
+void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeometryBuildResult& result);
+void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& result);
 
 #endif // MESHDECIMATION_H
