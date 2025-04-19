@@ -260,12 +260,23 @@ struct alignas(16) MeshletGroupBvhNode {
 	bool is_leaf_node = false;
 };
 
+struct VirtualGeometryLevel {
+	u32 begin_bvh_nodes_index = 0;
+	u32 end_bvh_nodes_index   = 0;
+	
+	u32 begin_meshlets_index = 0;
+	u32 end_meshlets_index   = 0;
+	
+	u32 meshlet_group_bvh_root_node_index = 0;
+};
+
 struct VirtualGeometryBuildResult {
 	std::vector<MeshletGroupBvhNode> bvh_nodes;
 	std::vector<Meshlet> meshlets;
 	std::vector<u32> meshlet_vertex_indices;
 	std::vector<u8>  meshlet_triangles;
 	std::vector<ObjVertex> vertices;
+	std::vector<VirtualGeometryLevel> levels;
 	
 	u32 meshlet_group_bvh_root_node_index = 0;
 };

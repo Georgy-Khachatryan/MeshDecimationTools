@@ -2906,6 +2906,19 @@ static u32 BuildMeshletGroupBvh(std::vector<MeshletGroupBvhNode>& bvh_nodes, Arr
 	return CreateInternalMeshletGroupBvhNode(bvh_nodes, CreateArrayView(child_node_indices));
 }
 
+static void BeginVirtualGeometryLevel(VirtualGeometryBuildResult& result) {
+	auto& level = result.levels.emplace_back();
+	level.begin_bvh_nodes_index = (u32)result.bvh_nodes.size();
+	level.begin_meshlets_index  = (u32)result.meshlets.size();
+}
+
+static void EndVirtualGeometryLevel(VirtualGeometryBuildResult& result) {
+	auto& level = result.levels.back();
+	level.end_bvh_nodes_index = (u32)result.bvh_nodes.size();
+	level.end_meshlets_index  = (u32)result.meshlets.size();
+}
+
+
 void BuildVirtualGeometry(MeshView& mesh, VirtualGeometryBuildResult& result) {
 	//
 	// Virtual Geometry TODO:
@@ -2960,7 +2973,11 @@ void BuildVirtualGeometry(MeshView& mesh, VirtualGeometryBuildResult& result) {
 	u32 last_level_meshlet_count = u32_max;
 	
 	compile_const u32 max_levels_of_detail = 16;
-	for (u32 level = 0; level < max_levels_of_detail; level += 1) {
+	result.levels.reserve(max_levels_of_detail);
+
+	for (u32 level_index = 0; level_index < max_levels_of_detail; level_index += 1) {
+		BeginVirtualGeometryLevel(result);
+		
 		u32 allocator_high_water = allocator.memory_block_count;
 		
 		auto meshlet_build_result = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, group_index_to_bvh_node_index);
@@ -2969,7 +2986,7 @@ void BuildVirtualGeometry(MeshView& mesh, VirtualGeometryBuildResult& result) {
 		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, meshlet_build_result.meshlets, meshlet_build_result.meshlet_adjacency);
 		ConvertMeshletGroupsToFaceGroups(mesh, allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics);
 		
-		bool is_last_level = (level + 1 == max_levels_of_detail) || (mesh.face_count <= meshlet_max_face_count) || (last_level_meshlet_count == meshlet_build_result.meshlets.count);
+		bool is_last_level = (level_index + 1 == max_levels_of_detail) || (mesh.face_count <= meshlet_max_face_count) || (last_level_meshlet_count == meshlet_build_result.meshlets.count);
 		last_level_meshlet_count = meshlet_build_result.meshlets.count;
 		
 		if (is_last_level == false) {
@@ -2989,6 +3006,8 @@ void BuildVirtualGeometry(MeshView& mesh, VirtualGeometryBuildResult& result) {
 		
 		AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 		
+		EndVirtualGeometryLevel(result);
+		
 		if (is_last_level) break;
 	}
 	
@@ -2998,7 +3017,18 @@ void BuildVirtualGeometry(MeshView& mesh, VirtualGeometryBuildResult& result) {
 		
 		for (u32 i = 0; i < bvh_node_indices.count; i += 1) bvh_node_indices[i] = i;
 		
-		u32 root_node_index = BuildMeshletGroupBvh(result.bvh_nodes, CreateArrayView(bvh_node_indices));
+		FixedSizeArray<u32, max_levels_of_detail> level_bvh_root_node_indices;
+		for (u32 level_index = 0; level_index < result.levels.size(); level_index += 1) {
+			auto& level = result.levels[level_index];
+			
+			auto level_bvh_node_indices = CreateArrayView(bvh_node_indices, level.begin_bvh_nodes_index, level.end_bvh_nodes_index);
+			u32 level_root_node_index = BuildMeshletGroupBvh(result.bvh_nodes, level_bvh_node_indices);
+			
+			level.meshlet_group_bvh_root_node_index = level_root_node_index;
+			ArrayAppend(level_bvh_root_node_indices, level_root_node_index);
+		}
+		
+		u32 root_node_index = BuildMeshletGroupBvh(result.bvh_nodes, CreateArrayView(level_bvh_root_node_indices));
 		result.meshlet_group_bvh_root_node_index = root_node_index;
 	}
 	
