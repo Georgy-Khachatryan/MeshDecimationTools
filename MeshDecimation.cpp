@@ -1476,11 +1476,18 @@ static void InitializeMehsDecimationState(MeshView mesh, MeshDecimationState& st
 			auto attributes_id_0 = c0.attributes_id;
 			auto attributes_id_1 = c1.attributes_id;
 			
+			u32 geometry_index_0 = mesh[c0.face_id].geometry_index;
+			
 			u32 edge_degree = 0;
 			bool attribute_edge = false;
 			IterateCornerList<ElementType::Edge>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
-				auto attributes_id = mesh[corner_id].attributes_id;
-				attribute_edge |= (attributes_id.index != attributes_id_0.index && attributes_id.index != attributes_id_1.index);
+				auto& corner = mesh[corner_id];
+				
+				auto attributes_id = corner.attributes_id;
+				attribute_edge |= (attributes_id.index != attributes_id_0.index) && (attributes_id.index != attributes_id_1.index);
+				
+				u32 geometry_index = mesh[corner.face_id].geometry_index;
+				attribute_edge |= (geometry_index != geometry_index_0);
 				
 				edge_degree += 1;
 			});

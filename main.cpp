@@ -212,25 +212,41 @@ int main() {
 	
 	t0 = std::chrono::high_resolution_clock::now();
 	
+#if 0
+	u32 split_index = ((triangle_mesh.indices.size() / 3) / 2) * 3;
 	
-	TriangleGeometryDesc geometry_descs[1];
+	compile_const u32 geometry_desc_count = 2;
+	TriangleGeometryDesc geometry_descs[geometry_desc_count];
+	geometry_descs[0].indices = triangle_mesh.indices.data() + split_index;
+	geometry_descs[0].index_count = (u32)triangle_mesh.indices.size() - split_index;
+	geometry_descs[0].vertices = triangle_mesh.vertices.data();
+	geometry_descs[0].vertex_count = (u32)triangle_mesh.vertices.size();
+	
+	geometry_descs[1].indices = triangle_mesh.indices.data();
+	geometry_descs[1].index_count = split_index;
+	geometry_descs[1].vertices = triangle_mesh.vertices.data();
+	geometry_descs[1].vertex_count = (u32)triangle_mesh.vertices.size();
+#else
+	compile_const u32 geometry_desc_count = 1;
+	TriangleGeometryDesc geometry_descs[geometry_desc_count];
 	geometry_descs[0].indices = triangle_mesh.indices.data();
 	geometry_descs[0].index_count = (u32)triangle_mesh.indices.size();
 	geometry_descs[0].vertices = triangle_mesh.vertices.data();
 	geometry_descs[0].vertex_count = (u32)triangle_mesh.vertices.size();
+#endif
 	
 #if 1
 	VirtualGeometryBuildInputs inputs;
-	inputs.geometry_descs = geometry_descs;
-	inputs.geometry_desc_count = 1;
+	inputs.geometry_descs      = geometry_descs;
+	inputs.geometry_desc_count = geometry_desc_count;
 	
 	VirtualGeometryBuildResult result;
 	BuildVirtualGeometry(inputs, result);
 #else
 	MeshDecimationInputs inputs;
-	inputs.geometry_descs = geometry_descs;
-	inputs.geometry_desc_count = 1;
-	inputs.target_face_count = (geometry_descs[0].index_count / 3) / 138;
+	inputs.geometry_descs      = geometry_descs;
+	inputs.geometry_desc_count = geometry_desc_count;
+	inputs.target_face_count   = ((u32)triangle_mesh.indices.size() / 3) / 138;
 	
 	MeshDecimationResult result;
 	DecimateMesh(inputs, result);
