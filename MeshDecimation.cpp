@@ -1811,7 +1811,11 @@ static void DecimateMeshFaceGroups(MeshView mesh, Array<FaceID> meshlet_group_fa
 
 struct alignas(16) KdTreeElement {
 	Vector3 position;
-	u32 partition_index;
+	
+	// During meshlet build partition index is used either as geometry_index (is_active_element == 1) or meshlet_index (is_active_element == 0).
+	// During meshlet group build partition index is used as meshlet_group_index (is_active_element == 0).
+	u32 is_active_element : 1;
+	u32 partition_index   : 31;
 };
 static_assert(sizeof(KdTreeElement) == 16);
 
@@ -1834,6 +1838,7 @@ struct KdTree {
 	Array<KdTreeNode> nodes;
 };
 
+// TODO: Experiment with splitting elements by geometry index. This would allow us to move element filtering higher up the tree.
 static u32 KdTreeSplit(const ArrayView<KdTreeElement>& elements, ArrayView<u32> indices, KdTreeNode& node) {
 	Vector3 sum = { 0.f, 0.f, 0.f };
 	Vector3 min = { +FLT_MAX, +FLT_MAX, +FLT_MAX };
@@ -1842,7 +1847,6 @@ static u32 KdTreeSplit(const ArrayView<KdTreeElement>& elements, ArrayView<u32> 
 	
 	for (u32 i = 0; i < indices.count; i += 1) {
 		auto& element = elements[indices[i]];
-		if (element.partition_index != u32_max) continue;
 		
 		for (u32 j = 0; j < 3; j += 1) {
 			min[j] = min[j] < element.position[j] ? min[j] : element.position[j];
@@ -1935,7 +1939,7 @@ static void KdTreeBuild(KdTree& tree, Allocator& allocator) {
 u32 kd_tree_node_visits = 0;
 #endif // COUNT_KD_TREE_NODE_VISITS
 
-static bool KdTreeFindClosestActiveElement(KdTree& kd_tree, const Vector3& point, u32& closest_index, float& min_distance, u32 root = 0) {
+static bool KdTreeFindClosestActiveElement(KdTree& kd_tree, const Vector3& point, u32 geometry_index, u32& closest_index, float& min_distance, u32 root = 0) {
 	auto& node = kd_tree.nodes[root];
 	
 #if COUNT_KD_TREE_NODE_VISITS
@@ -1956,8 +1960,14 @@ static bool KdTreeFindClosestActiveElement(KdTree& kd_tree, const Vector3& point
 			u32 index = kd_tree.nodes[root + i].index;
 			auto& element = kd_tree.elements[index];
 			
-			if (element.partition_index != u32_max) continue; // Element is already used, i.e. it's inactive for the sake of search.
-			should_prune = false; // Don't prune the branch if we have at least one active leaf element.
+			// Element is already used, i.e. it's inactive for the sake of search.
+			if (element.is_active_element == 0) continue;
+			
+			// Don't prune the branch if we have at least one active leaf element.
+			should_prune = false;
+			
+			// Element is coming from a wrong geometry.
+			if (geometry_index != u32_max && element.partition_index != geometry_index) continue;
 			
 			auto point_to_element = element.position - point;
 			
@@ -1973,11 +1983,11 @@ static bool KdTreeFindClosestActiveElement(KdTree& kd_tree, const Vector3& point
 		u32 offset_0 = delta <= 0.f ? 1 : node.payload; // Left node is always the next node after the local root.
 		u32 offset_1 = delta <= 0.f ? node.payload : 1; // Right node offset is non zero. Zero means branch is pruned.
 		
-		bool prune_lh = KdTreeFindClosestActiveElement(kd_tree, point, closest_index, min_distance, root + offset_0);
+		bool prune_lh = KdTreeFindClosestActiveElement(kd_tree, point, geometry_index, closest_index, min_distance, root + offset_0);
 		bool prune_rh = false;
 		
 		if ((delta * delta) <= min_distance) {
-			prune_rh = KdTreeFindClosestActiveElement(kd_tree, point, closest_index, min_distance, root + offset_1);
+			prune_rh = KdTreeFindClosestActiveElement(kd_tree, point, geometry_index, closest_index, min_distance, root + offset_1);
 		} else {
 			prune_rh = (kd_tree.nodes[root + offset_1].payload == 0);
 		}
@@ -2071,9 +2081,11 @@ static void KdTreeBuildElementsForFaces(MeshView mesh, Allocator& allocator, Arr
 			});
 			
 			element.position = position * (1.f / face_degree);
-			element.partition_index = u32_max - 1; // Face elements are inactive by default. We mark them as active per group when generating meshlets.
+			element.is_active_element = 0; // Face elements are inactive by default. We mark them as active per group when generating meshlets.
+			element.partition_index   = face.geometry_index;
 		} else {
-			element.partition_index = u32_max - 1;
+			element.is_active_element = 0;
+			element.partition_index   = 0;
 		}
 	}
 }
@@ -2090,7 +2102,8 @@ static void KdTreeBuildElementsForMeshlets(ArrayView<Meshlet> meshlets, Allocato
 		auto center_ps   = _mm_mul_ps(_mm_add_ps(aabb_min_ps, aabb_max_ps), _mm_set_ps1(0.5f));
 		
 		_mm_store_ps(&element.position.x, center_ps);
-		element.partition_index = u32_max;
+		element.is_active_element = 1;
+		element.partition_index   = 0;
 	}
 }
 
@@ -2137,6 +2150,7 @@ static void BuildMeshletsForFaceGroup(
 	auto meshlet_aabb_max_ps  = _mm_set_ps1(-FLT_MAX);
 	u32  meshlet_vertex_count = 0;
 	u32  meshlet_face_count   = 0;
+	u32  meshlet_geometry_index = u32_max;
 	
 #if COUNT_KD_TREE_LOOKUPS
 	u32 kd_tree_lookup_count = 0;
@@ -2150,7 +2164,7 @@ static void BuildMeshletsForFaceGroup(
 			auto face_id = meshlet_candidate_elements[i];
 			
 			auto& element = kd_tree.elements[face_id.index];
-			if (element.partition_index != u32_max) {
+			if (element.is_active_element == 0) {
 				ArrayEraseSwap(meshlet_candidate_elements, i);
 				continue;
 			}
@@ -2177,6 +2191,7 @@ static void BuildMeshletsForFaceGroup(
 			ArrayEraseSwap(meshlet_candidate_elements, best_candidate_face_index);
 		}
 		
+		bool kd_tree_is_empty = false;
 		if (best_face_id.index == u32_max) {
 			alignas(16) float center[4];
 			if (meshlet_face_count) {
@@ -2187,26 +2202,28 @@ static void BuildMeshletsForFaceGroup(
 			}
 			
 			float min_distance = FLT_MAX;
-			KdTreeFindClosestActiveElement(kd_tree, *(Vector3*)center, best_face_id.index, min_distance);
+			kd_tree_is_empty = KdTreeFindClosestActiveElement(kd_tree, *(Vector3*)center, meshlet_geometry_index, best_face_id.index, min_distance);
 			
 #if COUNT_KD_TREE_LOOKUPS
 			kd_tree_lookup_count += 1;
 #endif // COUNT_KD_TREE_LOOKUPS
 		}
 		
-		if (best_face_id.index == u32_max) {
+		if (best_face_id.index == u32_max && kd_tree_is_empty) {
 			break;
 		}
 		
 		
 		u32 new_vertex_count = 0;
-		IterateCornerList<ElementType::Face>(mesh, mesh[best_face_id].corner_list_base, [&](CornerID corner_id) {
-			auto& corner = mesh[corner_id];
-			u8 vertex_index = vertex_usage_map[corner.attributes_id.index];
-			if (vertex_index == 0xFF) new_vertex_count += 1;
-		});
+		if (best_face_id.index != u32_max) {
+			IterateCornerList<ElementType::Face>(mesh, mesh[best_face_id].corner_list_base, [&](CornerID corner_id) {
+				auto& corner = mesh[corner_id];
+				u8 vertex_index = vertex_usage_map[corner.attributes_id.index];
+				if (vertex_index == 0xFF) new_vertex_count += 1;
+			});
+		}
 		
-		if ((meshlet_vertex_count + new_vertex_count > meshlet_max_vertex_count) || (meshlet_face_count + 1 > meshlet_max_face_count)) {
+		if (best_face_id.index == u32_max || (meshlet_vertex_count + new_vertex_count > meshlet_max_vertex_count) || (meshlet_face_count + 1 > meshlet_max_face_count)) {
 			assert(meshlet_face_count   <= meshlet_max_face_count);
 			assert(meshlet_vertex_count <= meshlet_max_vertex_count);
 			
@@ -2217,6 +2234,7 @@ static void BuildMeshletsForFaceGroup(
 			
 			meshlet_vertex_count = 0;
 			meshlet_face_count   = 0;
+			meshlet_geometry_index = u32_max;
 			
 			meshlet_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
 			meshlet_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
@@ -2227,6 +2245,10 @@ static void BuildMeshletsForFaceGroup(
 			meshlet_candidate_elements.count = 0;
 		}
 		
+		if (best_face_id.index == u32_max) continue;
+		
+		u32 best_face_geometry_index = mesh[best_face_id].geometry_index;
+		assert(meshlet_face_count == 0 || meshlet_geometry_index == best_face_geometry_index);
 		
 		new_vertex_count = 0;
 		IterateCornerList<ElementType::Face>(mesh, mesh[best_face_id].corner_list_base, [&](CornerID corner_id) {
@@ -2246,8 +2268,12 @@ static void BuildMeshletsForFaceGroup(
 			
 			IterateCornerList<ElementType::Edge>(mesh, corner_id, [&](CornerID corner_id) {
 				auto face_id = mesh[corner_id].face_id;
+				auto& element = kd_tree.elements[face_id.index];
 				
-				if (kd_tree.elements[face_id.index].partition_index == u32_max && meshlet_candidate_elements.count < meshlet_candidate_elements.capacity) {
+				if ((face_id.index != best_face_id.index) &&
+					(element.is_active_element != 0) &&
+					(element.partition_index   == best_face_geometry_index) && 
+					(meshlet_candidate_elements.count < meshlet_candidate_elements.capacity)) {
 					ArrayAppend(meshlet_candidate_elements, face_id);
 				}
 			});
@@ -2258,7 +2284,10 @@ static void BuildMeshletsForFaceGroup(
 		meshlet_face_count   += 1;
 		
 		auto& element = kd_tree.elements[best_face_id.index];
-		element.partition_index = meshlet_face_prefix_sum.count;
+		element.partition_index   = meshlet_face_prefix_sum.count;
+		element.is_active_element = 0;
+		
+		meshlet_geometry_index = best_face_geometry_index;
 		
 		auto position = _mm_load_ps(&element.position.x);
 		meshlet_aabb_min_ps = _mm_min_ps(meshlet_aabb_min_ps, position);
@@ -2277,6 +2306,14 @@ static void BuildMeshletsForFaceGroup(
 		ArrayAppend(meshlet_face_prefix_sum, meshlet_faces.count);
 		ArrayAppend(meshlet_corner_prefix_sum, meshlet_corners.count);
 	}
+	
+#if COUNT_KD_TREE_NODE_VISITS
+	printf("BuildMeshletsForFaceGroup: kd_tree_node_visits: %u\n", kd_tree_node_visits);
+#endif // COUNT_KD_TREE_NODE_VISITS
+	
+#if COUNT_KD_TREE_LOOKUPS
+	printf("BuildMeshletsForFaceGroup: kd_tree_lookup_count: %u\n", kd_tree_lookup_count);
+#endif // COUNT_KD_TREE_LOOKUPS
 }
 
 // Note that FaceIDs inside groups are going to be scrambled inside groups during KdTree build. This leaves prefix sum in a valid, but different state.
@@ -2321,7 +2358,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 		
 		for (u32 index : element_indices) {
 			// Mark elements of the current group as eligible for meshlet generation.
-			kd_tree.elements[index].partition_index = u32_max;
+			kd_tree.elements[index].is_active_element = 1;
 		}
 		
 		KdTreeBuildNode(kd_tree.nodes, CreateArrayView(kd_tree.elements), element_indices);
@@ -2387,6 +2424,9 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 		meshlet.current_level_error_metric.error  = 0.f;
 		meshlet.current_level_bvh_node_index      = u32_max;
 		
+		// All meshlets faces are guaranteed to come from the same geometry.
+		meshlet.geometry_index = mesh[mesh[meshlet_corners[begin_corner_index]].face_id].geometry_index;
+		
 		begin_corner_index = end_corner_index;
 	}
 	
@@ -2413,14 +2453,6 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 	result.meshlet_corners           = CreateArrayView(meshlet_corners);
 	result.meshlet_corner_prefix_sum = CreateArrayView(meshlet_corner_prefix_sum);
 	result.meshlet_adjacency         = BuildMeshletAdjacency(mesh, allocator, result.meshlet_face_prefix_sum, result.meshlet_faces, CreateArrayView(kd_tree.elements));
-	
-#if COUNT_KD_TREE_NODE_VISITS
-	printf("BuildMeshletsForFaceGroups: kd_tree_node_visits: %u\n", kd_tree_node_visits);
-#endif // COUNT_KD_TREE_NODE_VISITS
-	
-#if COUNT_KD_TREE_LOOKUPS
-	printf("BuildMeshletsForFaceGroups: kd_tree_lookup_count: %u\n", kd_tree_lookup_count);
-#endif // COUNT_KD_TREE_LOOKUPS
 	
 	return result;
 }
@@ -2550,7 +2582,7 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 				auto adjacency_info = meshlet_adjacency.infos[adjacency_info_index];
 				
 				auto& element = kd_tree.elements[adjacency_info.meshlet_index];
-				if (element.partition_index != u32_max) continue; // Meshlet is already assigned to a group.
+				if (element.is_active_element == 0) continue; // Meshlet is already assigned to a group.
 				
 				u32 shared_edge_count = CountMeshletGroupSharedEdges(meshlet_adjacency, kd_tree.elements, adjacency_info.meshlet_index, meshlet_group_prefix_sum.count);
 				
@@ -2571,7 +2603,7 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 			}
 			
 			float min_distance = FLT_MAX;
-			KdTreeFindClosestActiveElement(kd_tree, *(Vector3*)center, best_candidate_meshlet_index, min_distance);
+			KdTreeFindClosestActiveElement(kd_tree, *(Vector3*)center, u32_max, best_candidate_meshlet_index, min_distance);
 			
 #if COUNT_KD_TREE_LOOKUPS
 			kd_tree_lookup_count += 1;
@@ -2594,7 +2626,8 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 		ArrayAppend(meshlet_group, best_candidate_meshlet_index);
 		
 		auto& element = kd_tree.elements[best_candidate_meshlet_index];
-		element.partition_index = meshlet_group_prefix_sum.count;
+		element.partition_index   = meshlet_group_prefix_sum.count;
+		element.is_active_element = 0;
 		
 		auto position = _mm_load_ps(&element.position.x);
 		meshlet_group_aabb_min_ps = _mm_min_ps(meshlet_group_aabb_min_ps, position);

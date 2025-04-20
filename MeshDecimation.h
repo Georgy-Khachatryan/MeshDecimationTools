@@ -253,7 +253,7 @@ struct alignas(16) Meshlet {
 	u32 begin_meshlet_triangles_index = 0;
 	u32 end_meshlet_triangles_index   = 0;
 	
-	// TODO: Store geometry index per meshlet. Don't allow triangles from more than one geometry to be combined into a meshlet.
+	u32 geometry_index = 0;
 };
 
 struct MeshletGroupInternalBvhNodeData {

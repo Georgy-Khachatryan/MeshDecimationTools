@@ -213,7 +213,7 @@ int main() {
 	t0 = std::chrono::high_resolution_clock::now();
 	
 #if 0
-	u32 split_index = ((triangle_mesh.indices.size() / 3) / 2) * 3;
+	u32 split_index = (((u32)triangle_mesh.indices.size() / 3) / 2) * 3;
 	
 	compile_const u32 geometry_desc_count = 2;
 	TriangleGeometryDesc geometry_descs[geometry_desc_count];
