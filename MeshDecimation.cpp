@@ -2072,21 +2072,18 @@ static void KdTreeBuildElementsForFaces(MeshView mesh, Allocator& allocator, Arr
 		auto& element = elements[face_id.index];
 		auto& face    = mesh[face_id];
 		
-		if (face.corner_list_base.index != u32_max) {
-			Vector3 position = { 0.f, 0.f, 0.f };
-			float face_degree = 0.f;
-			IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
-				position = position + mesh[mesh[corner_id].vertex_id].position;
-				face_degree += 1.f;
-			});
-			
-			element.position = position * (1.f / face_degree);
-			element.is_active_element = 0; // Face elements are inactive by default. We mark them as active per group when generating meshlets.
-			element.partition_index   = face.geometry_index;
-		} else {
-			element.is_active_element = 0;
-			element.partition_index   = 0;
-		}
+		assert(face.corner_list_base.index != u32_max);
+		
+		Vector3 position = { 0.f, 0.f, 0.f };
+		float face_degree = 0.f;
+		IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
+			position = position + mesh[mesh[corner_id].vertex_id].position;
+			face_degree += 1.f;
+		});
+		
+		element.position          = position * (1.f / face_degree);
+		element.is_active_element = 0; // Face elements are inactive by default. We mark them as active per group when generating meshlets.
+		element.partition_index   = face.geometry_index;
 	}
 }
 
