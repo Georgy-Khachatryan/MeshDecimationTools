@@ -2487,7 +2487,7 @@ static MeshletAdjacency BuildMeshletAdjacency(MeshView mesh, Allocator& allocato
 					u32 other_meshlet_index = kd_tree_elements[other_face_id.index].partition_index;
 					if (other_meshlet_index == meshlet_index) return;
 					
-					assert(other_meshlet_index != u32_max); // Face isn't a part of any meshlet.
+					assert(kd_tree_elements[other_face_id.index].is_active_element == 0); // Face isn't a part of any meshlet.
 					
 					u32 adjacency_info_index = meshlet_adjacency_info_indices[other_meshlet_index];
 					if (adjacency_info_index == u32_max) {
@@ -2536,7 +2536,7 @@ static u32 CountMeshletGroupSharedEdges(MeshletAdjacency meshlet_adjacency, Arra
 		auto adjacency_info = meshlet_adjacency.infos[adjacency_info_index];
 		
 		auto& element = kd_tree_elements[adjacency_info.meshlet_index];
-		if (element.partition_index == targent_group_index) {
+		if (element.is_active_element == 0 && element.partition_index == targent_group_index) {
 			shared_edge_count += adjacency_info.shared_edge_count;
 		}
 	}
