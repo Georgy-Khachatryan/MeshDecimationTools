@@ -157,14 +157,6 @@ struct alignas(16) Vertex {
 };
 
 
-struct Mesh {
-	std::vector<Face>   faces;
-	std::vector<Edge>   edges;
-	std::vector<Vertex> vertices;
-	std::vector<Corner> corners;
-	std::vector<float>  attributes;
-};
-
 struct MeshView {
 	Face*   faces      = nullptr;
 	Edge*   edges      = nullptr;

@@ -13,9 +13,10 @@
 // - Hugues Hoppe, Steve Marschner. 2000. Efficient Minimization of New Quadric Metric for Simplifying Meshes with Appearance Attributes.
 //
 
+// TODO: Replace with a simpler hash function.
 // fenv pragmas are an attempt at making compiler not optimize away (x + 0.f).
 #pragma fenv_access(on)
-static u64 ComputePositionHash(const Vector3& v) {
+static u32 ComputePositionHash(const Vector3& v) {
 	compile_const u64 knuth_golden_ratio = 0x9e3779b97f4a7c55;
 	
 	static union {
@@ -28,13 +29,27 @@ static u64 ComputePositionHash(const Vector3& v) {
 	hash = _mm_aesdec_si128(hash, seed.vector);
 	hash = _mm_aesdec_si128(hash, seed.vector);
 	
-	return _mm_cvtsi128_si64(hash);
+	return (u32)_mm_cvtsi128_si32(hash);
 }
 #pragma fenv_access(off)
 
+// Thomas Wang, Jan 1997. Integer Hash Function. 64 bit to 32 bit Hash Functions.
+static u32 ComputeEdgeKeyHash(u64 key) {
+	key = (~key) + (key << 18); // key = (key << 18) - key - 1;
+	key = key ^ (key >> 31);
+	key = key * 21; // key = (key + (key << 2)) + (key << 4);
+	key = key ^ (key >> 11);
+	key = key + (key << 6);
+	key = key ^ (key >> 22);
+	
+	return (u32)key;
+}
+
 static u64 PackEdgeKey(VertexID vertex_id_0, VertexID vertex_id_1) {
 	// Always pack VertexIDs in ascending order to ensure that PackEdgeKey(A, B) == PackEdgeKey(B, A) and they hash to the same value.
-	return vertex_id_1.index > vertex_id_0.index ? ((u64)vertex_id_1.index << u32_bit_count) | (u64)vertex_id_0.index : ((u64)vertex_id_0.index << u32_bit_count) | (u64)vertex_id_1.index;
+	return vertex_id_1.index > vertex_id_0.index ?
+		((u64)vertex_id_1.index << u32_bit_count) | (u64)vertex_id_0.index :
+		((u64)vertex_id_0.index << u32_bit_count) | (u64)vertex_id_1.index;
 }
 
 template<ElementType element_type_t> auto GetElementID(const Corner& corner) {
@@ -304,26 +319,27 @@ static ArrayView<typename ArrayT::ValueType> CreateArrayView(ArrayT& array) {
 
 
 struct VertexHashTable {
-	std::vector<VertexID> vertex_ids;
+	Array<VertexID> vertex_ids;
 };
 
-static VertexID HashTableAddOrFind(VertexHashTable& table, std::vector<Vertex>& vertices, const Vector3& position) {
-	u64 table_size = table.vertex_ids.size();
-	u64 mod_mask   = table_size - 1u;
+static VertexID HashTableAddOrFind(VertexHashTable& table, Array<Vertex>& vertices, const Vector3& position) {
+	u32 table_size = table.vertex_ids.count;
+	u32 mod_mask   = table_size - 1u;
 	
-	u64 hash  = ComputePositionHash(position);
-	u64 index = (hash & mod_mask);
+	u32 hash  = ComputePositionHash(position);
+	u32 index = (hash & mod_mask);
 	
-	for (u64 i = 0; i <= mod_mask; i += 1) {
+	for (u32 i = 0; i <= mod_mask; i += 1) {
 		auto vertex_id = table.vertex_ids[index];
 		
 		if (vertex_id.index == u32_max) {
-			auto new_vertex_id = VertexID{ (u32)vertices.size() };
+			auto new_vertex_id = VertexID{ vertices.count };
 			table.vertex_ids[index] = new_vertex_id;
 			
-			auto& vertex = vertices.emplace_back();
+			Vertex vertex;
 			vertex.position = position;
 			vertex.corner_list_base.index = u32_max;
+			ArrayAppend(vertices, vertex);
 			
 			return new_vertex_id;
 		}
@@ -339,26 +355,27 @@ static VertexID HashTableAddOrFind(VertexHashTable& table, std::vector<Vertex>& 
 }
 
 struct EdgeHashTable {
-	std::vector<EdgeID> edge_ids;
+	Array<EdgeID> edge_ids;
 };
 
-static EdgeID HashTableAddOrFind(EdgeHashTable& table, std::vector<Edge>& edges, u64 edge_key) {
-	u64 table_size = table.edge_ids.size();
-	u64 mod_mask   = table_size - 1u;
+static EdgeID HashTableAddOrFind(EdgeHashTable& table, Array<Edge>& edges, u64 edge_key) {
+	u32 table_size = table.edge_ids.count;
+	u32 mod_mask   = table_size - 1u;
 	
-	u64 hash  = std::hash<u64>{}(edge_key);
-	u64 index = (hash & mod_mask);
+	u32 hash  = ComputeEdgeKeyHash(edge_key);
+	u32 index = (hash & mod_mask);
 	
-	for (u64 i = 0; i <= mod_mask; i += 1) {
+	for (u32 i = 0; i <= mod_mask; i += 1) {
 		auto edge_id = table.edge_ids[index];
 		
 		if (edge_id.index == u32_max) {
-			auto new_edge_id = EdgeID{ (u32)edges.size() };
+			auto new_edge_id = EdgeID{ edges.count };
 			table.edge_ids[index] = new_edge_id;
 			
-			auto& edge = edges.emplace_back();
+			Edge edge;
 			edge.edge_key = edge_key;
 			edge.corner_list_base.index = u32_max;
+			ArrayAppend(edges, edge);
 			
 			return new_edge_id;
 		}
@@ -413,7 +430,7 @@ static EdgeID HashTableAddOrFind(EdgeDuplicateMap& table, u64 edge_key, EdgeID e
 	
 	u64 mod_mask = table_size - 1u;
 	
-	u64 hash  = std::hash<u64>{}(edge_key);
+	u64 hash  = ComputeEdgeKeyHash(edge_key);
 	u64 index = (hash & mod_mask);
 	
 	for (u64 i = 0; i <= mod_mask; i += 1) {
@@ -435,8 +452,8 @@ static EdgeID HashTableAddOrFind(EdgeDuplicateMap& table, u64 edge_key, EdgeID e
 	return EdgeID{ u32_max };
 }
 
-static u64 ComputeHashTableSize(u64 max_element_count) {
-	u64 hash_table_size = 1;
+static u32 ComputeHashTableSize(u32 max_element_count) {
+	u32 hash_table_size = 1;
 	
 	while (hash_table_size < max_element_count + max_element_count / 4) {
 		hash_table_size = hash_table_size * 2;
@@ -445,9 +462,8 @@ static u64 ComputeHashTableSize(u64 max_element_count) {
 	return hash_table_size;
 }
 
-static MeshView MeshToMeshView(Mesh& mesh);
 
-static Mesh BuildEditableMesh(const TriangleGeometryDesc* geometry_descs, u32 geometry_desc_count) {
+static MeshView BuildEditableMesh(Allocator& allocator, const TriangleGeometryDesc* geometry_descs, u32 geometry_desc_count) {
 	u32 vertices_count = 0;
 	u32 indices_count  = 0;
 	
@@ -458,50 +474,65 @@ static Mesh BuildEditableMesh(const TriangleGeometryDesc* geometry_descs, u32 ge
 	}
 	u32 triangle_count = (indices_count / 3);
 	
+	Array<Face>   faces;
+	Array<Edge>   edges;
+	Array<Vertex> vertices;
+	Array<Corner> corners;
+	Array<float>  attributes;
+	ArrayReserve(vertices, allocator, vertices_count);
+	ArrayResize(corners, allocator, indices_count);
+	ArrayReserve(faces, allocator, triangle_count);
+	ArrayReserve(edges, allocator, indices_count);
+	ArrayResize(attributes, allocator, vertices_count * attribute_stride_dwords);
 	
-	std::vector<VertexID> src_vertex_index_to_vertex_id;
-	src_vertex_index_to_vertex_id.resize(vertices_count);
+	MeshView mesh;
+	mesh.faces           = faces.data;
+	mesh.edges           = edges.data;
+	mesh.vertices        = vertices.data;
+	mesh.corners         = corners.data;
+	mesh.attributes      = attributes.data;
+	mesh.face_count      = faces.capacity;
+	mesh.edge_count      = edges.capacity;
+	mesh.vertex_count    = vertices.capacity;
+	mesh.corner_count    = corners.count;
+	mesh.attribute_count = attributes.count / attribute_stride_dwords;
 	
-	Mesh result_mesh;
-	result_mesh.vertices.reserve(vertices_count);
-	result_mesh.corners.resize(indices_count);
-	result_mesh.faces.resize(triangle_count);
-	result_mesh.edges.reserve(indices_count);
-	result_mesh.attributes.resize(vertices_count * attribute_stride_dwords);
+	u32 allocator_high_water = allocator.memory_block_count;
 	
-	auto mesh = MeshToMeshView(result_mesh);
+	Array<VertexID> src_vertex_index_to_vertex_id;
+	ArrayResize(src_vertex_index_to_vertex_id, allocator, vertices_count);
 	
-	
-	VertexHashTable table;
-	table.vertex_ids.resize(ComputeHashTableSize(vertices_count), VertexID{ u32_max });
-	
-	for (u32 geometry_index = 0; geometry_index < geometry_desc_count; geometry_index += 1) {
-		auto& desc = geometry_descs[geometry_index];
-		
-		for (u32 vertex_index = 0; vertex_index < desc.vertex_count; vertex_index += 1) {
-			auto& position = desc.vertices[vertex_index].position;
-			memcpy(mesh[AttributesID{ vertex_index }], (float*)&desc.vertices[vertex_index] + 3, attribute_stride_dwords * sizeof(u32));
-			
-			auto vertex_id = HashTableAddOrFind(table, result_mesh.vertices, position);
-			src_vertex_index_to_vertex_id[vertex_index] = vertex_id;
-		}
-	}
-	mesh.vertex_count = (u32)result_mesh.vertices.size();
-	
+	VertexHashTable vertex_table;
+	ArrayResizeMemset(vertex_table.vertex_ids, allocator, ComputeHashTableSize(vertices_count), 0xFF);
 	
 	EdgeHashTable edge_table;
-	edge_table.edge_ids.resize(ComputeHashTableSize(indices_count), EdgeID{ u32_max });
+	ArrayResizeMemset(edge_table.edge_ids, allocator, ComputeHashTableSize(indices_count), 0xFF);
 	
-	u32 active_face_count = 0;
-	for (u32 geometry_index = 0; geometry_index < geometry_desc_count; geometry_index += 1) {
+	for (u32 geometry_index = 0, base_vertex_index = 0; geometry_index < geometry_desc_count; geometry_index += 1) {
+		auto& desc = geometry_descs[geometry_index];
+		
+		for (u32 geometry_vertex_index = 0; geometry_vertex_index < desc.vertex_count; geometry_vertex_index += 1) {
+			u32 vertex_index = base_vertex_index + geometry_vertex_index;
+			
+			auto& position = desc.vertices[geometry_vertex_index].position;
+			memcpy(mesh[AttributesID{ vertex_index }], (float*)&desc.vertices[geometry_vertex_index] + 3, attribute_stride_dwords * sizeof(u32));
+			
+			auto vertex_id = HashTableAddOrFind(vertex_table, vertices, position);
+			src_vertex_index_to_vertex_id[vertex_index] = vertex_id;
+		}
+		base_vertex_index += desc.vertex_count;
+	}
+	mesh.vertex_count = vertices.count;
+	
+	for (u32 geometry_index = 0, base_vertex_index = 0; geometry_index < geometry_desc_count; geometry_index += 1) {
 		auto& desc = geometry_descs[geometry_index];
 		u32 geometry_triangle_count = (desc.index_count / 3);
 		
 		for (u32 triangle_index = 0; triangle_index < geometry_triangle_count; triangle_index += 1) {
 			u32 indices[3] = {
-				desc.indices[triangle_index * 3 + 0],
-				desc.indices[triangle_index * 3 + 1],
-				desc.indices[triangle_index * 3 + 2],
+				base_vertex_index + desc.indices[triangle_index * 3 + 0],
+				base_vertex_index + desc.indices[triangle_index * 3 + 1],
+				base_vertex_index + desc.indices[triangle_index * 3 + 2],
 			};
 			
 			VertexID vertex_ids[3] = {
@@ -525,17 +556,17 @@ static Mesh BuildEditableMesh(const TriangleGeometryDesc* geometry_descs, u32 ge
 			if (has_duplicate_vertices) continue;
 			
 			
-			auto face_id = FaceID{ active_face_count };
-			active_face_count += 1;
+			auto face_id = FaceID{ faces.count };
 			
-			auto& face = mesh[face_id];
+			Face face;
 			face.corner_list_base.index = u32_max;
 			face.geometry_index = geometry_index;
+			ArrayAppend(faces, face);
 			
 			for (u32 corner_index = 0; corner_index < 3; corner_index += 1) {
 				auto corner_id = CornerID{ face_id.index * 3 + corner_index };
 				
-				auto edge_id = HashTableAddOrFind(edge_table, result_mesh.edges, edge_keys[corner_index]);
+				auto edge_id = HashTableAddOrFind(edge_table, edges, edge_keys[corner_index]);
 				
 				auto& corner = mesh[corner_id];
 				corner.face_id       = face_id;
@@ -548,18 +579,25 @@ static Mesh BuildEditableMesh(const TriangleGeometryDesc* geometry_descs, u32 ge
 				CornerListInsert<FaceID>(mesh, corner.face_id, corner_id);
 			}
 		}
+		base_vertex_index += desc.vertex_count;
 	}
-	result_mesh.faces.resize(active_face_count);
+	mesh.edge_count   = edges.count;
+	mesh.face_count   = faces.count;
+	mesh.corner_count = faces.count * 3;
 	
-	return result_mesh;
+	AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
+	
+	return mesh;
 }
 
-static void EditableMeshToIndexedMesh(MeshView mesh, MeshDecimationResult& result) {
-	std::vector<VertexID> attributes_id_to_vertex_id;
-	attributes_id_to_vertex_id.resize(mesh.attribute_count, VertexID{ u32_max });
+static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, MeshDecimationResult& result) {
+	u32 allocator_high_water = allocator.memory_block_count;
 	
-	std::vector<u32> attribute_id_remap;
-	attribute_id_remap.resize(mesh.attribute_count);
+	Array<VertexID> attributes_id_to_vertex_id;
+	ArrayResizeMemset(attributes_id_to_vertex_id, allocator, mesh.attribute_count, 0xFF);
+	
+	Array<u32> attribute_id_remap;
+	ArrayResize(attribute_id_remap, allocator, mesh.attribute_count);
 	
 	
 	for (VertexID vertex_id = { 0 }; vertex_id.index < mesh.vertex_count; vertex_id.index += 1) {
@@ -605,21 +643,8 @@ static void EditableMeshToIndexedMesh(MeshView mesh, MeshDecimationResult& resul
 			memcpy((float*)&vertex + 3, mesh[attribute_id], attribute_stride_dwords * sizeof(u32));
 		}
 	}
-}
-
-static MeshView MeshToMeshView(Mesh& mesh) {
-	MeshView view;
-	view.faces           = mesh.faces.data();
-	view.edges           = mesh.edges.data();
-	view.vertices        = mesh.vertices.data();
-	view.corners         = mesh.corners.data();
-	view.attributes      = mesh.attributes.data();
-	view.face_count      = (u32)mesh.faces.size();
-	view.edge_count      = (u32)mesh.edges.size();
-	view.vertex_count    = (u32)mesh.vertices.size();
-	view.corner_count    = (u32)mesh.corners.size();
-	view.attribute_count = (u32)mesh.attributes.size() / attribute_stride_dwords;
-	return view;
+	
+	AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 }
 
 using RemovedEdgeArray = std::vector<EdgeID>;
@@ -1644,8 +1669,9 @@ static float DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, Ed
 // - Output an obj sequence for edge to verify edge collapses.
 //
 void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& result) {
-	auto editable_mesh = BuildEditableMesh(inputs.geometry_descs, inputs.geometry_desc_count);
-	auto mesh = MeshToMeshView(editable_mesh);
+	Allocator allocator;
+	
+	auto mesh = BuildEditableMesh(allocator, inputs.geometry_descs, inputs.geometry_desc_count);
 	
 	MeshDecimationState state;
 	InitializeMehsDecimationState(mesh, state);
@@ -1676,7 +1702,9 @@ void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& resu
 	float max_error = DecimateMeshFaceGroup(mesh, state, edge_collapse_heap, nullptr, target_face_count, active_face_count);
 	
 	result.max_error = max_error;
-	EditableMeshToIndexedMesh(mesh, result);
+	EditableMeshToIndexedMesh(mesh, allocator, result);
+	
+	AllocatorFreeMemoryBlocks(allocator);
 }
 
 static void DecimateMeshFaceGroups(MeshView mesh, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<ErrorMetric> meshlet_group_error_metrics, Array<VertexID> changed_attribute_vertex_ids) {
@@ -2991,11 +3019,10 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 	// - Allow arbitrary vertex formats (<32 DWORDs). Expose a callback for handling newly generated attributes.
 	// - Rework allocation patterns. Minimize size, number, and duration of allocations. Implement allocator for growable outputs.
 	//
-	
-	auto editable_mesh = BuildEditableMesh(inputs.geometry_descs, inputs.geometry_desc_count);
-	auto mesh = MeshToMeshView(editable_mesh);
-	
+
 	Allocator allocator;
+	
+	auto mesh = BuildEditableMesh(allocator, inputs.geometry_descs, inputs.geometry_desc_count);
 	
 	
 	Array<FaceID> meshlet_group_faces;

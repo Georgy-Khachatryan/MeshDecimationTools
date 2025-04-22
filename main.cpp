@@ -164,9 +164,18 @@ void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
 		fprintf(file, "vt %f %f\n", v.texcoord.x, v.texcoord.y);
 	}
 	
+	// Output an LOD with a given target error.
+	float target_error = 0.001f;
+	
 	u32 group_index = u32_max;
 	for (u32 meshlet_index = 0; meshlet_index < mesh.meshlets.size(); meshlet_index += 1) {
 		auto& meshlet = mesh.meshlets[meshlet_index];
+		
+		bool draw_current_level = (meshlet.current_level_error_metric.error < target_error);
+		bool draw_coarser_level = (meshlet.coarser_level_error_metric.error < target_error);
+		bool draw_meshlet       = draw_current_level && !draw_coarser_level;
+		
+		if (draw_meshlet == false) continue;
 		
 		if (group_index != meshlet.coarser_level_bvh_node_index) {
 			group_index = meshlet.coarser_level_bvh_node_index;
