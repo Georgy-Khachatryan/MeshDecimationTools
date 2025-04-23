@@ -177,17 +177,11 @@ struct MeshView {
 	float*  operator[] (AttributesID attributes_id) { return attributes + attributes_id.index * attribute_stride_dwords; }
 };
 
-struct ObjVertex {
-	Vector3 position;
-	Vector2 texcoord;
-	Vector3 normal;
-};
-
 struct TriangleGeometryDesc {
 	const u32* indices = nullptr;
 	u32 index_count = 0;
 	
-	const ObjVertex* vertices = nullptr;
+	const float* vertices = nullptr;
 	u32 vertex_count = 0;
 };
 
@@ -295,7 +289,7 @@ struct VirtualGeometryBuildResult {
 	std::vector<Meshlet> meshlets;
 	std::vector<u32> meshlet_vertex_indices;
 	std::vector<u8>  meshlet_triangles;
-	std::vector<ObjVertex> vertices;
+	std::vector<float> vertices;
 	std::vector<VirtualGeometryLevel> levels;
 	
 	u32 meshlet_group_bvh_root_node_index = 0;
@@ -304,7 +298,7 @@ struct VirtualGeometryBuildResult {
 struct MeshDecimationResult {
 	// TODO: Output per geometry index and vertex ranges.
 	std::vector<u32> indices;
-	std::vector<ObjVertex> vertices;
+	std::vector<float> vertices;
 	float max_error = 0.f;
 };
 

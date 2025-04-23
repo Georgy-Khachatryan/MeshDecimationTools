@@ -508,16 +508,17 @@ static MeshView BuildEditableMesh(Allocator& allocator, const TriangleGeometryDe
 	EdgeHashTable edge_table;
 	ArrayResizeMemset(edge_table.edge_ids, allocator, ComputeHashTableSize(indices_count), 0xFF);
 	
+	compile_const u32 vertex_stride_dwords = attribute_stride_dwords + 3;
 	for (u32 geometry_index = 0, base_vertex_index = 0; geometry_index < geometry_desc_count; geometry_index += 1) {
 		auto& desc = geometry_descs[geometry_index];
 		
 		for (u32 geometry_vertex_index = 0; geometry_vertex_index < desc.vertex_count; geometry_vertex_index += 1) {
 			u32 vertex_index = base_vertex_index + geometry_vertex_index;
 			
-			auto& position = desc.vertices[geometry_vertex_index].position;
-			memcpy(mesh[AttributesID{ vertex_index }], (float*)&desc.vertices[geometry_vertex_index] + 3, attribute_stride_dwords * sizeof(u32));
+			auto* vertex = &desc.vertices[geometry_vertex_index * vertex_stride_dwords];
+			memcpy(mesh[AttributesID{ vertex_index }], vertex + 3, attribute_stride_dwords * sizeof(u32));
 			
-			auto vertex_id = HashTableAddOrFind(vertex_table, vertices, position);
+			auto vertex_id = HashTableAddOrFind(vertex_table, vertices, *(Vector3*)vertex);
 			src_vertex_index_to_vertex_id[vertex_index] = vertex_id;
 		}
 		base_vertex_index += desc.vertex_count;
@@ -621,9 +622,11 @@ static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, MeshD
 	for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
 		face_count += mesh[face_id].corner_list_base.index != u32_max ? 1 : 0;
 	}
+
+	compile_const u32 vertex_stride_dwords = (attribute_stride_dwords + 3);
 	
 	result.indices.reserve(face_count * 3);
-	result.vertices.reserve(attribute_count);
+	result.vertices.resize(attribute_count * vertex_stride_dwords);
 	
 	for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
 		auto& face = mesh[face_id];
@@ -635,13 +638,15 @@ static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, MeshD
 		});
 	}
 	
+	u32 output_vertex_index = 0;
 	for (AttributesID attribute_id = { 0 }; attribute_id.index < mesh.attribute_count; attribute_id.index += 1) {
 		auto vertex_id = attributes_id_to_vertex_id[attribute_id.index];
-		if (vertex_id.index != u32_max) {
-			auto& vertex = result.vertices.emplace_back();
-			vertex.position = mesh[vertex_id].position;
-			memcpy((float*)&vertex + 3, mesh[attribute_id], attribute_stride_dwords * sizeof(u32));
-		}
+		if (vertex_id.index == u32_max) continue;
+		
+		auto* vertex = &result.vertices[output_vertex_index * vertex_stride_dwords];
+		memcpy(vertex + 0, &mesh[vertex_id].position, sizeof(Vector3));
+		memcpy(vertex + 3, mesh[attribute_id], attribute_stride_dwords * sizeof(u32));
+		output_vertex_index += 1;
 	}
 	
 	AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
@@ -2907,18 +2912,33 @@ static void BuildMeshletVertexAndIndexBuffers(MeshView mesh, MeshletBuildResult 
 
 // TODO: Rework vertex indexing code.
 static void AppendChangedVertices(MeshView mesh, Array<VertexID> changed_attribute_vertex_ids, Array<u32> attributes_id_to_vertex_index, VirtualGeometryBuildResult& result) {
+	u32 changed_vertex_count = 0;
+	for (AttributesID attributes_id = { 0 }; attributes_id.index < changed_attribute_vertex_ids.count; attributes_id.index += 1) {
+		auto vertex_id = changed_attribute_vertex_ids[attributes_id.index];
+		changed_vertex_count += (vertex_id.index != u32_max) ? 1 : 0;
+	}
+	
+	compile_const u32 vertex_stride_dwords = (attribute_stride_dwords + 3);
+	u64 new_array_size = result.vertices.size() + changed_vertex_count * vertex_stride_dwords;
+	
+	if (new_array_size > result.vertices.capacity()) {
+		result.vertices.reserve(new_array_size * 3 / 2);
+	}
+	
+	u32 output_vertex_index = (u32)(result.vertices.size() / vertex_stride_dwords);
+	result.vertices.resize(new_array_size);
+	
 	for (AttributesID attributes_id = { 0 }; attributes_id.index < changed_attribute_vertex_ids.count; attributes_id.index += 1) {
 		auto vertex_id = changed_attribute_vertex_ids[attributes_id.index];
 		if (vertex_id.index == u32_max) continue;
 		
 		changed_attribute_vertex_ids[attributes_id.index].index = u32_max;
+		attributes_id_to_vertex_index[attributes_id.index] = output_vertex_index;
 		
-		u32 new_vertex_index = (u32)result.vertices.size();
-		attributes_id_to_vertex_index[attributes_id.index] = new_vertex_index;
-		
-		auto& new_vertex = result.vertices.emplace_back();
-		new_vertex.position = mesh[vertex_id].position;
-		memcpy((&new_vertex.position.x + 3), mesh[attributes_id], attribute_stride_dwords * sizeof(u32));
+		auto* vertex = &result.vertices[output_vertex_index * vertex_stride_dwords];
+		memcpy(vertex + 0, &mesh[vertex_id].position, sizeof(Vector3));
+		memcpy(vertex + 3, mesh[attributes_id], attribute_stride_dwords * sizeof(u32));
+		output_vertex_index += 1;
 	}
 }
 
@@ -3057,6 +3077,8 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 			});
 		}
 		
+		compile_const u32 vertex_stride_dwords = (attribute_stride_dwords + 3);
+		result.vertices.reserve((mesh.attribute_count * 2) * vertex_stride_dwords);
 		AppendChangedVertices(mesh, changed_attribute_vertex_ids, attributes_id_to_vertex_index, result);
 	}
 	

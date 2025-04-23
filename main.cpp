@@ -39,6 +39,13 @@ static const char* EatWhiteSpaceAndComments(const char* string) {
 }
 
 
+struct ObjVertex {
+	Vector3 position;
+	Vector2 texcoord;
+	Vector3 normal;
+};
+compile_const u32 obj_vertex_stride_dwords = sizeof(ObjVertex) / sizeof(u32);
+
 struct ObjTriangleMesh {
 	std::vector<u32> indices;
 	std::vector<ObjVertex> vertices;
@@ -133,8 +140,10 @@ void WriteWavefrontObjFile(const MeshDecimationResult& mesh) {
 	fprintf(file, "# MeshDecimation\n");
 	fprintf(file, "o Object\n");
 	
-	for (u32 index = 0; index < mesh.vertices.size(); index += 1) {
-		auto& v = mesh.vertices[index];
+	u32 vertex_count = (u32)(mesh.vertices.size() / obj_vertex_stride_dwords);
+	auto* vertices = (ObjVertex*)mesh.vertices.data();
+	for (u32 index = 0; index < vertex_count; index += 1) {
+		auto& v = vertices[index];
 		fprintf(file, "v %f %f %f\n", v.position.x, v.position.y, v.position.z);
 		fprintf(file, "vn %f %f %f\n", v.normal.x, v.normal.y, v.normal.z);
 		fprintf(file, "vt %f %f\n", v.texcoord.x, v.texcoord.y);
@@ -157,8 +166,10 @@ void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
 	fprintf(file, "# MeshDecimation\n");
 	fprintf(file, "o Object\n");
 	
-	for (u32 index = 0; index < mesh.vertices.size(); index += 1) {
-		auto& v = mesh.vertices[index];
+	u32 vertex_count = (u32)(mesh.vertices.size() / obj_vertex_stride_dwords);
+	auto* vertices = (ObjVertex*)mesh.vertices.data();
+	for (u32 index = 0; index < vertex_count; index += 1) {
+		auto& v = vertices[index];
 		fprintf(file, "v %f %f %f\n", v.position.x, v.position.y, v.position.z);
 		fprintf(file, "vn %f %f %f\n", v.normal.x, v.normal.y, v.normal.z);
 		fprintf(file, "vt %f %f\n", v.texcoord.x, v.texcoord.y);
@@ -240,7 +251,7 @@ int main() {
 	TriangleGeometryDesc geometry_descs[geometry_desc_count];
 	geometry_descs[0].indices = triangle_mesh.indices.data();
 	geometry_descs[0].index_count = (u32)triangle_mesh.indices.size();
-	geometry_descs[0].vertices = triangle_mesh.vertices.data();
+	geometry_descs[0].vertices = (float*)triangle_mesh.vertices.data();
 	geometry_descs[0].vertex_count = (u32)triangle_mesh.vertices.size();
 #endif
 	
