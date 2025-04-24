@@ -187,7 +187,7 @@ static ElementID CornerListMerge(MeshView mesh, ElementID element_0, ElementID e
 }
 
 struct Allocator {
-	compile_const u32 max_memory_block_count = 32;
+	compile_const u32 max_memory_block_count = 48;
 	
 	void* memory_blocks[max_memory_block_count] = {};
 	u32 memory_block_count = 0;
@@ -305,6 +305,12 @@ static void ArrayEraseSwap(ArrayT& array, u32 index) {
 	
 	array.data[index] = array.data[array.count - 1];
 	array.count -= 1;
+}
+
+template<typename ArrayT>
+static typename ArrayT::ValueType& ArrayLastElement(ArrayT& array) {
+	assert(array.count != 0);
+	return array.data[array.count - 1];
 }
 
 template<typename ArrayT>
@@ -1202,10 +1208,10 @@ static void ResetAttributeWedgeMap(AttributeWedgeMap& small_set) {
 
 struct MeshDecimationState {
 	// Edge quadrics accumulated on vertices.
-	std::vector<Quadric> vertex_edge_quadrics;
+	Array<Quadric> vertex_edge_quadrics;
 	
 	// Face quadrics accumulated on attributes.
-	std::vector<QuadricWithAttributes> attribute_face_quadrics;
+	Array<QuadricWithAttributes> attribute_face_quadrics;
 	
 	EdgeDuplicateMap edge_duplicate_map;
 	RemovedEdgeArray removed_edge_array;
@@ -1315,9 +1321,9 @@ void ComputeEdgeCollapseError(MeshView mesh, MeshDecimationState& state, EdgeID 
 }
 
 struct EdgeCollapseHeap {
-	std::vector<EdgeID> heap_index_to_edge_id;
-	std::vector<u32>    edge_id_to_heap_index;
-	std::vector<float>  edge_collapse_errors;
+	Array<EdgeID> heap_index_to_edge_id;
+	Array<u32>    edge_id_to_heap_index;
+	Array<float>  edge_collapse_errors;
 };
 
 static u32 HeapChildIndex0(u32 node_index) { return node_index * 2 + 1; }
@@ -1353,7 +1359,7 @@ static void EdgeCollapseHeapSiftUp(EdgeCollapseHeap& heap, u32 node_index) {
 }
 
 static void EdgeCollapseHeapSiftDown(EdgeCollapseHeap& heap, u32 node_index) {
-	u32 element_count = (u32)heap.edge_collapse_errors.size();
+	u32 element_count = heap.edge_collapse_errors.count;
 	while (HeapChildIndex0(node_index) < element_count) {
 		u32 index_0 = HeapChildIndex0(node_index);
 		u32 index_1 = HeapChildIndex1(node_index);
@@ -1369,18 +1375,18 @@ static void EdgeCollapseHeapSiftDown(EdgeCollapseHeap& heap, u32 node_index) {
 }
 
 static EdgeID EdgeCollapseHeapPop(EdgeCollapseHeap& heap) {
-	auto edge_id = heap.heap_index_to_edge_id.front();
+	assert(heap.edge_collapse_errors.count != 0);
+	
+	auto edge_id = heap.heap_index_to_edge_id[0];
 
-	if (heap.edge_collapse_errors.size() > 0) {
-		heap.edge_collapse_errors[0]  = heap.edge_collapse_errors.back();
-		heap.heap_index_to_edge_id[0] = heap.heap_index_to_edge_id.back();
-	}
+	heap.edge_collapse_errors[0]  = ArrayLastElement(heap.edge_collapse_errors);
+	heap.heap_index_to_edge_id[0] = ArrayLastElement(heap.heap_index_to_edge_id);
 	
 	heap.edge_id_to_heap_index[heap.heap_index_to_edge_id[0].index] = 0;
 	heap.edge_id_to_heap_index[edge_id.index] = u32_max;
 
-	heap.edge_collapse_errors.pop_back();
-	heap.heap_index_to_edge_id.pop_back();
+	heap.edge_collapse_errors.count  -= 1;
+	heap.heap_index_to_edge_id.count -= 1;
 	
 	EdgeCollapseHeapSiftDown(heap, 0);
 	
@@ -1391,11 +1397,11 @@ static void EdgeCollapseHeapRemove(EdgeCollapseHeap& heap, u32 heap_index) {
 	auto edge_id = heap.heap_index_to_edge_id[heap_index];
 	
 	bool sift_up = true;
-	if (heap.edge_collapse_errors.size() > heap_index) {
+	if (heap.edge_collapse_errors.count > heap_index) {
 		float prev_error = heap.edge_collapse_errors[heap_index];
 
-		heap.edge_collapse_errors[heap_index]  = heap.edge_collapse_errors.back();
-		heap.heap_index_to_edge_id[heap_index] = heap.heap_index_to_edge_id.back();
+		heap.edge_collapse_errors[heap_index]  = ArrayLastElement(heap.edge_collapse_errors);
+		heap.heap_index_to_edge_id[heap_index] = ArrayLastElement(heap.heap_index_to_edge_id);
 
 		float new_error = heap.edge_collapse_errors[heap_index];
 		sift_up = new_error < prev_error;
@@ -1405,8 +1411,8 @@ static void EdgeCollapseHeapRemove(EdgeCollapseHeap& heap, u32 heap_index) {
 	heap.edge_id_to_heap_index[heap.heap_index_to_edge_id[heap_index].index] = heap_index;
 	heap.edge_id_to_heap_index[edge_id.index] = u32_max;
 
-	heap.edge_collapse_errors.pop_back();
-	heap.heap_index_to_edge_id.pop_back();
+	heap.edge_collapse_errors.count  -= 1;
+	heap.heap_index_to_edge_id.count -= 1;
 	
 	if (sift_up) {
 		EdgeCollapseHeapSiftUp(heap, heap_index);
@@ -1428,9 +1434,9 @@ static void EdgeCollapseHeapUpdate(EdgeCollapseHeap& heap, u32 node_index, float
 }
 
 static void EdgeCollapseHeapInitialize(EdgeCollapseHeap& heap) {
-	if (heap.edge_collapse_errors.size() == 0) return;
+	if (heap.edge_collapse_errors.count == 0) return;
 	
-	u32 node_index = HeapParentIndex((u32)heap.edge_collapse_errors.size() - 1);
+	u32 node_index = HeapParentIndex(heap.edge_collapse_errors.count - 1);
 	
 	for (u32 i = node_index; i > 0; i -= 1) {
 		EdgeCollapseHeapSiftDown(heap, i);
@@ -1454,15 +1460,13 @@ static void EdgeCollapseHeapValidate(EdgeCollapseHeap& heap) {
 }
 #endif // ENABLE_EDGE_COLLAPSE_HEAP_VALIDATION
 
-static void InitializeMehsDecimationState(MeshView mesh, MeshDecimationState& state) {
-	state.vertex_edge_quadrics.resize(mesh.vertex_count);
-	state.attribute_face_quadrics.resize(mesh.attribute_count);
-	state.wedge_quadrics.reserve(64);
-	state.wedge_attributes_ids.reserve(64 * attribute_stride_dwords);
-	state.edge_duplicate_map.keys_values.resize(ComputeHashTableSize(128u));
+static void InitializeMehsDecimationState(MeshView mesh, Allocator& allocator, MeshDecimationState& state) {
+	ArrayResizeMemset(state.vertex_edge_quadrics, allocator, mesh.vertex_count, 0);
+	ArrayResizeMemset(state.attribute_face_quadrics, allocator, mesh.attribute_count, 0);
 	
-	memset(state.vertex_edge_quadrics.data(), 0, state.vertex_edge_quadrics.size() * sizeof(Quadric));
-	memset(state.attribute_face_quadrics.data(), 0, state.attribute_face_quadrics.size() * sizeof(QuadricWithAttributes));
+	state.wedge_quadrics.reserve(64);
+	state.wedge_attributes_ids.reserve(64);
+	state.edge_duplicate_map.keys_values.resize(ComputeHashTableSize(128u));
 	
 	{
 		// ScopedTimer t("- Compute Face Quadrics");
@@ -1553,7 +1557,7 @@ static float DecimateMeshFaceGroup(MeshView mesh, MeshDecimationState& state, Ed
 #endif // REPORT_DECIMATION_PROGRESS
 	
 	float max_error = 0.f;
-	while (active_face_count > target_face_count && edge_collapse_heap.edge_collapse_errors.size()) {
+	while (active_face_count > target_face_count && edge_collapse_heap.edge_collapse_errors.count) {
 #if REPORT_DECIMATION_PROGRESS
 		if ((s32)active_face_count < next_report_target) {
 			printf("Remaining Faces: %u\n", active_face_count - target_face_count);
@@ -1679,28 +1683,24 @@ void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& resu
 	auto mesh = BuildEditableMesh(allocator, inputs.geometry_descs, inputs.geometry_desc_count);
 	
 	MeshDecimationState state;
-	InitializeMehsDecimationState(mesh, state);
+	InitializeMehsDecimationState(mesh, allocator, state);
 	
 	
 	EdgeCollapseHeap edge_collapse_heap;
-	edge_collapse_heap.edge_collapse_errors.resize(mesh.edge_count);
-	edge_collapse_heap.edge_id_to_heap_index.resize(mesh.edge_count);
-	edge_collapse_heap.heap_index_to_edge_id.resize(mesh.edge_count);
+	ArrayResize(edge_collapse_heap.edge_collapse_errors,  allocator, mesh.edge_count);
+	ArrayResize(edge_collapse_heap.edge_id_to_heap_index, allocator, mesh.edge_count);
+	ArrayResize(edge_collapse_heap.heap_index_to_edge_id, allocator, mesh.edge_count);
 	
-	{
-		// ScopedTimer t("- Rank Edge Collapses");
+	for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
+		EdgeSelectInfo select_info;
+		ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
 		
-		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
-			EdgeSelectInfo select_info;
-			ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
-			
-			edge_collapse_heap.edge_collapse_errors[edge_id.index]  = select_info.min_error;
-			edge_collapse_heap.edge_id_to_heap_index[edge_id.index] = edge_id.index;
-			edge_collapse_heap.heap_index_to_edge_id[edge_id.index] = edge_id;
-		}
-		
-		EdgeCollapseHeapInitialize(edge_collapse_heap);
+		edge_collapse_heap.edge_collapse_errors[edge_id.index]  = select_info.min_error;
+		edge_collapse_heap.edge_id_to_heap_index[edge_id.index] = edge_id.index;
+		edge_collapse_heap.heap_index_to_edge_id[edge_id.index] = edge_id;
 	}
+	EdgeCollapseHeapInitialize(edge_collapse_heap);
+	
 	
 	u32 target_face_count = inputs.target_face_count;
 	u32 active_face_count = mesh.face_count;
@@ -1712,14 +1712,16 @@ void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& resu
 	AllocatorFreeMemoryBlocks(allocator);
 }
 
-static void DecimateMeshFaceGroups(MeshView mesh, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<ErrorMetric> meshlet_group_error_metrics, Array<VertexID> changed_attribute_vertex_ids) {
+static void DecimateMeshFaceGroups(MeshView mesh, Allocator& allocator, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<ErrorMetric> meshlet_group_error_metrics, Array<VertexID> changed_attribute_vertex_ids) {
+	u32 allocator_high_water = allocator.memory_block_count;
+	
 	MeshDecimationState state;
-	InitializeMehsDecimationState(mesh, state);
+	InitializeMehsDecimationState(mesh, allocator, state);
 	
 	compile_const u32 vertex_group_index_locked = u32_max - 1;
 
-	std::vector<u32> vertex_group_indices;
-	vertex_group_indices.resize(mesh.vertex_count, u32_max);
+	Array<u32> vertex_group_indices;
+	ArrayResizeMemset(vertex_group_indices, allocator, mesh.vertex_count, 0xFF);
 	
 	{
 		u32 begin_face_index = 0;
@@ -1747,10 +1749,11 @@ static void DecimateMeshFaceGroups(MeshView mesh, Array<FaceID> meshlet_group_fa
 		}
 	}
 	
-	std::vector<EdgeID> meshlet_group_edge_ids;
-	std::vector<u32> meshlet_group_edge_prefix_sum;
+	Array<EdgeID> meshlet_group_edge_ids;
+	Array<u32> meshlet_group_edge_prefix_sum;
+	u32 max_edge_count = 0;
 	{
-		meshlet_group_edge_prefix_sum.resize(meshlet_group_face_prefix_sum.count);
+		ArrayResizeMemset(meshlet_group_edge_prefix_sum, allocator, meshlet_group_face_prefix_sum.count, 0);
 		
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
@@ -1771,11 +1774,13 @@ static void DecimateMeshFaceGroups(MeshView mesh, Array<FaceID> meshlet_group_fa
 		u32 prefix_sum = 0;
 		for (u32 i = 0; i < meshlet_group_face_prefix_sum.count; i += 1) {
 			u32 count = meshlet_group_edge_prefix_sum[i];
+			max_edge_count = count > max_edge_count ? count : max_edge_count;
+			
 			meshlet_group_edge_prefix_sum[i] = prefix_sum;
 			prefix_sum += count;
 		}
 		
-		meshlet_group_edge_ids.resize(prefix_sum);
+		ArrayResize(meshlet_group_edge_ids, allocator, prefix_sum);
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
 			if (edge.corner_list_base.index == u32_max) continue;
@@ -1795,6 +1800,9 @@ static void DecimateMeshFaceGroups(MeshView mesh, Array<FaceID> meshlet_group_fa
 	
 	
 	EdgeCollapseHeap edge_collapse_heap;
+	ArrayResize(edge_collapse_heap.edge_collapse_errors,  allocator, max_edge_count);
+	ArrayResize(edge_collapse_heap.edge_id_to_heap_index, allocator, mesh.edge_count);
+	ArrayResize(edge_collapse_heap.heap_index_to_edge_id, allocator, max_edge_count);
 	
 	u32 edge_begin_index = 0;
 	u32 face_begin_index = 0;
@@ -1805,29 +1813,27 @@ static void DecimateMeshFaceGroups(MeshView mesh, Array<FaceID> meshlet_group_fa
 		u32 edge_count = edge_end_index - edge_begin_index;
 		u32 face_count = face_end_index - face_begin_index;
 		
-		edge_collapse_heap.edge_collapse_errors.resize(edge_count);
-		edge_collapse_heap.edge_id_to_heap_index.resize(mesh.edge_count);
-		edge_collapse_heap.heap_index_to_edge_id.resize(edge_count);
 		
-		memset(edge_collapse_heap.edge_id_to_heap_index.data(), 0xFF, edge_collapse_heap.edge_id_to_heap_index.size() * sizeof(u32));
+		edge_collapse_heap.edge_collapse_errors.count  = edge_count;
+		edge_collapse_heap.edge_id_to_heap_index.count = mesh.edge_count;
+		edge_collapse_heap.heap_index_to_edge_id.count = edge_count;
 		
-		{
-			// ScopedTimer t("- Rank Edge Collapses");
+		memset(edge_collapse_heap.edge_id_to_heap_index.data, 0xFF, edge_collapse_heap.edge_id_to_heap_index.count * sizeof(u32));
+		
+		for (u32 edge_index = edge_begin_index; edge_index < edge_end_index; edge_index += 1) {
+			auto edge_id = meshlet_group_edge_ids[edge_index];
+			u32 local_edge_index = edge_index - edge_begin_index;
 			
-			for (u32 edge_index = edge_begin_index; edge_index < edge_end_index; edge_index += 1) {
-				auto edge_id = meshlet_group_edge_ids[edge_index];
-				u32 local_edge_index = edge_index - edge_begin_index;
-				
-				EdgeSelectInfo select_info;
-				ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
-				
-				edge_collapse_heap.edge_collapse_errors[local_edge_index]  = select_info.min_error;
-				edge_collapse_heap.edge_id_to_heap_index[edge_id.index]    = local_edge_index;
-				edge_collapse_heap.heap_index_to_edge_id[local_edge_index] = edge_id;
-			}
+			EdgeSelectInfo select_info;
+			ComputeEdgeCollapseError(mesh, state, edge_id, &select_info);
 			
-			EdgeCollapseHeapInitialize(edge_collapse_heap);
+			edge_collapse_heap.edge_collapse_errors[local_edge_index]  = select_info.min_error;
+			edge_collapse_heap.edge_id_to_heap_index[edge_id.index]    = local_edge_index;
+			edge_collapse_heap.heap_index_to_edge_id[local_edge_index] = edge_id;
 		}
+		
+		EdgeCollapseHeapInitialize(edge_collapse_heap);
+		
 		
 		u32 target_face_count = face_count / 2;
 		u32 active_face_count = face_count;
@@ -1839,6 +1845,8 @@ static void DecimateMeshFaceGroups(MeshView mesh, Array<FaceID> meshlet_group_fa
 		edge_begin_index = edge_end_index;
 		face_begin_index = face_end_index;
 	}
+	
+	AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 }
 
 
@@ -3103,7 +3111,7 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 		last_level_meshlet_count = meshlet_build_result.meshlets.count;
 		
 		if (is_last_level == false) {
-			DecimateMeshFaceGroups(mesh, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, changed_attribute_vertex_ids);
+			DecimateMeshFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, changed_attribute_vertex_ids);
 			AppendChangedVertices(mesh, changed_attribute_vertex_ids, attributes_id_to_vertex_index, result);
 			
 			// Compact the mesh after decimation to remove unused faces and edges. TODO: Replace face and edge validity checks with asserts.
