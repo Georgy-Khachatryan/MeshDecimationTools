@@ -46,6 +46,20 @@ struct ObjVertex {
 };
 compile_const u32 obj_vertex_stride_dwords = sizeof(ObjVertex) / sizeof(u32);
 
+static void NormalizeObjVertexAttributes(float* attributes) {
+	auto& normal = *(Vector3*)(attributes + 2);
+	
+	float length_square = normal.x * normal.x + normal.y * normal.y + normal.z * normal.z;
+	
+	if (length_square > 0.f) {
+		float scale = 1.f / sqrtf(length_square);
+		
+		normal.x = normal.x * scale;
+		normal.y = normal.y * scale;
+		normal.z = normal.z * scale;
+	}
+}
+
 struct ObjTriangleMesh {
 	std::vector<u32> indices;
 	std::vector<ObjVertex> vertices;
@@ -237,36 +251,40 @@ int main() {
 	
 	compile_const u32 geometry_desc_count = 2;
 	TriangleGeometryDesc geometry_descs[geometry_desc_count];
-	geometry_descs[0].indices = triangle_mesh.indices.data() + split_index;
-	geometry_descs[0].index_count = (u32)triangle_mesh.indices.size() - split_index;
-	geometry_descs[0].vertices = triangle_mesh.vertices.data();
+	geometry_descs[0].indices      = triangle_mesh.indices.data() + split_index;
+	geometry_descs[0].index_count  = (u32)triangle_mesh.indices.size() - split_index;
+	geometry_descs[0].vertices     = (float*)triangle_mesh.vertices.data();
 	geometry_descs[0].vertex_count = (u32)triangle_mesh.vertices.size();
 	
-	geometry_descs[1].indices = triangle_mesh.indices.data();
-	geometry_descs[1].index_count = split_index;
-	geometry_descs[1].vertices = triangle_mesh.vertices.data();
+	geometry_descs[1].indices      = triangle_mesh.indices.data();
+	geometry_descs[1].index_count  = split_index;
+	geometry_descs[1].vertices     = (float*)triangle_mesh.vertices.data();
 	geometry_descs[1].vertex_count = (u32)triangle_mesh.vertices.size();
 #else
 	compile_const u32 geometry_desc_count = 1;
 	TriangleGeometryDesc geometry_descs[geometry_desc_count];
-	geometry_descs[0].indices = triangle_mesh.indices.data();
-	geometry_descs[0].index_count = (u32)triangle_mesh.indices.size();
-	geometry_descs[0].vertices = (float*)triangle_mesh.vertices.data();
+	geometry_descs[0].indices      = triangle_mesh.indices.data();
+	geometry_descs[0].index_count  = (u32)triangle_mesh.indices.size();
+	geometry_descs[0].vertices     = (float*)triangle_mesh.vertices.data();
 	geometry_descs[0].vertex_count = (u32)triangle_mesh.vertices.size();
 #endif
 	
+	TriangleMeshDesc mesh_desc;
+	mesh_desc.geometry_descs      = geometry_descs;
+	mesh_desc.geometry_desc_count = geometry_desc_count;
+	mesh_desc.vertex_stride_bytes = sizeof(ObjVertex);
+	mesh_desc.normalize_vertex_attributes = &NormalizeObjVertexAttributes;
+	
 #if 1
 	VirtualGeometryBuildInputs inputs;
-	inputs.geometry_descs      = geometry_descs;
-	inputs.geometry_desc_count = geometry_desc_count;
+	inputs.mesh = mesh_desc;
 	
 	VirtualGeometryBuildResult result;
 	BuildVirtualGeometry(inputs, result);
 #else
 	MeshDecimationInputs inputs;
-	inputs.geometry_descs      = geometry_descs;
-	inputs.geometry_desc_count = geometry_desc_count;
-	inputs.target_face_count   = ((u32)triangle_mesh.indices.size() / 3) / 138;
+	inputs.mesh = mesh_desc;
+	inputs.target_face_count = ((u32)triangle_mesh.indices.size() / 3) / 138;
 	
 	MeshDecimationResult result;
 	DecimateMesh(inputs, result);

@@ -115,7 +115,7 @@ struct EdgeID {
 struct AttributesID {
 	u32 index = 0;
 };
-compile_const u32 attribute_stride_dwords = 5; // 3 normal + 2 texcoords.
+compile_const u32 max_attribute_stride_dwords = 5;
 
 
 struct Face {
@@ -169,6 +169,7 @@ struct MeshView {
 	u32 vertex_count    = 0;
 	u32 corner_count    = 0;
 	u32 attribute_count = 0;
+	u32 attribute_stride_dwords = 0;
 	
 	Face&   operator[] (FaceID face_id)             { return faces[face_id.index]; }
 	Edge&   operator[] (EdgeID edge_id)             { return edges[edge_id.index]; }
@@ -176,6 +177,8 @@ struct MeshView {
 	Corner& operator[] (CornerID corner_id)         { return corners[corner_id.index]; }
 	float*  operator[] (AttributesID attributes_id) { return attributes + attributes_id.index * attribute_stride_dwords; }
 };
+
+using NormalizeVertexAttributes = void(*)(float*);
 
 struct TriangleGeometryDesc {
 	const u32* indices = nullptr;
@@ -185,12 +188,16 @@ struct TriangleGeometryDesc {
 	u32 vertex_count = 0;
 };
 
-struct VirtualGeometryBuildInputs {
+struct TriangleMeshDesc {
 	const TriangleGeometryDesc* geometry_descs = nullptr;
 	u32 geometry_desc_count = 0;
+	u32 vertex_stride_bytes = 0;
 	
-	// TODO: Arbitrary vertex layout.
-	// u32 vertex_stride = 0;
+	NormalizeVertexAttributes normalize_vertex_attributes;
+};
+
+struct VirtualGeometryBuildInputs {
+	TriangleMeshDesc mesh;
 	
 	// TODO: Custom meshlet size.
 	// u32 meshlet_max_vertex_count   = 128;
@@ -201,11 +208,7 @@ struct VirtualGeometryBuildInputs {
 };
 
 struct MeshDecimationInputs {
-	const TriangleGeometryDesc* geometry_descs = nullptr;
-	u32 geometry_desc_count = 0;
-	
-	// TODO: Arbitrary vertex layout.
-	// u32 vertex_stride = 0;
+	TriangleMeshDesc mesh;
 	
 	u32 target_face_count = 0;
 	// TODO: Add support for error limit.
