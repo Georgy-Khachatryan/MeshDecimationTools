@@ -154,8 +154,8 @@ void WriteWavefrontObjFile(const MeshDecimationResult& mesh) {
 	fprintf(file, "# MeshDecimation\n");
 	fprintf(file, "o Object\n");
 	
-	u32 vertex_count = (u32)(mesh.vertices.size() / obj_vertex_stride_dwords);
-	auto* vertices = (ObjVertex*)mesh.vertices.data();
+	u32 vertex_count = mesh.vertices.count / obj_vertex_stride_dwords;
+	auto* vertices = (ObjVertex*)mesh.vertices.data;
 	for (u32 index = 0; index < vertex_count; index += 1) {
 		auto& v = vertices[index];
 		fprintf(file, "v %f %f %f\n", v.position.x, v.position.y, v.position.z);
@@ -163,7 +163,7 @@ void WriteWavefrontObjFile(const MeshDecimationResult& mesh) {
 		fprintf(file, "vt %f %f\n", v.texcoord.x, v.texcoord.y);
 	}
 	
-	for (u32 corner = 0; corner < mesh.indices.size(); corner += 3) {
+	for (u32 corner = 0; corner < mesh.indices.count; corner += 3) {
 		u32 i0 = mesh.indices[corner + 0] + 1;
 		u32 i1 = mesh.indices[corner + 1] + 1;
 		u32 i2 = mesh.indices[corner + 2] + 1;
@@ -180,8 +180,8 @@ void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
 	fprintf(file, "# MeshDecimation\n");
 	fprintf(file, "o Object\n");
 	
-	u32 vertex_count = (u32)(mesh.vertices.size() / obj_vertex_stride_dwords);
-	auto* vertices = (ObjVertex*)mesh.vertices.data();
+	u32 vertex_count = mesh.vertices.count / obj_vertex_stride_dwords;
+	auto* vertices = (ObjVertex*)mesh.vertices.data;
 	for (u32 index = 0; index < vertex_count; index += 1) {
 		auto& v = vertices[index];
 		fprintf(file, "v %f %f %f\n", v.position.x, v.position.y, v.position.z);
@@ -193,7 +193,7 @@ void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
 	float target_error = 0.001f;
 	
 	u32 group_index = u32_max;
-	for (u32 meshlet_index = 0; meshlet_index < mesh.meshlets.size(); meshlet_index += 1) {
+	for (u32 meshlet_index = 0; meshlet_index < mesh.meshlets.count; meshlet_index += 1) {
 		auto& meshlet = mesh.meshlets[meshlet_index];
 		
 		bool draw_current_level = (meshlet.current_level_error_metric.error < target_error);
@@ -217,6 +217,33 @@ void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
 	}
 	
 	fclose(file);
+}
+
+#define ENABLE_ALLOCATOR_VALIDATION 1
+
+struct ValidatedAllocator {
+#if ENABLE_ALLOCATOR_VALIDATION
+	u32 allocation_count   = 0;
+	u32 deallocation_count = 0;
+#endif // ENABLE_ALLOCATOR_VALIDATION
+};
+
+static void* ValidatedAllocatorRealloc(void* old_memory_block, u64 size_bytes, void* user_data) {
+#if ENABLE_ALLOCATOR_VALIDATION
+	auto* allocator = (ValidatedAllocator*)user_data;
+	if (old_memory_block != nullptr && size_bytes != 0) { // Reallocate.
+		allocator->allocation_count   += 1;
+		allocator->deallocation_count += 1;
+	} else if (old_memory_block && size_bytes == 0) { // Deallocate.
+		allocator->deallocation_count += 1;
+	} else if (old_memory_block == nullptr && size_bytes != 0) { // Allocate.
+		allocator->allocation_count += 1;
+	} else {
+		assert(old_memory_block == nullptr && size_bytes == 0); // No op.
+	}
+#endif // ENABLE_ALLOCATOR_VALIDATION
+	
+	return realloc(old_memory_block, size_bytes);
 }
 
 #include <chrono>
@@ -275,25 +302,53 @@ int main() {
 	mesh_desc.vertex_stride_bytes = sizeof(ObjVertex);
 	mesh_desc.normalize_vertex_attributes = &NormalizeObjVertexAttributes;
 	
+	ValidatedAllocator temp_allocator;
+	ValidatedAllocator heap_allocator;
+	
+	SystemCallbacks callbacks;
+	callbacks.temp_allocator.realloc   = &ValidatedAllocatorRealloc;
+	callbacks.temp_allocator.user_data = &temp_allocator;
+	callbacks.heap_allocator.realloc   = &ValidatedAllocatorRealloc;
+	callbacks.heap_allocator.user_data = &heap_allocator;
+	
 #if 1
 	VirtualGeometryBuildInputs inputs;
 	inputs.mesh = mesh_desc;
 	
 	VirtualGeometryBuildResult result;
-	BuildVirtualGeometry(inputs, result);
+	BuildVirtualGeometry(inputs, result, callbacks);
+
+#if ENABLE_ALLOCATOR_VALIDATION
+	assert(heap_allocator.allocation_count == heap_allocator.deallocation_count + 6); // 6 live heap allocations.
+#endif // ENABLE_ALLOCATOR_VALIDATION
 #else
 	MeshDecimationInputs inputs;
 	inputs.mesh = mesh_desc;
 	inputs.target_face_count = ((u32)triangle_mesh.indices.size() / 3) / 138;
 	
 	MeshDecimationResult result;
-	DecimateMesh(inputs, result);
+	DecimateMesh(inputs, result, callbacks);
+	
+#if ENABLE_ALLOCATOR_VALIDATION
+	assert(heap_allocator.allocation_count == heap_allocator.deallocation_count + 2); // 2 live heap allocations.
+#endif // ENABLE_ALLOCATOR_VALIDATION
 #endif
 	
 	t1 = std::chrono::high_resolution_clock::now();
 	printf("Decimation Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 	
+#if ENABLE_ALLOCATOR_VALIDATION
+	assert(temp_allocator.allocation_count == temp_allocator.deallocation_count); // No live temp allocations.
+#endif // ENABLE_ALLOCATOR_VALIDATION
+	
 	WriteWavefrontObjFile(result);
+	FreeResultBuffers(result, callbacks);
+
+#if ENABLE_ALLOCATOR_VALIDATION
+	printf("Temp Allocation Count: %u\n", temp_allocator.allocation_count);
+	printf("Heap Allocation Count: %u\n", heap_allocator.allocation_count);
+	assert(heap_allocator.allocation_count == heap_allocator.deallocation_count); // No live heap allocations.
+#endif // ENABLE_ALLOCATOR_VALIDATION
 	
 	fclose(file);
 	

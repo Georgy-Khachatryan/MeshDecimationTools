@@ -1,7 +1,11 @@
 #ifndef MESHDECIMATION_H
 #define MESHDECIMATION_H
 
-#include <vector>
+#include <assert.h>
+
+#ifndef CACHE_LINE_SIZE
+#define CACHE_LINE_SIZE 64
+#endif // CACHE_LINE_SIZE
 
 #define compile_const constexpr static const
 
@@ -157,7 +161,7 @@ struct alignas(16) Vertex {
 };
 
 
-struct MeshView {
+struct alignas(CACHE_LINE_SIZE) MeshView {
 	Face*   faces      = nullptr;
 	Edge*   edges      = nullptr;
 	Vertex* vertices   = nullptr;
@@ -176,6 +180,23 @@ struct MeshView {
 	Vertex& operator[] (VertexID vertex_id)         { return vertices[vertex_id.index]; }
 	Corner& operator[] (CornerID corner_id)         { return corners[corner_id.index]; }
 	float*  operator[] (AttributesID attributes_id) { return attributes + attributes_id.index * attribute_stride_dwords; }
+};
+static_assert(sizeof(MeshView) == 64);
+
+template<typename T>
+struct ArrayView {
+	using ValueType = T;
+	
+	T* data = nullptr;
+	u32 count = 0;
+	
+	T& operator[] (u32 index) { assert(index < count); return data[index]; }
+	const T& operator[] (u32 index) const { assert(index < count); return data[index]; }
+
+	T* begin() { return data; }
+	T* end() { return data + count; }
+	const T* begin() const { return data; }
+	const T* end() const { return data + count; }
 };
 
 using NormalizeVertexAttributes = void(*)(float*);
@@ -254,6 +275,19 @@ struct MeshletGroupLeafBvhNodeData {
 	u32 end_child_index;
 };
 
+using ReallocCallback = void* (*)(void* old_memory_block, u64 size_bytes, void* user_data);
+
+struct AllocatorCallbacks {
+	ReallocCallback realloc = nullptr;
+	void* user_data = nullptr;
+};
+
+struct SystemCallbacks {
+	// Optional memory allocation callbacks. If they're not provided the system falls back to realloc().
+	AllocatorCallbacks temp_allocator; // Memory blocks are allocated and freed in stack order.
+	AllocatorCallbacks heap_allocator; // Memory blocks are allocated and freed in any order.
+};
+
 struct alignas(16) MeshletGroupBvhNode {
 	// Bounding box over child bounding boxes.
 	alignas(16) Vector3 aabb_min;
@@ -288,24 +322,27 @@ struct VirtualGeometryLevel {
 };
 
 struct VirtualGeometryBuildResult {
-	std::vector<MeshletGroupBvhNode> bvh_nodes;
-	std::vector<Meshlet> meshlets;
-	std::vector<u32> meshlet_vertex_indices;
-	std::vector<u8>  meshlet_triangles;
-	std::vector<float> vertices;
-	std::vector<VirtualGeometryLevel> levels;
+	ArrayView<MeshletGroupBvhNode> bvh_nodes;
+	ArrayView<Meshlet> meshlets;
+	ArrayView<u32> meshlet_vertex_indices;
+	ArrayView<u8>  meshlet_triangles;
+	ArrayView<float> vertices;
+	ArrayView<VirtualGeometryLevel> levels;
 	
 	u32 meshlet_group_bvh_root_node_index = 0;
 };
 
 struct MeshDecimationResult {
 	// TODO: Output per geometry index and vertex ranges.
-	std::vector<u32> indices;
-	std::vector<float> vertices;
+	ArrayView<u32>   indices;
+	ArrayView<float> vertices;
 	float max_error = 0.f;
 };
 
-void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeometryBuildResult& result);
-void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& result);
+void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeometryBuildResult& result, const SystemCallbacks& callbacks);
+void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& result, const SystemCallbacks& callbacks);
+
+void FreeResultBuffers(const VirtualGeometryBuildResult& result, const SystemCallbacks& callbacks);
+void FreeResultBuffers(const MeshDecimationResult& result, const SystemCallbacks& callbacks);
 
 #endif // MESHDECIMATION_H
