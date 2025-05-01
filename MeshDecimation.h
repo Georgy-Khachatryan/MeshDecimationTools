@@ -3,10 +3,6 @@
 
 #include <assert.h>
 
-#ifndef CACHE_LINE_SIZE
-#define CACHE_LINE_SIZE 64
-#endif // CACHE_LINE_SIZE
-
 #define compile_const constexpr static const
 
 using u8 = unsigned char;
@@ -70,11 +66,6 @@ struct Vector3 {
 	float operator[] (u32 index) const { return (&x)[index]; }
 };
 
-struct Vector2 {
-	float x = 0.f;
-	float y = 0.f;
-};
-
 struct SphereBounds {
 	Vector3 center = { 0.f, 0.f, 0.f };
 	float   radius = 0.f;
@@ -84,104 +75,6 @@ struct ErrorMetric {
 	SphereBounds bounds = { 0.f, 0.f, 0.f };
 	float        error  = 0.f;
 };
-
-
-enum struct ElementType : u32 {
-	Vertex = 0,
-	Edge   = 1,
-	Face   = 2,
-	
-	Count
-};
-
-struct CornerID {
-	u32 index = 0;
-};
-
-struct FaceID {
-	u32 index = 0;
-	
-	compile_const ElementType element_type = ElementType::Face;
-};
-
-struct VertexID {
-	u32 index = 0;
-	
-	compile_const ElementType element_type = ElementType::Vertex;
-};
-
-struct EdgeID {
-	u32 index = 0;
-	
-	compile_const ElementType element_type = ElementType::Edge;
-};
-
-struct AttributesID {
-	u32 index = 0;
-};
-compile_const u32 max_attribute_stride_dwords = 5;
-
-
-struct Face {
-	CornerID corner_list_base; // Corner list around a face.
-	u32 geometry_index = 0;
-};
-
-struct Edge {
-	union {
-		struct {
-			VertexID vertex_0;
-			VertexID vertex_1;
-		};
-		u64 edge_key = 0;
-	};
-	
-	CornerID corner_list_base; // Corner list around an edge.
-};
-
-struct CornerListIDs {
-	CornerID next;
-	CornerID prev;
-};
-
-struct Corner {
-	CornerListIDs corner_list_around[(u32)ElementType::Count];
-	
-	FaceID face_id;
-	EdgeID edge_id;
-	
-	VertexID vertex_id;
-	AttributesID attributes_id;
-};
-static_assert(sizeof(Corner) == 40, "Invalid Corner size.");
-
-struct alignas(16) Vertex {
-	Vector3 position;
-	CornerID corner_list_base; // Corner list around a vertex.
-};
-
-
-struct alignas(CACHE_LINE_SIZE) MeshView {
-	Face*   faces      = nullptr;
-	Edge*   edges      = nullptr;
-	Vertex* vertices   = nullptr;
-	Corner* corners    = nullptr;
-	float*  attributes = nullptr;
-	
-	u32 face_count      = 0;
-	u32 edge_count      = 0;
-	u32 vertex_count    = 0;
-	u32 corner_count    = 0;
-	u32 attribute_count = 0;
-	u32 attribute_stride_dwords = 0;
-	
-	Face&   operator[] (FaceID face_id)             { return faces[face_id.index]; }
-	Edge&   operator[] (EdgeID edge_id)             { return edges[edge_id.index]; }
-	Vertex& operator[] (VertexID vertex_id)         { return vertices[vertex_id.index]; }
-	Corner& operator[] (CornerID corner_id)         { return corners[corner_id.index]; }
-	float*  operator[] (AttributesID attributes_id) { return attributes + attributes_id.index * attribute_stride_dwords; }
-};
-static_assert(sizeof(MeshView) == 64);
 
 template<typename T>
 struct ArrayView {
@@ -322,11 +215,11 @@ struct VirtualGeometryLevel {
 };
 
 struct VirtualGeometryBuildResult {
-	ArrayView<MeshletGroupBvhNode> bvh_nodes;
-	ArrayView<Meshlet> meshlets;
-	ArrayView<u32> meshlet_vertex_indices;
-	ArrayView<u8>  meshlet_triangles;
-	ArrayView<float> vertices;
+	ArrayView<MeshletGroupBvhNode>  bvh_nodes;
+	ArrayView<Meshlet>              meshlets;
+	ArrayView<u32>                  meshlet_vertex_indices;
+	ArrayView<u8>                   meshlet_triangles;
+	ArrayView<float>                vertices;
 	ArrayView<VirtualGeometryLevel> levels;
 	
 	u32 meshlet_group_bvh_root_node_index = 0;

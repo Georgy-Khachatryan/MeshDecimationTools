@@ -38,6 +38,10 @@ static const char* EatWhiteSpaceAndComments(const char* string) {
 	return string;
 }
 
+struct Vector2 {
+	float x = 0.f;
+	float y = 0.f;
+};
 
 struct ObjVertex {
 	Vector3 position;
@@ -196,16 +200,20 @@ void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
 	for (u32 meshlet_index = 0; meshlet_index < mesh.meshlets.count; meshlet_index += 1) {
 		auto& meshlet = mesh.meshlets[meshlet_index];
 		
-		bool draw_current_level = (meshlet.current_level_error_metric.error < target_error);
-		bool draw_coarser_level = (meshlet.coarser_level_error_metric.error < target_error);
+		bool draw_current_level = (meshlet.current_level_error_metric.error <= target_error);
+		bool draw_coarser_level = (meshlet.coarser_level_error_metric.error <= target_error);
 		bool draw_meshlet       = draw_current_level && !draw_coarser_level;
 		
 		if (draw_meshlet == false) continue;
 		
+#if 0
 		if (group_index != meshlet.coarser_level_bvh_node_index) {
 			group_index = meshlet.coarser_level_bvh_node_index;
 			fprintf(file, "o Group%u\n", group_index);
 		}
+#else
+		fprintf(file, "o Meshlet%u\n", meshlet_index);
+#endif
 		
 		for (u32 i = meshlet.begin_meshlet_triangles_index; i < meshlet.end_meshlet_triangles_index; i += 3) {
 			u32 i0 = mesh.meshlet_vertex_indices[mesh.meshlet_triangles[i + 0] + meshlet.begin_vertex_indices_index] + 1;

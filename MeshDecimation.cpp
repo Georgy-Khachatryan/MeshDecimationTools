@@ -14,6 +14,15 @@
 #define never_inline_function
 #endif // !defined(_MSC_VER)
 
+#if !defined(CACHE_LINE_SIZE)
+#define CACHE_LINE_SIZE 64
+#endif // !defined(CACHE_LINE_SIZE)
+
+#if !defined(MAX_ATTRIBUTE_STRIDE_DWORDS)
+#define MAX_ATTRIBUTE_STRIDE_DWORDS 5
+#endif // !defined(MAX_ATTRIBUTE_STRIDE_DWORDS)
+
+
 //
 // References:
 // - Michael Garland, Paul S. Heckbert. 1997. Surface Simplification Using Quadric Error Metrics.
@@ -53,6 +62,102 @@ static u32 ComputeEdgeKeyHash(u64 key) {
 	
 	return (u32)key;
 }
+
+enum struct ElementType : u32 {
+	Vertex = 0,
+	Edge   = 1,
+	Face   = 2,
+	
+	Count
+};
+
+struct CornerID {
+	u32 index = 0;
+};
+
+struct FaceID {
+	u32 index = 0;
+	
+	compile_const ElementType element_type = ElementType::Face;
+};
+
+struct VertexID {
+	u32 index = 0;
+	
+	compile_const ElementType element_type = ElementType::Vertex;
+};
+
+struct EdgeID {
+	u32 index = 0;
+	
+	compile_const ElementType element_type = ElementType::Edge;
+};
+
+struct AttributesID {
+	u32 index = 0;
+};
+
+struct Face {
+	CornerID corner_list_base; // Corner list around a face.
+	u32 geometry_index = 0;
+};
+
+struct Edge {
+	union {
+		struct {
+			VertexID vertex_0;
+			VertexID vertex_1;
+		};
+		u64 edge_key = 0;
+	};
+	
+	CornerID corner_list_base; // Corner list around an edge.
+};
+
+struct CornerListIDs {
+	CornerID next;
+	CornerID prev;
+};
+
+struct Corner {
+	CornerListIDs corner_list_around[(u32)ElementType::Count];
+	
+	FaceID face_id;
+	EdgeID edge_id;
+	
+	VertexID vertex_id;
+	AttributesID attributes_id;
+};
+static_assert(sizeof(Corner) == 40, "Invalid Corner size.");
+
+struct alignas(16) Vertex {
+	Vector3 position;
+	CornerID corner_list_base; // Corner list around a vertex.
+};
+
+
+struct alignas(CACHE_LINE_SIZE) MeshView {
+	Face*   faces      = nullptr;
+	Edge*   edges      = nullptr;
+	Vertex* vertices   = nullptr;
+	Corner* corners    = nullptr;
+	float*  attributes = nullptr;
+	
+	u32 face_count      = 0;
+	u32 edge_count      = 0;
+	u32 vertex_count    = 0;
+	u32 corner_count    = 0;
+	u32 attribute_count = 0;
+	u32 attribute_stride_dwords = 0;
+	
+	Face&   operator[] (FaceID face_id)             { return faces[face_id.index]; }
+	Edge&   operator[] (EdgeID edge_id)             { return edges[edge_id.index]; }
+	Vertex& operator[] (VertexID vertex_id)         { return vertices[vertex_id.index]; }
+	Corner& operator[] (CornerID corner_id)         { return corners[corner_id.index]; }
+	float*  operator[] (AttributesID attributes_id) { return attributes + attributes_id.index * attribute_stride_dwords; }
+};
+static_assert(sizeof(MeshView) == 64);
+
 
 static u64 PackEdgeKey(VertexID vertex_id_0, VertexID vertex_id_1) {
 	// Always pack VertexIDs in ascending order to ensure that PackEdgeKey(A, B) == PackEdgeKey(B, A) and they hash to the same value.
@@ -826,7 +931,7 @@ struct QuadricWithAttributes : Quadric {
 	struct {
 		Vector3 g = { 0.f, 0.f, 0.f };
 		float d = 0.f;
-	} attributes[max_attribute_stride_dwords];
+	} attributes[MAX_ATTRIBUTE_STRIDE_DWORDS];
 #endif // ENABLE_ATTRIBUTE_SUPPORT
 };
 
