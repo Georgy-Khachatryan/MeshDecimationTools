@@ -23,6 +23,21 @@
 #endif // !defined(MAX_ATTRIBUTE_STRIDE_DWORDS)
 
 
+compile_const u32 meshlet_max_vertex_count = 128;
+compile_const u32 meshlet_max_face_degree  = 3;
+
+compile_const u32 meshlet_max_face_count = 128;
+compile_const u32 meshlet_min_face_count = 32;
+compile_const float discontinuous_meshlet_max_expansion = 2.f; // Sqrt of the maximum AABB expansion when adding a discontinuous face to a meshlet.
+
+compile_const u32 meshlet_group_max_meshlet_count = 32;
+compile_const u32 meshlet_group_min_meshlet_count = 16;
+compile_const float discontinuous_meshlet_group_max_expansion = 4.f; // Sqrt of the maximum AABB expansion when adding a discontinuous meshlet to a group.
+
+compile_const u32 mehslet_group_max_bvh_branching_factor = 4;
+compile_const u32 virtual_geometry_max_levels_of_details = 16;
+
+
 //
 // References:
 // - Michael Garland, Paul S. Heckbert. 1997. Surface Simplification Using Quadric Error Metrics.
@@ -2166,12 +2181,6 @@ static bool KdTreeFindClosestActiveElement(KdTree& kd_tree, const Vector3& point
 	return should_prune;
 }
 
-compile_const u32 meshlet_max_vertex_count = 128;
-compile_const u32 meshlet_max_face_count   = 128;
-compile_const u32 meshlet_max_face_degree  = 3;
-compile_const u32 meshlet_group_max_meshlets = 32;
-compile_const u32 mehslet_group_max_bvh_branching_factor = 4;
-
 static SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds) {
 	u32 aabb_min_index[3] = { 0, 0, 0 };
 	u32 aabb_max_index[3] = { 0, 0, 0 };
@@ -2322,7 +2331,9 @@ static void BuildMeshletsForFaceGroup(
 	
 	while (true) {
 		u32 best_candidate_face_index = u32_max;
-		float smallest_surface_area = FLT_MAX;
+		float smallest_distance_to_face = FLT_MAX;
+		
+		auto center_ps = _mm_mul_ps(_mm_add_ps(meshlet_aabb_max_ps, meshlet_aabb_min_ps), _mm_set_ps1(0.5f));
 		
 		for (u32 i = 0; i < meshlet_candidate_elements.count;) {
 			auto face_id = meshlet_candidate_elements[i];
@@ -2334,16 +2345,24 @@ static void BuildMeshletsForFaceGroup(
 			}
 			auto position_ps = _mm_load_ps(&element.position.x);
 			
-			auto new_aabb_min_ps = _mm_min_ps(meshlet_aabb_min_ps, position_ps);
-			auto new_aabb_max_ps = _mm_max_ps(meshlet_aabb_max_ps, position_ps);
-			auto new_aabb_extent_ps = _mm_sub_ps(new_aabb_max_ps, new_aabb_min_ps);
+			auto bounds_center_to_face_center = _mm_sub_ps(center_ps, position_ps);
+			float distance_to_face = _mm_cvtss_f32(_mm_dp_ps(bounds_center_to_face_center, bounds_center_to_face_center, 0x7F));
 			
-			// Half AABB surface area x*y + y*z + z*x
-			float surface_area = _mm_cvtss_f32(_mm_dp_ps(new_aabb_extent_ps, _mm_permute_ps(new_aabb_extent_ps, 0b00'10'01), 0x7F));
-			
-			if (smallest_surface_area > surface_area) {
-				smallest_surface_area = surface_area;
+			if (smallest_distance_to_face > distance_to_face) {
+				smallest_distance_to_face = distance_to_face;
 				best_candidate_face_index = i;
+			}
+			
+			u32 new_vertex_count = 0;
+			IterateCornerList<ElementType::Face>(mesh, mesh[face_id].corner_list_base, [&](CornerID corner_id) {
+				auto& corner = mesh[corner_id];
+				u8 vertex_index = vertex_usage_map[corner.attributes_id.index];
+				if (vertex_index == 0xFF) new_vertex_count += 1;
+			});
+			
+			if (new_vertex_count == 0) {
+				best_candidate_face_index = i;
+				break;
 			}
 			
 			i += 1;
@@ -2355,6 +2374,7 @@ static void BuildMeshletsForFaceGroup(
 			ArrayEraseSwap(meshlet_candidate_elements, best_candidate_face_index);
 		}
 		
+		bool restart_meshlet = false;
 		bool kd_tree_is_empty = false;
 		if (best_face_id.index == u32_max) {
 			alignas(16) float center[4];
@@ -2367,6 +2387,21 @@ static void BuildMeshletsForFaceGroup(
 			
 			float min_distance = FLT_MAX;
 			kd_tree_is_empty = KdTreeFindClosestActiveElement(kd_tree, *(Vector3*)center, meshlet_geometry_index, best_face_id.index, min_distance);
+			
+			if (best_face_id.index != u32_max && meshlet_face_count >= meshlet_min_face_count) {
+				auto& element = kd_tree.elements[best_face_id.index];
+				auto position_ps = _mm_load_ps(&element.position.x);
+				
+				auto new_aabb_min_ps = _mm_min_ps(meshlet_aabb_min_ps, position_ps);
+				auto new_aabb_max_ps = _mm_max_ps(meshlet_aabb_max_ps, position_ps);
+				auto new_aabb_extent_ps = _mm_sub_ps(new_aabb_max_ps, new_aabb_min_ps);
+				auto old_aabb_extent_ps = _mm_sub_ps(meshlet_aabb_max_ps, meshlet_aabb_min_ps);
+				
+				float new_radius = _mm_cvtss_f32(_mm_dp_ps(new_aabb_extent_ps, new_aabb_extent_ps, 0x7F));
+				float old_radius = _mm_cvtss_f32(_mm_dp_ps(old_aabb_extent_ps, old_aabb_extent_ps, 0x7F));
+				
+				restart_meshlet = (new_radius > old_radius * discontinuous_meshlet_max_expansion);
+			}
 			
 #if COUNT_KD_TREE_LOOKUPS
 			kd_tree_lookup_count += 1;
@@ -2387,7 +2422,7 @@ static void BuildMeshletsForFaceGroup(
 			});
 		}
 		
-		if (best_face_id.index == u32_max || (meshlet_vertex_count + new_vertex_count > meshlet_max_vertex_count) || (meshlet_face_count + 1 > meshlet_max_face_count)) {
+		if (restart_meshlet || best_face_id.index == u32_max || (meshlet_vertex_count + new_vertex_count > meshlet_max_vertex_count) || (meshlet_face_count + 1 > meshlet_max_face_count)) {
 			assert(meshlet_face_count   <= meshlet_max_face_count);
 			assert(meshlet_vertex_count <= meshlet_max_vertex_count);
 			
@@ -2430,7 +2465,7 @@ static void BuildMeshletsForFaceGroup(
 			
 			ArrayAppend(meshlet_triangles, vertex_index);
 			
-			IterateCornerList<ElementType::Edge>(mesh, corner_id, [&](CornerID corner_id) {
+			IterateCornerList<ElementType::Vertex>(mesh, corner_id, [&](CornerID corner_id) {
 				auto face_id = mesh[corner_id].face_id;
 				auto& element = kd_tree.elements[face_id.index];
 				
@@ -2691,21 +2726,25 @@ static MeshletAdjacency BuildMeshletAdjacency(MeshView mesh, Allocator& allocato
 	return meshlet_adjacency;
 }
 
-static u32 CountMeshletGroupSharedEdges(MeshletAdjacency meshlet_adjacency, Array<KdTreeElement> kd_tree_elements, u32 meshlet_index, u32 targent_group_index) {
+// Compute a fraction of edges that is shared with the target meshlet group for a given meshlet.
+static float CountMeshletGroupSharedEdges(MeshletAdjacency meshlet_adjacency, Array<KdTreeElement> kd_tree_elements, u32 meshlet_index, u32 targent_group_index) {
 	u32 meshlet_begin_index = meshlet_index > 0 ? meshlet_adjacency.prefix_sum[meshlet_index - 1] : 0;
 	u32 meshlet_end_index   = meshlet_adjacency.prefix_sum[meshlet_index];
 	
 	u32 shared_edge_count = 0;
+	u32 total_edge_count  = 0;
 	for (u32 adjacency_info_index = meshlet_begin_index; adjacency_info_index < meshlet_end_index; adjacency_info_index += 1) {
 		auto adjacency_info = meshlet_adjacency.infos[adjacency_info_index];
 		
 		auto& element = kd_tree_elements[adjacency_info.meshlet_index];
+		total_edge_count += adjacency_info.shared_edge_count;
+		
 		if (element.is_active_element == 0 && element.partition_index == targent_group_index) {
 			shared_edge_count += adjacency_info.shared_edge_count;
 		}
 	}
 	
-	return shared_edge_count;
+	return total_edge_count ? (float)shared_edge_count / (float)total_edge_count : 0.f;
 }
 
 struct MeshletGroupBuildResult {
@@ -2713,17 +2752,17 @@ struct MeshletGroupBuildResult {
 	ArrayView<u32> prefix_sum;
 };
 
-static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allocator, ArrayView<Meshlet> meshlets, MeshletAdjacency meshlet_adjacency) {
+static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allocator, ArrayView<Meshlet> meshlets, MeshletAdjacency meshlet_adjacency, ArrayView<u32> meshlet_face_prefix_sum) {
 	KdTree kd_tree;
 	KdTreeBuildElementsForMeshlets(meshlets, allocator, kd_tree.elements);
 	KdTreeBuild(kd_tree, allocator);
 	
-	FixedSizeArray<u32, meshlet_group_max_meshlets> meshlet_group;
+	FixedSizeArray<u32, meshlet_group_max_meshlet_count> meshlet_group;
 	
 	Array<u32> meshlet_group_meshlet_indices;
 	Array<u32> meshlet_group_prefix_sum;
 	ArrayReserve(meshlet_group_meshlet_indices, allocator, meshlets.count);
-	ArrayReserve(meshlet_group_prefix_sum, allocator, (meshlets.count + meshlet_group_max_meshlets - 1) / meshlet_group_max_meshlets);
+	ArrayReserve(meshlet_group_prefix_sum, allocator, (meshlets.count + meshlet_group_min_meshlet_count - 1) / meshlet_group_min_meshlet_count);
 	
 	auto meshlet_group_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
 	auto meshlet_group_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
@@ -2734,7 +2773,7 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 	
 	while (true) {
 		u32 best_candidate_meshlet_index = u32_max;
-		u32 max_shared_edge_count = 0;
+		float max_shared_edge_count = 0.f;
 		
 		for (u32 i = 0; i < meshlet_group.count; i += 1) {
 			u32 meshlet_index = meshlet_group[i];
@@ -2748,8 +2787,11 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 				auto& element = kd_tree.elements[adjacency_info.meshlet_index];
 				if (element.is_active_element == 0) continue; // Meshlet is already assigned to a group.
 				
-				u32 shared_edge_count = CountMeshletGroupSharedEdges(meshlet_adjacency, kd_tree.elements, adjacency_info.meshlet_index, meshlet_group_prefix_sum.count);
+				float shared_edge_count = CountMeshletGroupSharedEdges(meshlet_adjacency, kd_tree.elements, adjacency_info.meshlet_index, meshlet_group_prefix_sum.count);
 				
+				u32 begin_face_index = adjacency_info.meshlet_index ? meshlet_face_prefix_sum[adjacency_info.meshlet_index - 1] : 0;
+				u32 end_face_index   = meshlet_face_prefix_sum[adjacency_info.meshlet_index];
+
 				if (max_shared_edge_count < shared_edge_count) {
 					max_shared_edge_count = shared_edge_count;
 					best_candidate_meshlet_index = adjacency_info.meshlet_index;
@@ -2757,6 +2799,7 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 			}
 		}
 		
+		bool restart_meshlet_group = false;
 		if (best_candidate_meshlet_index == u32_max) {
 			alignas(16) float center[4];
 			if (meshlet_group.count) {
@@ -2769,6 +2812,21 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 			float min_distance = FLT_MAX;
 			KdTreeFindClosestActiveElement(kd_tree, *(Vector3*)center, u32_max, best_candidate_meshlet_index, min_distance);
 			
+			if (best_candidate_meshlet_index != u32_max && meshlet_group.count >= meshlet_group_min_meshlet_count) {
+				auto& element = kd_tree.elements[best_candidate_meshlet_index];
+				auto position_ps = _mm_load_ps(&element.position.x);
+				
+				auto new_aabb_min_ps = _mm_min_ps(meshlet_group_aabb_min_ps, position_ps);
+				auto new_aabb_max_ps = _mm_max_ps(meshlet_group_aabb_max_ps, position_ps);
+				auto new_aabb_extent_ps = _mm_sub_ps(new_aabb_max_ps, new_aabb_min_ps);
+				auto old_aabb_extent_ps = _mm_sub_ps(meshlet_group_aabb_max_ps, meshlet_group_aabb_min_ps);
+				
+				float new_radius = _mm_cvtss_f32(_mm_dp_ps(new_aabb_extent_ps, new_aabb_extent_ps, 0x7F));
+				float old_radius = _mm_cvtss_f32(_mm_dp_ps(old_aabb_extent_ps, old_aabb_extent_ps, 0x7F));
+				
+				restart_meshlet_group = (new_radius > old_radius * discontinuous_meshlet_group_max_expansion);
+			}
+			
 #if COUNT_KD_TREE_LOOKUPS
 			kd_tree_lookup_count += 1;
 #endif // COUNT_KD_TREE_LOOKUPS
@@ -2778,7 +2836,7 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 			break;
 		}
 		
-		if (meshlet_group.count >= meshlet_group.capacity) {
+		if (restart_meshlet_group || meshlet_group.count >= meshlet_group.capacity) {
 			meshlet_group_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
 			meshlet_group_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
 			
@@ -2841,7 +2899,7 @@ static void ConvertMeshletGroupsToFaceGroups(
 	for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
 		u32 group_meshlet_end_index = meshlet_group_build_result.prefix_sum[group_index];
 		
-		FixedSizeArray<SphereBounds, meshlet_group_max_meshlets> meshlet_error_sphere_bounds;
+		FixedSizeArray<SphereBounds, meshlet_group_max_meshlet_count> meshlet_error_sphere_bounds;
 		float max_error = 0.f;
 		
 		for (u32 group_meshlet_index = group_meshlet_begin_index; group_meshlet_index < group_meshlet_end_index; group_meshlet_index += 1) {
@@ -2888,7 +2946,7 @@ static u32 BuildMeshletsAndMeshletGroupBvhNodes(Allocator& heap_allocator, Meshl
 		auto meshlet_group_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
 		auto meshlet_group_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
 		
-		FixedSizeArray<SphereBounds, meshlet_group_max_meshlets> meshlet_sphere_bounds;
+		FixedSizeArray<SphereBounds, meshlet_group_max_meshlet_count> meshlet_sphere_bounds;
 		auto meshlet_group_error_metric = meshlet_group_error_metrics[group_index];
 		
 		u32 begin_child_index = meshlets.count;
@@ -3223,9 +3281,8 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 		AppendChangedVertices(mesh, heap_allocator, changed_attribute_vertex_ids, attributes_id_to_vertex_index, vertices);
 	}
 	
-	compile_const u32 max_levels_of_detail = 16;
 	Array<VirtualGeometryLevel> levels;
-	ArrayReserve(levels, heap_allocator, max_levels_of_detail);
+	ArrayReserve(levels, heap_allocator, virtual_geometry_max_levels_of_details);
 	
 	Array<MeshletGroupBvhNode> bvh_nodes;
 	Array<Meshlet> meshlets;
@@ -3233,7 +3290,7 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 	Array<u32> meshlet_vertex_indices;
 	Array<u8>  meshlet_triangles;
 	
-	for (u32 level_index = 0; level_index < max_levels_of_detail; level_index += 1) {
+	for (u32 level_index = 0; level_index < virtual_geometry_max_levels_of_details; level_index += 1) {
 		VirtualGeometryLevel level;
 		level.begin_bvh_nodes_index = bvh_nodes.count;
 		level.begin_meshlets_index  = meshlets.count;
@@ -3243,10 +3300,10 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 		auto meshlet_build_result = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, group_index_to_bvh_node_index);
 		BuildMeshletVertexAndIndexBuffers(mesh, heap_allocator, meshlet_build_result, attributes_id_to_vertex_index, meshlet_vertex_indices, meshlet_triangles);
 		
-		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, meshlet_build_result.meshlets, meshlet_build_result.meshlet_adjacency);
+		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, meshlet_build_result.meshlets, meshlet_build_result.meshlet_adjacency, meshlet_build_result.meshlet_face_prefix_sum);
 		ConvertMeshletGroupsToFaceGroups(mesh, allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics);
 		
-		bool is_last_level = (level_index + 1 == max_levels_of_detail) || (mesh.face_count <= meshlet_max_face_count) || (last_level_meshlet_count == meshlet_build_result.meshlets.count);
+		bool is_last_level = (level_index + 1 == virtual_geometry_max_levels_of_details) || (mesh.face_count <= meshlet_max_face_count) || (last_level_meshlet_count == meshlet_build_result.meshlets.count);
 		last_level_meshlet_count = meshlet_build_result.meshlets.count;
 		
 		if (is_last_level == false) {
@@ -3279,7 +3336,7 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 		
 		for (u32 i = 0; i < bvh_node_indices.count; i += 1) bvh_node_indices[i] = i;
 		
-		FixedSizeArray<u32, max_levels_of_detail> level_bvh_root_node_indices;
+		FixedSizeArray<u32, virtual_geometry_max_levels_of_details> level_bvh_root_node_indices;
 		for (auto& level : levels) {
 			auto level_bvh_node_indices = CreateArrayView(bvh_node_indices, level.begin_bvh_nodes_index, level.end_bvh_nodes_index);
 			u32  level_root_node_index  = BuildMeshletGroupBvh(heap_allocator, bvh_nodes, level_bvh_node_indices);
