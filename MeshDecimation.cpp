@@ -1157,8 +1157,8 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 	//                           ( a00,   a01,   a02,  -g0.x, -gi.x)   (p.x)
 	// (p.x, p.y, p.z, s0, si) * ( a01,   a11,   a12,  -g0.y, -gi.y) * (p.y) + 2 * (b, -d0, -di) * (p, s0, si) + (c + d0^2 + di^2)
 	//                           ( a02,   a12,   a22,  -g0.z, -gi.z)   (p.z)
-	//                           (-g0.x, -g0.y, -g0.z,  1.0,   0.0 )   (s0 )
-	//                           (-gi.x, -gi.y, -gi.z,  0.0,   1.0 )   (si )
+	//                           (-g0.x, -g0.y, -g0.z,  q.w,   0.0 )   (s0 )
+	//                           (-gi.x, -gi.y, -gi.z,  0.0,   q.w )   (si )
 	// 
 	float weighted_error = ComputeQuadricError(q, p);
 	
@@ -1174,14 +1174,15 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 		
 		//
 		// Simplified by replacing first three lines with a dot product, and substituting -DotProduct(g, p) for (d - s * q.weight).
+		// Note that d0^2 + di^2 are added to c directly in ComputeFaceQuadricWithAttributes.
 		//
 		// p.x * (-g.x * s) +
 		// p.y * (-g.y * s) +
 		// p.z * (-g.z * s) +
-		// s * (-DotProduct(g, p) + s) +
+		// s * (-DotProduct(g, p) + s * q.weight) +
 		// -2.f * d * s;
 		//
-		float weighted_attribute_error = s * s * (1.f - 2.f * q.weight);
+		float weighted_attribute_error = s * s * -q.weight;
 		
 		weighted_error += weighted_attribute_error;
 	}
