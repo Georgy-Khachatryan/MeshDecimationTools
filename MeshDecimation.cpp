@@ -34,7 +34,7 @@ compile_const u32 meshlet_group_max_meshlet_count = 32;
 compile_const u32 meshlet_group_min_meshlet_count = 16;
 compile_const float discontinuous_meshlet_group_max_expansion = 4.f; // Sqrt of the maximum AABB expansion when adding a discontinuous meshlet to a group.
 
-compile_const u32 mehslet_group_max_bvh_branching_factor = 4;
+compile_const u32 meshlet_group_max_bvh_branching_factor = 4;
 compile_const u32 virtual_geometry_max_levels_of_details = 16;
 
 
@@ -1045,11 +1045,7 @@ static void ComputeEdgeQuadric(Quadric& quadric, const Vector3& p0, const Vector
 	ComputePlanarQuadric(quadric, normal, distance_to_triangle, DotProduct(p10, p10) * weight);
 }
 
-// TODO: Convert these constants into user editable settings.
-compile_const float attribute_weight = 1.f / (1024.f * 1024.f);
-compile_const float inversion_error  = 1.f;
-
-static void ComputeFaceQuadricWithAttributes(QuadricWithAttributes& quadric, const Vector3& p0, const Vector3& p1, const Vector3& p2, float* a0, float* a1, float* a2, u32 attribute_stride_dwords) {
+static void ComputeFaceQuadricWithAttributes(QuadricWithAttributes& quadric, const Vector3& p0, const Vector3& p1, const Vector3& p2, float* a0, float* a1, float* a2, float* attribute_weights, u32 attribute_stride_dwords) {
 	auto p10 = p1 - p0;
 	auto p20 = p2 - p0;
 	
@@ -1097,6 +1093,7 @@ static void ComputeFaceQuadricWithAttributes(QuadricWithAttributes& quadric, con
 	float a_inv_21 = DifferenceOfProducts(p10.y, n.x, p10.x, n.y) * determinant_rcp;
 	
 	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
+		float attribute_weight = attribute_weights[i];
 		float s0 = a0[i] * attribute_weight;
 		float s1 = a1[i] * attribute_weight;
 		float s2 = a2[i] * attribute_weight;
@@ -1195,8 +1192,7 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 
 #if ENABLE_ATTRIBUTE_SUPPORT
 // Attribute computation for zero weight quadrics should be handled by the caller.
-static bool ComputeWedgeAttributes(const QuadricWithAttributes& q, const Vector3& p, float* attributes, u32 attribute_stride_dwords) {
-	if constexpr (attribute_weight <= 0.f) return false;
+static bool ComputeWedgeAttributes(const QuadricWithAttributes& q, const Vector3& p, float* attributes, float* rcp_attribute_weights, u32 attribute_stride_dwords) {
 	if (q.weight < FLT_EPSILON) return false;
 	
 	float rcp_weight = 1.f / q.weight;
@@ -1206,7 +1202,7 @@ static bool ComputeWedgeAttributes(const QuadricWithAttributes& q, const Vector3
 		
 		float s = (DotProduct(g, p) + d) * rcp_weight;
 		
-		attributes[i] = s * (1.f / attribute_weight);
+		attributes[i] = s * rcp_attribute_weights[i];
 	}
 	
 	return true;
@@ -1250,9 +1246,9 @@ static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, V
 		k12 += (g.y * g.z);
 		
 		// B * b2
-		h0 += ((float)g.x * (float)d);
-		h1 += ((float)g.y * (float)d);
-		h2 += ((float)g.z * (float)d);
+		h0 += (g.x * d);
+		h1 += (g.y * d);
+		h2 += (g.z * d);
 	}
 #endif // ENABLE_ATTRIBUTE_SUPPORT
 	
@@ -1389,6 +1385,9 @@ struct alignas(CACHE_LINE_SIZE) MeshDecimationState {
 	Array<QuadricWithAttributes> wedge_quadrics;
 	Array<AttributesID> wedge_attributes_ids;
 	AttributeWedgeMap wedge_attribute_set;
+	
+	alignas(16) float attribute_weights[MAX_ATTRIBUTE_STRIDE_DWORDS];
+	alignas(16) float rcp_attribute_weights[MAX_ATTRIBUTE_STRIDE_DWORDS];
 };
 
 struct EdgeCollapseError {
@@ -1475,7 +1474,9 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 		for (u32 i = 0; i < candidate_position_count; i += 1) {
 			auto& p = candidate_positions[i];
 			
-			float error = valid_position_mask & (1u << i) ? 0.f : inversion_error;
+			compile_const float edge_collapse_inversion_error = 1.f;
+			
+			float error = valid_position_mask & (1u << i) ? 0.f : edge_collapse_inversion_error;
 			if (error > collapse_error.min_error) continue;
 			
 			
@@ -1619,7 +1620,7 @@ static void EdgeCollapseHeapInitialize(EdgeCollapseHeap& heap) {
 	EdgeCollapseHeapSiftDown(heap, 0);
 }
 
-static void InitializeMehsDecimationState(MeshView mesh, Allocator& allocator, Allocator& heap_allocator, MeshDecimationState& state) {
+static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weights, Allocator& allocator, Allocator& heap_allocator, MeshDecimationState& state) {
 	ArrayResizeMemset(state.vertex_edge_quadrics, allocator, mesh.vertex_count, 0);
 	ArrayResizeMemset(state.attribute_face_quadrics, allocator, mesh.attribute_count, 0);
 	
@@ -1627,6 +1628,20 @@ static void InitializeMehsDecimationState(MeshView mesh, Allocator& allocator, A
 	ArrayReserve(state.wedge_attributes_ids, heap_allocator, 64);
 	ArrayReserve(state.removed_edge_array,   heap_allocator, 64);
 	HashTableGrow(state.edge_duplicate_map,  heap_allocator, ComputeHashTableSize(128u));
+	
+	
+	for (u32 i = 0; i < MAX_ATTRIBUTE_STRIDE_DWORDS; i += 1) {
+		float attribute_weight = attribute_weights && i < mesh.attribute_stride_dwords ? attribute_weights[i] : 0.f;
+		
+		if (attribute_weight > FLT_EPSILON) {
+			state.attribute_weights[i]     = attribute_weight;
+			state.rcp_attribute_weights[i] = 1.f / attribute_weight;
+		} else {
+			state.attribute_weights[i]     = 1.f;
+			state.rcp_attribute_weights[i] = 1.f;
+		}
+	}
+	
 	
 	{
 		// ScopedTimer t("- Compute Face Quadrics");
@@ -1649,7 +1664,7 @@ static void InitializeMehsDecimationState(MeshView mesh, Allocator& allocator, A
 			auto* a2 = mesh[c2.attributes_id];
 			
 			QuadricWithAttributes quadric;
-			ComputeFaceQuadricWithAttributes(quadric, p0, p1, p2, a0, a1, a2, attribute_stride_dwords);
+			ComputeFaceQuadricWithAttributes(quadric, p0, p1, p2, a0, a1, a2, state.attribute_weights, attribute_stride_dwords);
 			
 			AccumulateQuadricWithAttributes(state.attribute_face_quadrics[c0.attributes_id.index], quadric, attribute_stride_dwords);
 			AccumulateQuadricWithAttributes(state.attribute_face_quadrics[c1.attributes_id.index], quadric, attribute_stride_dwords);
@@ -1774,7 +1789,7 @@ static float DecimateMeshFaceGroup(
 				auto* attributes    = mesh[attributes_id];
 				
 				state.attribute_face_quadrics[attributes_id.index] = wedge_quadric;
-				if (ComputeWedgeAttributes(wedge_quadric, collapse_error.new_position, attributes, attribute_stride_dwords) && normalize_vertex_attributes) {
+				if (ComputeWedgeAttributes(wedge_quadric, collapse_error.new_position, attributes, state.rcp_attribute_weights, attribute_stride_dwords) && normalize_vertex_attributes) {
 					normalize_vertex_attributes(attributes);
 				}
 				
@@ -1807,7 +1822,7 @@ void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& resu
 	auto mesh = BuildEditableMesh(allocator, inputs.mesh.geometry_descs, inputs.mesh.geometry_desc_count, inputs.mesh.vertex_stride_bytes);
 	
 	MeshDecimationState state;
-	InitializeMehsDecimationState(mesh, allocator, heap_allocator, state);
+	InitializeMeshDecimationState(mesh, inputs.mesh.attribute_weights, allocator, heap_allocator, state);
 	
 	
 	EdgeCollapseHeap edge_collapse_heap;
@@ -1847,12 +1862,22 @@ void FreeResultBuffers(const MeshDecimationResult& result, const SystemCallbacks
 	AllocatorFreeMemoryBlocks(heap_allocator);
 }
 
-static void DecimateMeshFaceGroups(MeshView mesh, Allocator& allocator, Allocator& heap_allocator, NormalizeVertexAttributes normalize_vertex_attributes, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<ErrorMetric> meshlet_group_error_metrics, Array<VertexID> changed_attribute_vertex_ids) {
+static void DecimateMeshFaceGroups(
+	MeshView mesh,
+	Allocator& allocator,
+	Allocator& heap_allocator,
+	NormalizeVertexAttributes normalize_vertex_attributes,
+	float* attribute_weights,
+	Array<FaceID> meshlet_group_faces,
+	Array<u32> meshlet_group_face_prefix_sum,
+	Array<ErrorMetric> meshlet_group_error_metrics,
+	Array<VertexID> changed_attribute_vertex_ids) {
+	
 	u32 allocator_high_water = allocator.memory_block_count;
 	u32 heap_allocator_high_water = heap_allocator.memory_block_count;
 	
 	MeshDecimationState state;
-	InitializeMehsDecimationState(mesh, allocator, heap_allocator, state);
+	InitializeMeshDecimationState(mesh, attribute_weights, allocator, heap_allocator, state);
 	
 	compile_const u32 vertex_group_index_locked = u32_max - 1;
 
@@ -3146,13 +3171,13 @@ static void AppendChangedVertices(MeshView mesh, Allocator& heap_allocator, Arra
 }
 
 static u32 CreateInternalMeshletGroupBvhNode(Allocator& heap_allocator, Array<MeshletGroupBvhNode>& bvh_nodes, ArrayView<u32> node_indices) {
-	assert(node_indices.count <= mehslet_group_max_bvh_branching_factor);
+	assert(node_indices.count <= meshlet_group_max_bvh_branching_factor);
 	
 	auto bvh_node_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
 	auto bvh_node_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
 	
-	FixedSizeArray<SphereBounds, mehslet_group_max_bvh_branching_factor> bvh_node_sphere_bounds;
-	FixedSizeArray<SphereBounds, mehslet_group_max_bvh_branching_factor> bvh_node_error_sphere_bounds;
+	FixedSizeArray<SphereBounds, meshlet_group_max_bvh_branching_factor> bvh_node_sphere_bounds;
+	FixedSizeArray<SphereBounds, meshlet_group_max_bvh_branching_factor> bvh_node_error_sphere_bounds;
 	
 	float max_error = 0.f;
 	for (u32 bvh_node_index : node_indices) {
@@ -3193,7 +3218,7 @@ static u32 ComputeChildSubtreeLeafCount(u32 total_leaf_count, u32 bvh_branching_
 }
 
 static u32 BuildMeshletGroupBvh(Allocator& heap_allocator, Array<MeshletGroupBvhNode>& bvh_nodes, ArrayView<u32> node_indices) {
-	compile_const u32 max_child_count = mehslet_group_max_bvh_branching_factor;
+	compile_const u32 max_child_count = meshlet_group_max_bvh_branching_factor;
 	
 	if (node_indices.count == 1)               return node_indices[0];
 	if (node_indices.count <= max_child_count) return CreateInternalMeshletGroupBvhNode(heap_allocator, bvh_nodes, node_indices);
@@ -3307,7 +3332,7 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 		last_level_meshlet_count = meshlet_build_result.meshlets.count;
 		
 		if (is_last_level == false) {
-			DecimateMeshFaceGroups(mesh, allocator, heap_allocator, inputs.mesh.normalize_vertex_attributes, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, changed_attribute_vertex_ids);
+			DecimateMeshFaceGroups(mesh, allocator, heap_allocator, inputs.mesh.normalize_vertex_attributes, inputs.mesh.attribute_weights, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, changed_attribute_vertex_ids);
 			AppendChangedVertices(mesh, heap_allocator, changed_attribute_vertex_ids, attributes_id_to_vertex_index, vertices);
 			
 			// Compact the mesh after decimation to remove unused faces and edges. TODO: Replace face and edge validity checks with asserts.

@@ -304,10 +304,21 @@ int main() {
 	geometry_descs[0].vertex_count = (u32)triangle_mesh.vertices.size();
 #endif
 	
+	compile_const float uv_weight     = 1.f / (1024.f * 1024.f);
+	compile_const float normal_weight = 1.f / (1024.f * 1024.f);
+	
+	float attribute_weights[5];
+	attribute_weights[0] = uv_weight;
+	attribute_weights[1] = uv_weight;
+	attribute_weights[2] = normal_weight;
+	attribute_weights[3] = normal_weight;
+	attribute_weights[4] = normal_weight;
+	
 	TriangleMeshDesc mesh_desc;
 	mesh_desc.geometry_descs      = geometry_descs;
 	mesh_desc.geometry_desc_count = geometry_desc_count;
 	mesh_desc.vertex_stride_bytes = sizeof(ObjVertex);
+	mesh_desc.attribute_weights   = attribute_weights;
 	mesh_desc.normalize_vertex_attributes = &NormalizeObjVertexAttributes;
 	
 	ValidatedAllocator temp_allocator;

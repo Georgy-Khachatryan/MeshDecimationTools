@@ -107,6 +107,7 @@ struct TriangleMeshDesc {
 	u32 geometry_desc_count = 0;
 	u32 vertex_stride_bytes = 0;
 	
+	float* attribute_weights = nullptr;
 	NormalizeVertexAttributes normalize_vertex_attributes;
 };
 
