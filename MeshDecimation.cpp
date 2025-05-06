@@ -42,8 +42,9 @@ compile_const u32 virtual_geometry_max_levels_of_details = 16;
 // References:
 // - Michael Garland, Paul S. Heckbert. 1997. Surface Simplification Using Quadric Error Metrics.
 // - Hugues Hoppe. 1999. New Quadric Metric for Simplifying Meshes with Appearance Attributes.
-// - HSUEH-TI DEREK LIU, XIAOTING ZHANG, CEM YUKSEL. 2024. Simplifying Triangle Meshes in the Wild.
 // - Hugues Hoppe, Steve Marschner. 2000. Efficient Minimization of New Quadric Metric for Simplifying Meshes with Appearance Attributes.
+// - HSUEH-TI DEREK LIU, XIAOTING ZHANG, CEM YUKSEL. 2024. Simplifying Triangle Meshes in the Wild.
+// - Brian Karis, Rune Stubbe, Graham Wihlidal. 2021. Nanite A Deep Dive
 //
 
 // TODO: Replace with a simpler hash function.
@@ -1039,7 +1040,7 @@ static void ComputeEdgeQuadric(Quadric& quadric, const Vector3& p0, const Vector
 	auto face_normal_direction = CrossProduct(p10, p20);
 	auto normal_direction      = CrossProduct(p10, face_normal_direction);
 	auto normal_length         = Length(normal_direction);
-	auto normal                = normal_length < FLT_EPSILON ? normal_direction : normal_direction * (1.f / normal_length); // TODO: Potential division by zero. Handle better.
+	auto normal                = normal_length < FLT_EPSILON ? normal_direction : normal_direction * (1.f / normal_length);
 	auto distance_to_triangle  = -DotProduct(normal, p1);
 	
 	ComputePlanarQuadric(quadric, normal, distance_to_triangle, DotProduct(p10, p10) * weight);
@@ -1051,7 +1052,7 @@ static void ComputeFaceQuadricWithAttributes(QuadricWithAttributes& quadric, con
 	
 	auto scaled_normal       = CrossProduct(p10, p20);
 	auto twice_triangle_area = Length(scaled_normal);
-	auto n                   = twice_triangle_area < FLT_EPSILON ? scaled_normal : scaled_normal * (1.f / twice_triangle_area); // TODO: Potential division by zero. Handle better.
+	auto n                   = twice_triangle_area < FLT_EPSILON ? scaled_normal : scaled_normal * (1.f / twice_triangle_area);
 	
 	float weight = twice_triangle_area * 0.5f;
 	ComputePlanarQuadric(quadric, n, -DotProduct(n, p0), weight);
@@ -1299,7 +1300,7 @@ static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, V
 }
 
 // Check if any triangle around the collapsed edge is flipped or becomes zero area, excluding collapsed triangles.
-static u32 ValidateEdgeCollapsePositions(MeshView mesh, Edge edge, Vector3* candidate_positions, u32 candidate_position_count) {
+static u32 ValidateEdgeCollapsePositions(MeshView mesh, Edge edge, float rcp_position_weight, Vector3* candidate_positions, u32 candidate_position_count) {
 	u32 valid_position_mask = (1u << candidate_position_count) - 1u;
 	
 	auto check_triangle_flip_for_vertex = [&](CornerID corner_id)-> IterationControl {
@@ -1327,7 +1328,7 @@ static u32 ValidateEdgeCollapsePositions(MeshView mesh, Edge edge, Vector3* cand
 		// Replaced vertex count == 2 is true for triangles that would get collapsed, we don't need to check if they flip.
 		if (replaced_vertex_count == 1) {
 			for (u32 i = 0; i < candidate_position_count; i += 1) {
-				p[replaced_vertex_index] = candidate_positions[i];
+				p[replaced_vertex_index] = candidate_positions[i] * rcp_position_weight;
 				
 				auto n1 = CrossProduct(p[1] - p[0], p[2] - p[0]);
 				
@@ -1389,6 +1390,9 @@ struct alignas(CACHE_LINE_SIZE) MeshDecimationState {
 	
 	alignas(16) float attribute_weights[MAX_ATTRIBUTE_STRIDE_DWORDS];
 	alignas(16) float rcp_attribute_weights[MAX_ATTRIBUTE_STRIDE_DWORDS];
+	
+	float position_weight;
+	float rcp_position_weight;
 };
 
 struct EdgeCollapseError {
@@ -1435,7 +1439,7 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 		auto attribute_id = mesh[corner_id].attributes_id;
 		
 		if (AttributeWedgeMapFind(state.wedge_attribute_set, attribute_id) == u32_max) {
-			AttributeWedgeMapAdd(state.wedge_attribute_set, attribute_id, state.wedge_quadrics.count);
+			AttributeWedgeMapAdd(state.wedge_attribute_set,  attribute_id,   state.wedge_quadrics.count);
 			ArrayAppendMaybeGrow(state.wedge_quadrics,       heap_allocator, state.attribute_face_quadrics[attribute_id.index]);
 			ArrayAppendMaybeGrow(state.wedge_attributes_ids, heap_allocator, attribute_id);
 		}
@@ -1456,8 +1460,8 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 		// Try a few different positions for the new vertex.
 		compile_const u32 candidate_position_count = 3;
 		Vector3 candidate_positions[candidate_position_count];
-		candidate_positions[0] = v0.position;
-		candidate_positions[1] = v1.position;
+		candidate_positions[0] = v0.position * state.position_weight;
+		candidate_positions[1] = v1.position * state.position_weight;
 		candidate_positions[2] = (candidate_positions[0] + candidate_positions[1]) * 0.5f;
 		
 		QuadricWithAttributes total_quadric;
@@ -1471,7 +1475,7 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 		// Override average with optimal position if it can be computed.
 		ComputeOptimalVertexPosition(total_quadric, candidate_positions[2], attribute_stride_dwords);
 		
-		u32 valid_position_mask = ValidateEdgeCollapsePositions(mesh, edge, candidate_positions, candidate_position_count);
+		u32 valid_position_mask = ValidateEdgeCollapsePositions(mesh, edge, state.rcp_position_weight, candidate_positions, candidate_position_count);
 		for (u32 i = 0; i < candidate_position_count; i += 1) {
 			auto& p = candidate_positions[i];
 			
@@ -1645,12 +1649,10 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 	
 	
 	{
-		// ScopedTimer t("- Compute Face Quadrics");
-		
-		u32 attribute_stride_dwords = mesh.attribute_stride_dwords;
+		float twice_mesh_surface_area = 0.f;
 		for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
 			auto& face = mesh[face_id];
-			if (face.corner_list_base.index == u32_max) continue;
+			assert(face.corner_list_base.index != u32_max);
 			
 			auto& c1 = mesh[face.corner_list_base];
 			auto& c0 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev];
@@ -1659,6 +1661,37 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 			auto p0 = mesh[c0.vertex_id].position;
 			auto p1 = mesh[c1.vertex_id].position;
 			auto p2 = mesh[c2.vertex_id].position;
+			
+			twice_mesh_surface_area += Length(CrossProduct(p1 - p0, p2 - p0));
+		}
+		
+		//
+		// Scale the mesh such that average face surface area is equal to 1.0.
+		// See [Karis 2021] for reference.
+		//
+		float face_surface_area       = mesh.face_count ? twice_mesh_surface_area * 0.5f / (float)mesh.face_count : 1.f;
+		float rcp_mesh_position_scale = sqrtf(face_surface_area);
+		float mesh_position_scale     = 1.f / rcp_mesh_position_scale;
+		
+		bool is_valid_position_scale = (rcp_mesh_position_scale > FLT_EPSILON);
+		state.position_weight     = is_valid_position_scale ? mesh_position_scale     : 1.f;
+		state.rcp_position_weight = is_valid_position_scale ? rcp_mesh_position_scale : 1.f;
+	}
+	
+	{
+		float position_weight = state.position_weight;
+		u32 attribute_stride_dwords = mesh.attribute_stride_dwords;
+		for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
+			auto& face = mesh[face_id];
+			assert(face.corner_list_base.index != u32_max);
+			
+			auto& c1 = mesh[face.corner_list_base];
+			auto& c0 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev];
+			auto& c2 = mesh[c1.corner_list_around[(u32)ElementType::Face].next];
+			
+			auto p0 = mesh[c0.vertex_id].position * position_weight;
+			auto p1 = mesh[c1.vertex_id].position * position_weight;
+			auto p2 = mesh[c2.vertex_id].position * position_weight;
 			
 			auto* a0 = mesh[c0.attributes_id];
 			auto* a1 = mesh[c1.attributes_id];
@@ -1674,11 +1707,10 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 	}
 	
 	{
-		// ScopedTimer t("- Compute Edge Quadrics");
-		
+		float position_weight = state.position_weight;
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
-			if (edge.corner_list_base.index == u32_max) continue;
+			assert(edge.corner_list_base.index != u32_max);
 			
 			auto& c0 = mesh[edge.corner_list_base];
 			auto& c1 = mesh[c0.corner_list_around[(u32)ElementType::Face].next];
@@ -1710,9 +1742,9 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 			auto v1 = c1.vertex_id;
 			auto v2 = c2.vertex_id;
 			
-			auto p0 = mesh[v0].position;
-			auto p1 = mesh[v1].position;
-			auto p2 = mesh[v2].position;
+			auto p0 = mesh[v0].position * position_weight;
+			auto p1 = mesh[v1].position * position_weight;
+			auto p2 = mesh[v2].position * position_weight;
 			
 			Quadric quadric;
 			ComputeEdgeQuadric(quadric, p0, p1, p2, 1.f / edge_degree);
@@ -1767,9 +1799,11 @@ static float DecimateMeshFaceGroup(
 		
 		// Update vertices.
 		{
+			auto scaled_new_position = collapse_error.new_position * state.rcp_position_weight;
+			
 			auto& edge = mesh[edge_id];
-			mesh[edge.vertex_0].position = collapse_error.new_position;
-			mesh[edge.vertex_1].position = collapse_error.new_position;
+			mesh[edge.vertex_0].position = scaled_new_position;
+			mesh[edge.vertex_1].position = scaled_new_position;
 			
 			Quadric quadric = state.vertex_edge_quadrics[edge.vertex_0.index];
 			AccumulateQuadric(quadric, state.vertex_edge_quadrics[edge.vertex_1.index]);
@@ -1810,7 +1844,7 @@ static float DecimateMeshFaceGroup(
 	HashTableClear(state.edge_duplicate_map);
 	state.removed_edge_array.count = 0;
 	
-	return sqrtf(max_error);
+	return sqrtf(max_error) * state.rcp_position_weight;
 }
 
 void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& result, const SystemCallbacks& callbacks) {
@@ -3250,9 +3284,8 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 	// Virtual Geometry TODO:
 	//
 	// - Build a BVH over groups.
-	// - Allow arbitrary vertex formats (<32 DWORDs). Expose a callback for handling newly generated attributes.
+	// - Allow arbitrary vertex formats (<32 DWORDs).
 	// - Rework allocation patterns. Minimize size, number, and duration of allocations. Implement allocator for growable outputs.
-	// - Scale mesh and attributes before simplification.
 	//
 
 	Allocator allocator;

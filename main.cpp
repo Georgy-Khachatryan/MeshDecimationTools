@@ -194,7 +194,7 @@ void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
 	}
 	
 	// Output an LOD with a given target error.
-	float target_error = 0.001f;
+	float target_error = 0.05f;
 	
 	u32 group_index = u32_max;
 	for (u32 meshlet_index = 0; meshlet_index < mesh.meshlets.count; meshlet_index += 1) {
@@ -304,8 +304,8 @@ int main() {
 	geometry_descs[0].vertex_count = (u32)triangle_mesh.vertices.size();
 #endif
 	
-	compile_const float uv_weight     = 1.f / (1024.f * 1024.f);
-	compile_const float normal_weight = 1.f / (1024.f * 1024.f);
+	compile_const float uv_weight     = 1.f;
+	compile_const float normal_weight = 1.f;
 	
 	float attribute_weights[5];
 	attribute_weights[0] = uv_weight;
