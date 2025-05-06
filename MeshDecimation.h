@@ -76,6 +76,7 @@ struct ErrorMetric {
 	float        error  = 0.f;
 };
 
+
 template<typename T>
 struct ArrayView {
 	using ValueType = T;
@@ -91,6 +92,21 @@ struct ArrayView {
 	const T* begin() const { return data; }
 	const T* end() const { return data + count; }
 };
+
+
+using ReallocCallback = void* (*)(void* old_memory_block, u64 size_bytes, void* user_data);
+
+struct AllocatorCallbacks {
+	ReallocCallback realloc = nullptr;
+	void* user_data = nullptr;
+};
+
+struct SystemCallbacks {
+	// Optional memory allocation callbacks. If they're not provided the system falls back to realloc().
+	AllocatorCallbacks temp_allocator; // Memory blocks are allocated and freed in stack order.
+	AllocatorCallbacks heap_allocator; // Memory blocks are allocated and freed in any order.
+};
+
 
 using NormalizeVertexAttributes = void(*)(float*);
 
@@ -117,9 +133,6 @@ struct VirtualGeometryBuildInputs {
 	// TODO: Custom meshlet size.
 	// u32 meshlet_max_vertex_count   = 128;
 	// u32 meshlet_max_triangle_count = 128;
-	
-	// TODO: Custom BVH format.
-	// u32 mehslet_group_bvh_max_branching_factor = 4;
 };
 
 struct MeshDecimationInputs {
@@ -143,13 +156,13 @@ struct alignas(16) Meshlet {
 	
 	// Error metric of this meshlet. Transferred from the group this meshlet was built from.
 	ErrorMetric current_level_error_metric;
-	// current_level_error_metric is extracted from this BVH node.
-	u32 current_level_bvh_node_index = 0;
+	// current_level_error_metric is extracted from this meshlet group.
+	u32 current_level_meshlet_group_index = 0;
 	
 	// Error metric of one level coarser representation of this meshlet. Transferred from the group that was built using this meshlet.
 	ErrorMetric coarser_level_error_metric;
-	// coarser_level_error_metric is extracted from this BVH node.
-	u32 coarser_level_bvh_node_index = 0;
+	// coarser_level_error_metric is extracted from this meshlet group.
+	u32 coarser_level_meshlet_group_index = 0;
 	
 	u32 begin_vertex_indices_index = 0;
 	u32 end_vertex_indices_index   = 0;
@@ -160,29 +173,7 @@ struct alignas(16) Meshlet {
 	u32 geometry_index = 0;
 };
 
-struct MeshletGroupInternalBvhNodeData {
-	u32 child_indices[4];
-};
-
-struct MeshletGroupLeafBvhNodeData {
-	u32 begin_child_index;
-	u32 end_child_index;
-};
-
-using ReallocCallback = void* (*)(void* old_memory_block, u64 size_bytes, void* user_data);
-
-struct AllocatorCallbacks {
-	ReallocCallback realloc = nullptr;
-	void* user_data = nullptr;
-};
-
-struct SystemCallbacks {
-	// Optional memory allocation callbacks. If they're not provided the system falls back to realloc().
-	AllocatorCallbacks temp_allocator; // Memory blocks are allocated and freed in stack order.
-	AllocatorCallbacks heap_allocator; // Memory blocks are allocated and freed in any order.
-};
-
-struct alignas(16) MeshletGroupBvhNode {
+struct alignas(16) MeshletGroup {
 	// Bounding box over child bounding boxes.
 	alignas(16) Vector3 aabb_min;
 	alignas(16) Vector3 aabb_max;
@@ -194,36 +185,25 @@ struct alignas(16) MeshletGroupBvhNode {
 	// Leaf nodes store coarser_level_error_metric from child meshlets (it is the same by construction).
 	ErrorMetric error_metric;
 	
-	union {
-		// Internal nodes store indices of child meshlet group BVH nodes.
-		MeshletGroupInternalBvhNodeData internal;
-		
-		// Leaf nodes store a range of meshlet indices.
-		MeshletGroupLeafBvhNodeData leaf;
-	};
-	
-	bool is_leaf_node = false;
+	u32 begin_meshlet_index = 0;
+	u32 end_meshlet_index   = 0;
 };
 
 struct VirtualGeometryLevel {
-	u32 begin_bvh_nodes_index = 0;
-	u32 end_bvh_nodes_index   = 0;
+	u32 begin_meshlet_groups_index = 0;
+	u32 end_meshlet_groups_index   = 0;
 	
 	u32 begin_meshlets_index = 0;
 	u32 end_meshlets_index   = 0;
-	
-	u32 meshlet_group_bvh_root_node_index = 0;
 };
 
 struct VirtualGeometryBuildResult {
-	ArrayView<MeshletGroupBvhNode>  bvh_nodes;
+	ArrayView<MeshletGroup>         meshlet_groups;
 	ArrayView<Meshlet>              meshlets;
 	ArrayView<u32>                  meshlet_vertex_indices;
 	ArrayView<u8>                   meshlet_triangles;
 	ArrayView<float>                vertices;
 	ArrayView<VirtualGeometryLevel> levels;
-	
-	u32 meshlet_group_bvh_root_node_index = 0;
 };
 
 struct MeshDecimationResult {
@@ -238,5 +218,7 @@ void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& resu
 
 void FreeResultBuffers(const VirtualGeometryBuildResult& result, const SystemCallbacks& callbacks);
 void FreeResultBuffers(const MeshDecimationResult& result, const SystemCallbacks& callbacks);
+
+SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds);
 
 #endif // MESHDECIMATION_H

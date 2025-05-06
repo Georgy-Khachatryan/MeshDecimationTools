@@ -34,7 +34,6 @@ compile_const u32 meshlet_group_max_meshlet_count = 32;
 compile_const u32 meshlet_group_min_meshlet_count = 16;
 compile_const float discontinuous_meshlet_group_max_expansion = 4.f; // Sqrt of the maximum AABB expansion when adding a discontinuous meshlet to a group.
 
-compile_const u32 meshlet_group_max_bvh_branching_factor = 4;
 compile_const u32 virtual_geometry_max_levels_of_details = 16;
 
 
@@ -1927,7 +1926,7 @@ static void DecimateMeshFaceGroups(
 			for (u32 face_index = begin_face_index; face_index < end_face_index; face_index += 1) {
 				auto face_id = meshlet_group_faces[face_index];
 				auto& face = mesh[face_id];
-				if (face.corner_list_base.index == u32_max) continue;
+				assert(face.corner_list_base.index != u32_max);
 				
 				IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
 					auto& corner = mesh[corner_id];
@@ -1953,7 +1952,7 @@ static void DecimateMeshFaceGroups(
 		
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
-			if (edge.corner_list_base.index == u32_max) continue;
+			assert(edge.corner_list_base.index != u32_max);
 			
 			u32 group_index_0 = vertex_group_indices[edge.vertex_0.index];
 			u32 group_index_1 = vertex_group_indices[edge.vertex_1.index];
@@ -1979,7 +1978,7 @@ static void DecimateMeshFaceGroups(
 		ArrayResize(meshlet_group_edge_ids, allocator, prefix_sum);
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
-			if (edge.corner_list_base.index == u32_max) continue;
+			assert(edge.corner_list_base.index != u32_max);
 			
 			u32 group_index_0 = vertex_group_indices[edge.vertex_0.index];
 			u32 group_index_1 = vertex_group_indices[edge.vertex_1.index];
@@ -2241,7 +2240,7 @@ static bool KdTreeFindClosestActiveElement(KdTree& kd_tree, const Vector3& point
 	return should_prune;
 }
 
-static SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds) {
+SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds) {
 	u32 aabb_min_index[3] = { 0, 0, 0 };
 	u32 aabb_max_index[3] = { 0, 0, 0 };
 	
@@ -2576,7 +2575,7 @@ static void BuildMeshletsForFaceGroup(
 }
 
 // Note that FaceIDs inside groups are going to be scrambled inside groups during KdTree build. This leaves prefix sum in a valid, but different state.
-static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& allocator, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<ErrorMetric> meshlet_group_error_metrics, u32 group_index_to_bvh_node_index) {
+static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& allocator, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<ErrorMetric> meshlet_group_error_metrics, u32 meshlet_group_base_index) {
 	KdTree kd_tree;
 	KdTreeBuildElementsForFaces(mesh, allocator, kd_tree.elements);
 	ArrayReserve(kd_tree.nodes, allocator, kd_tree.elements.count * 2);
@@ -2681,7 +2680,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 		// For the level zero we don't have them, so this error metric will be kept as is.
 		meshlet.current_level_error_metric.bounds = meshlet_sphere_bounds;
 		meshlet.current_level_error_metric.error  = 0.f;
-		meshlet.current_level_bvh_node_index      = u32_max;
+		meshlet.current_level_meshlet_group_index = u32_max;
 		
 		// All meshlets faces are guaranteed to come from the same geometry.
 		meshlet.geometry_index = mesh[mesh[meshlet_corners[begin_corner_index]].face_id].geometry_index;
@@ -2696,8 +2695,8 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 		auto source_meshlet_group_error_metric = meshlet_group_error_metrics[group_index];
 		for (u32 meshlet_index = meshlet_begin_index; meshlet_index < meshlet_end_index; meshlet_index += 1) {
 			auto& meshlet = meshlets[meshlet_index];
-			meshlet.current_level_error_metric   = source_meshlet_group_error_metric;
-			meshlet.current_level_bvh_node_index = group_index + group_index_to_bvh_node_index;
+			meshlet.current_level_error_metric        = source_meshlet_group_error_metric;
+			meshlet.current_level_meshlet_group_index = group_index + meshlet_group_base_index;
 		}
 
 		meshlet_begin_index = meshlet_end_index;
@@ -2988,16 +2987,16 @@ static void ConvertMeshletGroupsToFaceGroups(
 	}
 }
 
-static u32 BuildMeshletsAndMeshletGroupBvhNodes(Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<ErrorMetric> meshlet_group_error_metrics, Array<MeshletGroupBvhNode>& bvh_nodes, Array<Meshlet>& meshlets) {
-	if (bvh_nodes.capacity == 0) {
-		ArrayReserve(bvh_nodes, heap_allocator, meshlet_group_build_result.prefix_sum.count * 4);
+static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<ErrorMetric> meshlet_group_error_metrics, Array<MeshletGroup>& meshlet_groups, Array<Meshlet>& meshlets) {
+	if (meshlet_groups.capacity == 0) {
+		ArrayReserve(meshlet_groups, heap_allocator, meshlet_group_build_result.prefix_sum.count * 4);
 	}
 	
 	if (meshlets.capacity == 0) {
 		ArrayReserve(meshlets, heap_allocator, meshlet_build_result.meshlets.count * 4);
 	}
 	
-	u32 group_index_to_bvh_node_index = bvh_nodes.count;
+	u32 meshlet_group_base_index = meshlet_groups.count;
 	
 	u32 group_meshlet_begin_index = 0;
 	for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
@@ -3009,13 +3008,13 @@ static u32 BuildMeshletsAndMeshletGroupBvhNodes(Allocator& heap_allocator, Meshl
 		FixedSizeArray<SphereBounds, meshlet_group_max_meshlet_count> meshlet_sphere_bounds;
 		auto meshlet_group_error_metric = meshlet_group_error_metrics[group_index];
 		
-		u32 begin_child_index = meshlets.count;
+		u32 begin_meshlet_index = meshlets.count;
 		for (u32 group_meshlet_index = group_meshlet_begin_index; group_meshlet_index < group_meshlet_end_index; group_meshlet_index += 1) {
 			u32 meshlet_index = meshlet_group_build_result.meshlet_indices[group_meshlet_index];
 			
 			auto& meshlet = meshlet_build_result.meshlets[meshlet_index];
-			meshlet.coarser_level_error_metric   = meshlet_group_error_metric;
-			meshlet.coarser_level_bvh_node_index = group_index + group_index_to_bvh_node_index;
+			meshlet.coarser_level_error_metric        = meshlet_group_error_metric;
+			meshlet.coarser_level_meshlet_group_index = group_index + meshlet_group_base_index;
 			
 			meshlet_group_aabb_min_ps = _mm_min_ps(meshlet_group_aabb_min_ps, _mm_load_ps(&meshlet.aabb_min.x));
 			meshlet_group_aabb_max_ps = _mm_max_ps(meshlet_group_aabb_max_ps, _mm_load_ps(&meshlet.aabb_max.x));
@@ -3024,24 +3023,21 @@ static u32 BuildMeshletsAndMeshletGroupBvhNodes(Allocator& heap_allocator, Meshl
 			
 			ArrayAppendMaybeGrow(meshlets, heap_allocator, meshlet);
 		}
-		u32 end_child_index = meshlets.count;
+		u32 end_meshlet_index = meshlets.count;
 		
-		MeshletGroupBvhNode bvh_node;
-		_mm_store_ps(&bvh_node.aabb_min.x, meshlet_group_aabb_min_ps);
-		_mm_store_ps(&bvh_node.aabb_max.x, meshlet_group_aabb_max_ps);
+		MeshletGroup meshlet_group;
+		_mm_store_ps(&meshlet_group.aabb_min.x, meshlet_group_aabb_min_ps);
+		_mm_store_ps(&meshlet_group.aabb_max.x, meshlet_group_aabb_max_ps);
 		
-		bvh_node.geometric_sphere_bounds = ComputeSphereBoundsUnion(CreateArrayView(meshlet_sphere_bounds));
-		bvh_node.error_metric            = meshlet_group_error_metric;
-		bvh_node.leaf.begin_child_index  = begin_child_index;
-		bvh_node.leaf.end_child_index    = end_child_index;
-		bvh_node.is_leaf_node            = true;
+		meshlet_group.geometric_sphere_bounds = ComputeSphereBoundsUnion(CreateArrayView(meshlet_sphere_bounds));
+		meshlet_group.error_metric            = meshlet_group_error_metric;
+		meshlet_group.begin_meshlet_index     = begin_meshlet_index;
+		meshlet_group.end_meshlet_index       = end_meshlet_index;
 		
-		ArrayAppendMaybeGrow(bvh_nodes, heap_allocator, bvh_node);
+		ArrayAppendMaybeGrow(meshlet_groups, heap_allocator, meshlet_group);
 		
 		group_meshlet_begin_index = group_meshlet_end_index;
 	}
-
-	return group_index_to_bvh_node_index;
 }
 
 template<typename ElementID>
@@ -3205,85 +3201,11 @@ static void AppendChangedVertices(MeshView mesh, Allocator& heap_allocator, Arra
 	}
 }
 
-static u32 CreateInternalMeshletGroupBvhNode(Allocator& heap_allocator, Array<MeshletGroupBvhNode>& bvh_nodes, ArrayView<u32> node_indices) {
-	assert(node_indices.count <= meshlet_group_max_bvh_branching_factor);
-	
-	auto bvh_node_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
-	auto bvh_node_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
-	
-	FixedSizeArray<SphereBounds, meshlet_group_max_bvh_branching_factor> bvh_node_sphere_bounds;
-	FixedSizeArray<SphereBounds, meshlet_group_max_bvh_branching_factor> bvh_node_error_sphere_bounds;
-	
-	float max_error = 0.f;
-	for (u32 bvh_node_index : node_indices) {
-		auto& bvh_node = bvh_nodes[bvh_node_index];
-		
-		bvh_node_aabb_min_ps = _mm_min_ps(bvh_node_aabb_min_ps, _mm_load_ps(&bvh_node.aabb_min.x));
-		bvh_node_aabb_max_ps = _mm_max_ps(bvh_node_aabb_max_ps, _mm_load_ps(&bvh_node.aabb_max.x));
-		
-		ArrayAppend(bvh_node_sphere_bounds, bvh_node.geometric_sphere_bounds);
-		ArrayAppend(bvh_node_error_sphere_bounds, bvh_node.error_metric.bounds);
-		max_error = bvh_node.error_metric.error > max_error ? bvh_node.error_metric.error : max_error;
-	}
-	
-	MeshletGroupBvhNode bvh_node;
-	_mm_store_ps(&bvh_node.aabb_min.x, bvh_node_aabb_min_ps);
-	_mm_store_ps(&bvh_node.aabb_max.x, bvh_node_aabb_max_ps);
-	
-	memset(bvh_node.internal.child_indices, 0, sizeof(bvh_node.internal.child_indices));
-	memcpy(bvh_node.internal.child_indices, node_indices.data, node_indices.count * sizeof(u32));
-	
-	bvh_node.geometric_sphere_bounds = ComputeSphereBoundsUnion(CreateArrayView(bvh_node_sphere_bounds));
-	bvh_node.error_metric.bounds     = ComputeSphereBoundsUnion(CreateArrayView(bvh_node_error_sphere_bounds));
-	bvh_node.error_metric.error      = max_error;
-	bvh_node.is_leaf_node            = false;
-	
-	u32 node_index = bvh_nodes.count;
-	ArrayAppendMaybeGrow(bvh_nodes, heap_allocator, bvh_node);
-	
-	return node_index;
-}
-
-static u32 ComputeChildSubtreeLeafCount(u32 total_leaf_count, u32 bvh_branching_factor) {
-	// Compute subtree_size such that the subtree is guaranteed to be full.
-	u32 subtree_size = bvh_branching_factor;
-	while (subtree_size * bvh_branching_factor < total_leaf_count) subtree_size *= bvh_branching_factor;
-	
-	return subtree_size;
-}
-
-static u32 BuildMeshletGroupBvh(Allocator& heap_allocator, Array<MeshletGroupBvhNode>& bvh_nodes, ArrayView<u32> node_indices) {
-	compile_const u32 max_child_count = meshlet_group_max_bvh_branching_factor;
-	
-	if (node_indices.count == 1)               return node_indices[0];
-	if (node_indices.count <= max_child_count) return CreateInternalMeshletGroupBvhNode(heap_allocator, bvh_nodes, node_indices);
-	
-	u32 subtree_size = ComputeChildSubtreeLeafCount(node_indices.count, max_child_count);
-	
-	// TODO: Sort leaf nodes according to position or error.
-	
-	FixedSizeArray<u32, max_child_count> child_node_indices;
-	for (u32 i = 0; i < max_child_count; i += 1) {
-		u32 begin_index = (i + 0) * subtree_size;
-		u32 end_index   = (i + 1) * subtree_size;
-		
-		bool is_last_child = (end_index >= node_indices.count);
-		if (is_last_child) end_index = node_indices.count;
-		
-		u32 child_node_index = BuildMeshletGroupBvh(heap_allocator, bvh_nodes, CreateArrayView(node_indices, begin_index, end_index));
-		ArrayAppend(child_node_indices, child_node_index);
-
-		if (is_last_child) break;
-	}
-	
-	return CreateInternalMeshletGroupBvhNode(heap_allocator, bvh_nodes, CreateArrayView(child_node_indices));
-}
 
 void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeometryBuildResult& result, const SystemCallbacks& callbacks) {
 	//
 	// Virtual Geometry TODO:
 	//
-	// - Build a BVH over groups.
 	// - Allow arbitrary vertex formats (<32 DWORDs).
 	// - Rework allocation patterns. Minimize size, number, and duration of allocations. Implement allocator for growable outputs.
 	//
@@ -3311,7 +3233,7 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 	}
 	ArrayAppend(meshlet_group_face_prefix_sum, meshlet_group_faces.count);
 	
-	u32 group_index_to_bvh_node_index = 0;
+	u32 meshlet_group_base_index = 0;
 	u32 last_level_meshlet_count = u32_max;
 	
 	
@@ -3343,20 +3265,16 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 	Array<VirtualGeometryLevel> levels;
 	ArrayReserve(levels, heap_allocator, virtual_geometry_max_levels_of_details);
 	
-	Array<MeshletGroupBvhNode> bvh_nodes;
-	Array<Meshlet> meshlets;
+	Array<MeshletGroup> meshlet_groups;
+	Array<Meshlet>      meshlets;
 	
 	Array<u32> meshlet_vertex_indices;
 	Array<u8>  meshlet_triangles;
 	
 	for (u32 level_index = 0; level_index < virtual_geometry_max_levels_of_details; level_index += 1) {
-		VirtualGeometryLevel level;
-		level.begin_bvh_nodes_index = bvh_nodes.count;
-		level.begin_meshlets_index  = meshlets.count;
-		
 		u32 allocator_high_water = allocator.memory_block_count;
 		
-		auto meshlet_build_result = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, group_index_to_bvh_node_index);
+		auto meshlet_build_result = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, meshlet_group_base_index);
 		BuildMeshletVertexAndIndexBuffers(mesh, heap_allocator, meshlet_build_result, attributes_id_to_vertex_index, meshlet_vertex_indices, meshlet_triangles);
 		
 		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, meshlet_build_result.meshlets, meshlet_build_result.meshlet_adjacency, meshlet_build_result.meshlet_face_prefix_sum);
@@ -3369,7 +3287,7 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 			DecimateMeshFaceGroups(mesh, allocator, heap_allocator, inputs.mesh.normalize_vertex_attributes, inputs.mesh.attribute_weights, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, changed_attribute_vertex_ids);
 			AppendChangedVertices(mesh, heap_allocator, changed_attribute_vertex_ids, attributes_id_to_vertex_index, vertices);
 			
-			// Compact the mesh after decimation to remove unused faces and edges. TODO: Replace face and edge validity checks with asserts.
+			// Compact the mesh after decimation to remove unused faces and edges.
 			CompactMesh(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum);
 		} else {
 			// There is no coarser version of the mesh. Set meshlet group errors to FLT_MAX to make sure LOD
@@ -3377,38 +3295,23 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 			for (auto& error_metric : meshlet_group_error_metrics) error_metric.error = FLT_MAX;
 		}
 		
+		VirtualGeometryLevel level;
+		level.begin_meshlet_groups_index = meshlet_groups.count;
+		level.begin_meshlets_index       = meshlets.count;
 		
-		group_index_to_bvh_node_index = BuildMeshletsAndMeshletGroupBvhNodes(heap_allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_error_metrics, bvh_nodes, meshlets);
+		meshlet_group_base_index = meshlet_groups.count;
+		BuildMeshletsAndMeshletGroups(heap_allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_error_metrics, meshlet_groups, meshlets);
 		
-		AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
-		
-		level.end_bvh_nodes_index = bvh_nodes.count;
+		level.end_meshlet_groups_index = meshlet_groups.count;
 		level.end_meshlets_index  = meshlets.count;
 		ArrayAppend(levels, level);
+		
+		AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 		
 		if (is_last_level) break;
 	}
 	
-	{
-		Array<u32> bvh_node_indices;
-		ArrayResize(bvh_node_indices, allocator, bvh_nodes.count);
-		
-		for (u32 i = 0; i < bvh_node_indices.count; i += 1) bvh_node_indices[i] = i;
-		
-		FixedSizeArray<u32, virtual_geometry_max_levels_of_details> level_bvh_root_node_indices;
-		for (auto& level : levels) {
-			auto level_bvh_node_indices = CreateArrayView(bvh_node_indices, level.begin_bvh_nodes_index, level.end_bvh_nodes_index);
-			u32  level_root_node_index  = BuildMeshletGroupBvh(heap_allocator, bvh_nodes, level_bvh_node_indices);
-			
-			level.meshlet_group_bvh_root_node_index = level_root_node_index;
-			ArrayAppend(level_bvh_root_node_indices, level_root_node_index);
-		}
-		
-		u32 root_node_index = BuildMeshletGroupBvh(heap_allocator, bvh_nodes, CreateArrayView(level_bvh_root_node_indices));
-		result.meshlet_group_bvh_root_node_index = root_node_index;
-	}
-	
-	result.bvh_nodes              = CreateArrayView(bvh_nodes);
+	result.meshlet_groups         = CreateArrayView(meshlet_groups);
 	result.meshlets               = CreateArrayView(meshlets);
 	result.meshlet_vertex_indices = CreateArrayView(meshlet_vertex_indices);
 	result.meshlet_triangles      = CreateArrayView(meshlet_triangles);
@@ -3423,7 +3326,7 @@ void FreeResultBuffers(const VirtualGeometryBuildResult& result, const SystemCal
 	Allocator heap_allocator;
 	InitializeAllocator(heap_allocator, callbacks.heap_allocator);
 	
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.bvh_nodes.data;
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.meshlet_groups.data;
 	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.meshlets.data;
 	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.meshlet_vertex_indices.data;
 	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.meshlet_triangles.data;
