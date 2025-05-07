@@ -207,8 +207,8 @@ void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
 		if (draw_meshlet == false) continue;
 		
 #if 0
-		if (group_index != meshlet.coarser_level_bvh_node_index) {
-			group_index = meshlet.coarser_level_bvh_node_index;
+		if (group_index != meshlet.coarser_level_meshlet_group_index) {
+			group_index = meshlet.coarser_level_meshlet_group_index;
 			fprintf(file, "o Group%u\n", group_index);
 		}
 #else

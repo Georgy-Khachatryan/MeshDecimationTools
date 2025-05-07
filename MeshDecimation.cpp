@@ -1299,7 +1299,7 @@ static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, V
 }
 
 // Check if any triangle around the collapsed edge is flipped or becomes zero area, excluding collapsed triangles.
-static u32 ValidateEdgeCollapsePositions(MeshView mesh, Edge edge, float rcp_position_weight, Vector3* candidate_positions, u32 candidate_position_count) {
+static u32 ValidateEdgeCollapsePositions(MeshView mesh, Edge edge, Vector3* candidate_positions, u32 candidate_position_count) {
 	u32 valid_position_mask = (1u << candidate_position_count) - 1u;
 	
 	auto check_triangle_flip_for_vertex = [&](CornerID corner_id)-> IterationControl {
@@ -1327,7 +1327,7 @@ static u32 ValidateEdgeCollapsePositions(MeshView mesh, Edge edge, float rcp_pos
 		// Replaced vertex count == 2 is true for triangles that would get collapsed, we don't need to check if they flip.
 		if (replaced_vertex_count == 1) {
 			for (u32 i = 0; i < candidate_position_count; i += 1) {
-				p[replaced_vertex_index] = candidate_positions[i] * rcp_position_weight;
+				p[replaced_vertex_index] = candidate_positions[i];
 				
 				auto n1 = CrossProduct(p[1] - p[0], p[2] - p[0]);
 				
@@ -1459,8 +1459,8 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 		// Try a few different positions for the new vertex.
 		compile_const u32 candidate_position_count = 3;
 		Vector3 candidate_positions[candidate_position_count];
-		candidate_positions[0] = v0.position * state.position_weight;
-		candidate_positions[1] = v1.position * state.position_weight;
+		candidate_positions[0] = v0.position;
+		candidate_positions[1] = v1.position;
 		candidate_positions[2] = (candidate_positions[0] + candidate_positions[1]) * 0.5f;
 		
 		QuadricWithAttributes total_quadric;
@@ -1471,12 +1471,14 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 			AccumulateQuadricWithAttributes(total_quadric, state.wedge_quadrics[i], attribute_stride_dwords);
 		}
 		
-		// Override average with optimal position if it can be computed.
-		ComputeOptimalVertexPosition(total_quadric, candidate_positions[2], attribute_stride_dwords);
+		Vector3 optimal_position;
+		if (ComputeOptimalVertexPosition(total_quadric, optimal_position, attribute_stride_dwords)) {
+			// Override average position with optimal position if it can be computed.
+			candidate_positions[2] = optimal_position * state.rcp_position_weight;
+		}
 		
-		u32 valid_position_mask = ValidateEdgeCollapsePositions(mesh, edge, state.rcp_position_weight, candidate_positions, candidate_position_count);
+		u32 valid_position_mask = ValidateEdgeCollapsePositions(mesh, edge, candidate_positions, candidate_position_count);
 		for (u32 i = 0; i < candidate_position_count; i += 1) {
-			auto& p = candidate_positions[i];
 			
 			compile_const float edge_collapse_inversion_error = 1.f;
 			
@@ -1484,6 +1486,7 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 			if (error > collapse_error.min_error) continue;
 			
 			
+			auto p = candidate_positions[i] * state.position_weight;
 			error += ComputeQuadricError(edge_quadrics, p);
 			if (error > collapse_error.min_error) continue;
 			
@@ -1494,7 +1497,7 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 			
 			
 			collapse_error.min_error    = error;
-			collapse_error.new_position = p;
+			collapse_error.new_position = candidate_positions[i];
 		}
 	}
 	
@@ -1798,11 +1801,9 @@ static float DecimateMeshFaceGroup(
 		
 		// Update vertices.
 		{
-			auto scaled_new_position = collapse_error.new_position * state.rcp_position_weight;
-			
 			auto& edge = mesh[edge_id];
-			mesh[edge.vertex_0].position = scaled_new_position;
-			mesh[edge.vertex_1].position = scaled_new_position;
+			mesh[edge.vertex_0].position = collapse_error.new_position;
+			mesh[edge.vertex_1].position = collapse_error.new_position;
 			
 			Quadric quadric = state.vertex_edge_quadrics[edge.vertex_0.index];
 			AccumulateQuadric(quadric, state.vertex_edge_quadrics[edge.vertex_1.index]);
@@ -1816,6 +1817,7 @@ static float DecimateMeshFaceGroup(
 		if (remaining_vertex_id.index != u32_max) {
 			u32 wedge_count = state.wedge_quadrics.count;
 			u32 attribute_stride_dwords = mesh.attribute_stride_dwords;
+			auto weighted_new_position = collapse_error.new_position * state.position_weight;
 			
 			for (u32 i = 0; i < wedge_count; i += 1) {
 				auto& wedge_quadric = state.wedge_quadrics[i];
@@ -1823,7 +1825,7 @@ static float DecimateMeshFaceGroup(
 				auto* attributes    = mesh[attributes_id];
 				
 				state.attribute_face_quadrics[attributes_id.index] = wedge_quadric;
-				if (ComputeWedgeAttributes(wedge_quadric, collapse_error.new_position, attributes, state.rcp_attribute_weights, attribute_stride_dwords) && normalize_vertex_attributes) {
+				if (ComputeWedgeAttributes(wedge_quadric, weighted_new_position, attributes, state.rcp_attribute_weights, attribute_stride_dwords) && normalize_vertex_attributes) {
 					normalize_vertex_attributes(attributes);
 				}
 				
