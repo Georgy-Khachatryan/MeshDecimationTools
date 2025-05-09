@@ -3,8 +3,10 @@
 //
 // References:
 // - Michael Garland, Paul S. Heckbert. 1997. Surface Simplification Using Quadric Error Metrics.
+// - Thomas Wang. 1997. Integer Hash Function.
 // - Hugues Hoppe. 1999. New Quadric Metric for Simplifying Meshes with Appearance Attributes.
 // - Hugues Hoppe, Steve Marschner. 2000. Efficient Minimization of New Quadric Metric for Simplifying Meshes with Appearance Attributes.
+// - Matthias Teschner, Bruno Heidelberger, Matthias Muller, Danat Pomeranets, Markus Gross. 2003. Optimized Spatial Hashing for Collision Detection of Deformable Objects.
 // - Brian Karis, Rune Stubbe, Graham Wihlidal. 2021. Nanite A Deep Dive.
 // - HSUEH-TI DEREK LIU, XIAOTING ZHANG, CEM YUKSEL. 2024. Simplifying Triangle Meshes in the Wild.
 // - Arseny Kapoulkine. 2025. Meshoptimizer library. https://github.com/zeux/meshoptimizer. See license in THIRD_PARTY_LICENSES.md.
@@ -47,27 +49,29 @@ compile_const float discontinuous_meshlet_group_max_expansion = 4.f; // Sqrt of 
 compile_const u32 virtual_geometry_max_levels_of_details = 16;
 
 
-// TODO: Replace with a simpler hash function.
-// fenv pragmas are an attempt at making compiler not optimize away (x + 0.f).
-#pragma fenv_access(on)
+// Based on [Kapoulkine 2025] and [Teschner 2003].
 static u32 ComputePositionHash(const Vector3& v) {
-	compile_const u64 knuth_golden_ratio = 0x9e3779b97f4a7c55;
+	const u32* key = (const u32*)&v;
 	
-	static union {
-		u64 scalars[2];
-		__m128i vector;
-	} seed = { knuth_golden_ratio, knuth_golden_ratio };
+	u32 x = key[0];
+	u32 y = key[1];
+	u32 z = key[2];
 	
-	// Add zero to turn -0.0 to +0.0.
-	auto hash = _mm_castps_si128(_mm_add_ps(_mm_setr_ps(v.z, v.z, v.y, v.x), _mm_setzero_ps()));
-	hash = _mm_aesdec_si128(hash, seed.vector);
-	hash = _mm_aesdec_si128(hash, seed.vector);
+	// Replace negative zero with zero.
+	x = (x == 0x80000000) ? 0 : x;
+	y = (y == 0x80000000) ? 0 : y;
+	z = (z == 0x80000000) ? 0 : z;
 	
-	return (u32)_mm_cvtsi128_si32(hash);
+	// Scramble bits to make sure that integer coordinates have entropy in lower bits.
+	x ^= x >> 17;
+	y ^= y >> 17;
+	z ^= z >> 17;
+	
+	// Optimized Spatial Hashing for Collision Detection of Deformable Objects.
+	return (x * 73856093) ^ (y * 19349663) ^ (z * 83492791);
 }
-#pragma fenv_access(off)
 
-// Thomas Wang, Jan 1997. Integer Hash Function. 64 bit to 32 bit Hash Functions.
+// Based on [Wang 1997]. 64 bit to 32 bit Hash Functions.
 static u32 ComputeEdgeKeyHash(u64 key) {
 	key = (~key) + (key << 18); // key = (key << 18) - key - 1;
 	key = key ^ (key >> 31);
@@ -78,6 +82,7 @@ static u32 ComputeEdgeKeyHash(u64 key) {
 	
 	return (u32)key;
 }
+
 
 enum struct ElementType : u32 {
 	Vertex = 0,
