@@ -1,5 +1,15 @@
 #include "MeshDecimation.h"
 
+//
+// References:
+// - Michael Garland, Paul S. Heckbert. 1997. Surface Simplification Using Quadric Error Metrics.
+// - Hugues Hoppe. 1999. New Quadric Metric for Simplifying Meshes with Appearance Attributes.
+// - Hugues Hoppe, Steve Marschner. 2000. Efficient Minimization of New Quadric Metric for Simplifying Meshes with Appearance Attributes.
+// - Brian Karis, Rune Stubbe, Graham Wihlidal. 2021. Nanite A Deep Dive.
+// - HSUEH-TI DEREK LIU, XIAOTING ZHANG, CEM YUKSEL. 2024. Simplifying Triangle Meshes in the Wild.
+// - Arseny Kapoulkine. 2025. Meshoptimizer library. https://github.com/zeux/meshoptimizer. See license in THIRD_PARTY_LICENSES.md.
+//
+
 #include <assert.h>
 #include <float.h>
 #include <intrin.h>
@@ -36,15 +46,6 @@ compile_const float discontinuous_meshlet_group_max_expansion = 4.f; // Sqrt of 
 
 compile_const u32 virtual_geometry_max_levels_of_details = 16;
 
-
-//
-// References:
-// - Michael Garland, Paul S. Heckbert. 1997. Surface Simplification Using Quadric Error Metrics.
-// - Hugues Hoppe. 1999. New Quadric Metric for Simplifying Meshes with Appearance Attributes.
-// - Hugues Hoppe, Steve Marschner. 2000. Efficient Minimization of New Quadric Metric for Simplifying Meshes with Appearance Attributes.
-// - HSUEH-TI DEREK LIU, XIAOTING ZHANG, CEM YUKSEL. 2024. Simplifying Triangle Meshes in the Wild.
-// - Brian Karis, Rune Stubbe, Graham Wihlidal. 2021. Nanite A Deep Dive
-//
 
 // TODO: Replace with a simpler hash function.
 // fenv pragmas are an attempt at making compiler not optimize away (x + 0.f).
@@ -471,7 +472,10 @@ static ArrayView<typename ArrayT::ValueType> CreateArrayView(ArrayT& array) {
 	return { array.data, array.count };
 }
 
-
+//
+// Based on [Kapoulkine 2025].
+// See also https://fgiesen.wordpress.com/2015/02/22/triangular-numbers-mod-2n/
+//
 struct VertexHashTable {
 	Array<VertexID> vertex_ids;
 };
@@ -2046,7 +2050,9 @@ static void DecimateMeshFaceGroups(
 	AllocatorFreeMemoryBlocks(heap_allocator, heap_allocator_high_water);
 }
 
-
+//
+// KdTree implementation is based on [Kapoulkine 2025]. KdTree is used to accelerate spatial lookup queries during meshlet and meshlet group builds.
+//
 struct alignas(16) KdTreeElement {
 	Vector3 position;
 	
@@ -2242,66 +2248,6 @@ static bool KdTreeFindClosestActiveElement(KdTree& kd_tree, const Vector3& point
 	return should_prune;
 }
 
-SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds) {
-	u32 aabb_min_index[3] = { 0, 0, 0 };
-	u32 aabb_max_index[3] = { 0, 0, 0 };
-	
-	float aabb_min[3] = { +FLT_MAX, +FLT_MAX, +FLT_MAX };
-	float aabb_max[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
-	
-	for (u32 i = 0; i < source_sphere_bounds.count; i += 1) {
-		auto source_bounds = source_sphere_bounds[i];
-		
-		auto min = source_bounds.center - source_bounds.radius;
-		auto max = source_bounds.center + source_bounds.radius;
-		
-		for (u32 axis = 0; axis < 3; axis += 1) {
-			if (aabb_min[axis] > min[axis]) {
-				aabb_min[axis] = min[axis];
-				aabb_min_index[axis] = i;
-			}
-			
-			if (aabb_max[axis] < max[axis]) {
-				aabb_max[axis] = max[axis];
-				aabb_max_index[axis] = i;
-			}
-		}
-	}
-	
-	float max_axis_length = -FLT_MAX;
-	u32 max_axis_length_index = 0;
-	
-	for (u32 axis = 0; axis < 3; axis += 1) {
-		auto min_bounds = source_sphere_bounds[aabb_min_index[axis]];
-		auto max_bounds = source_sphere_bounds[aabb_max_index[axis]];
-		
-		float axis_length = Length(max_bounds.center - min_bounds.center) + min_bounds.radius + max_bounds.radius;
-		if (max_axis_length < axis_length) {
-			max_axis_length = axis_length;
-			max_axis_length_index = axis;
-		}
-	}
-	
-	SphereBounds result_bounds;
-	result_bounds.center = (source_sphere_bounds[aabb_min_index[max_axis_length_index]].center + source_sphere_bounds[aabb_max_index[max_axis_length_index]].center) * 0.5f;
-	result_bounds.radius = max_axis_length * 0.5f;
-	
-	for (u32 i = 0; i < source_sphere_bounds.count; i += 1) {
-		auto source_bounds = source_sphere_bounds[i];
-		
-		float distance = Length(source_bounds.center - result_bounds.center);
-		if (distance + source_bounds.radius > result_bounds.radius) {
-			float shift_t = distance > 0.f ? ((source_bounds.radius - result_bounds.radius) / distance) * 0.5f + 0.5f : 0.f;
-			
-			result_bounds.center = (result_bounds.center * (1.f - shift_t) + source_bounds.center * shift_t);
-			result_bounds.radius = (result_bounds.radius + source_bounds.radius + distance) * 0.5f;
-		}
-	}
-	
-	return result_bounds;
-}
-
-
 static void KdTreeBuildElementsForFaces(MeshView mesh, Allocator& allocator, Array<KdTreeElement>& elements) {
 	ArrayResize(elements, allocator, mesh.face_count);
 	
@@ -2366,6 +2312,9 @@ struct MeshletBuildResult {
 
 static MeshletAdjacency BuildMeshletAdjacency(MeshView mesh, Allocator& allocator, ArrayView<u32> meshlet_face_prefix_sum, ArrayView<FaceID> meshlet_faces, ArrayView<KdTreeElement> kd_tree_elements);
 
+//
+// Based on [Kapoulkine 2025].
+//
 static void BuildMeshletsForFaceGroup(
 	MeshView mesh,
 	KdTree kd_tree,
@@ -2848,6 +2797,12 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 				auto& element = kd_tree.elements[adjacency_info.meshlet_index];
 				if (element.is_active_element == 0) continue; // Meshlet is already assigned to a group.
 				
+				//
+				// Use the fraction of shared edges as the heuristic for grouping meshlets. This ensures that mesh decimation
+				// can collapse as many edges as possible. As a side effect this helps to alter group boundaries across levels.
+				//
+				// For reference see [Karis 2021].
+				//
 				float shared_edge_count = CountMeshletGroupSharedEdges(meshlet_adjacency, kd_tree.elements, adjacency_info.meshlet_index, meshlet_group_prefix_sum.count);
 				
 				u32 begin_face_index = adjacency_info.meshlet_index ? meshlet_face_prefix_sum[adjacency_info.meshlet_index - 1] : 0;
@@ -2978,8 +2933,12 @@ static void ConvertMeshletGroupsToFaceGroups(
 		}
 		ArrayAppend(meshlet_group_face_prefix_sum, meshlet_group_faces.count);
 		
+		//
 		// Coarser level meshlets should have at least the same error as their children (finer representation).
 		// This error metric might get increased during meshlet group decimation.
+		//
+		// See [Karis 2021] for reference on monotonic error metric.
+		//
 		ErrorMetric meshlet_group_minimum_error_metric;
 		meshlet_group_minimum_error_metric.bounds = ComputeSphereBoundsUnion(CreateArrayView(meshlet_error_sphere_bounds));
 		meshlet_group_minimum_error_metric.error  = max_error;
@@ -3335,4 +3294,67 @@ void FreeResultBuffers(const VirtualGeometryBuildResult& result, const SystemCal
 	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.vertices.data;
 	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.levels.data;
 	AllocatorFreeMemoryBlocks(heap_allocator);
+}
+
+
+//
+// Based on [Kapoulkine 2025].
+//
+SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds) {
+	u32 aabb_min_index[3] = { 0, 0, 0 };
+	u32 aabb_max_index[3] = { 0, 0, 0 };
+	
+	float aabb_min[3] = { +FLT_MAX, +FLT_MAX, +FLT_MAX };
+	float aabb_max[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+	
+	for (u32 i = 0; i < source_sphere_bounds.count; i += 1) {
+		auto source_bounds = source_sphere_bounds[i];
+		
+		auto min = source_bounds.center - source_bounds.radius;
+		auto max = source_bounds.center + source_bounds.radius;
+		
+		for (u32 axis = 0; axis < 3; axis += 1) {
+			if (aabb_min[axis] > min[axis]) {
+				aabb_min[axis] = min[axis];
+				aabb_min_index[axis] = i;
+			}
+			
+			if (aabb_max[axis] < max[axis]) {
+				aabb_max[axis] = max[axis];
+				aabb_max_index[axis] = i;
+			}
+		}
+	}
+	
+	float max_axis_length = -FLT_MAX;
+	u32 max_axis_length_index = 0;
+	
+	for (u32 axis = 0; axis < 3; axis += 1) {
+		auto min_bounds = source_sphere_bounds[aabb_min_index[axis]];
+		auto max_bounds = source_sphere_bounds[aabb_max_index[axis]];
+		
+		float axis_length = Length(max_bounds.center - min_bounds.center) + min_bounds.radius + max_bounds.radius;
+		if (max_axis_length < axis_length) {
+			max_axis_length = axis_length;
+			max_axis_length_index = axis;
+		}
+	}
+	
+	SphereBounds result_bounds;
+	result_bounds.center = (source_sphere_bounds[aabb_min_index[max_axis_length_index]].center + source_sphere_bounds[aabb_max_index[max_axis_length_index]].center) * 0.5f;
+	result_bounds.radius = max_axis_length * 0.5f;
+	
+	for (u32 i = 0; i < source_sphere_bounds.count; i += 1) {
+		auto source_bounds = source_sphere_bounds[i];
+		
+		float distance = Length(source_bounds.center - result_bounds.center);
+		if (distance + source_bounds.radius > result_bounds.radius) {
+			float shift_t = distance > 0.f ? ((source_bounds.radius - result_bounds.radius) / distance) * 0.5f + 0.5f : 0.f;
+			
+			result_bounds.center = (result_bounds.center * (1.f - shift_t) + source_bounds.center * shift_t);
+			result_bounds.radius = (result_bounds.radius + source_bounds.radius + distance) * 0.5f;
+		}
+	}
+	
+	return result_bounds;
 }
