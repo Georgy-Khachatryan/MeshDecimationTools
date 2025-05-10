@@ -13,16 +13,18 @@
 //
 
 #include <float.h>
-#include <intrin.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <type_traits>
 
 #if defined(_MSC_VER)
 #define never_inline_function __declspec(noinline)
+#define always_inline_function __forceinline
 #else // !defined(_MSC_VER)
 #define never_inline_function
+#define always_inline_function
 #endif // !defined(_MSC_VER)
 
 #if !defined(CACHE_LINE_SIZE)
@@ -993,23 +995,38 @@ struct QuadricWithAttributes : Quadric {
 //
 // Matt Pharr's blog. 2019. Accurate Differences of Products with Kahan's Algorithm.
 //
-static float DifferenceOfProducts(float a, float b, float c, float d) {
+always_inline_function static float DifferenceOfProducts(float a, float b, float c, float d) {
 	float cd = c * d;
 	float err = fmaf(c, -d,  cd);
 	float dop = fmaf(a,  b, -cd);
 	return dop + err;
 }
 
-static Vector3 operator+ (const Vector3& lh, const Vector3& rh) { return Vector3{ lh.x + rh.x, lh.y + rh.y, lh.z + rh.z }; }
-static Vector3 operator- (const Vector3& lh, const Vector3& rh) { return Vector3{ lh.x - rh.x, lh.y - rh.y, lh.z - rh.z }; }
-static Vector3 operator* (const Vector3& lh, float rh) { return Vector3{ lh.x * rh, lh.y * rh, lh.z * rh }; }
-static Vector3 operator+ (const Vector3& lh, float rh) { return Vector3{ lh.x + rh, lh.y + rh, lh.z + rh }; }
-static Vector3 operator- (const Vector3& lh, float rh) { return Vector3{ lh.x - rh, lh.y - rh, lh.z - rh }; }
-static float DotProduct(const Vector3& lh, const Vector3& rh) { return lh.x * rh.x + lh.y * rh.y + lh.z * rh.z; }
-static float Length(const Vector3& v) { return sqrtf(DotProduct(v, v)); }
-static Vector3 Normalize(const Vector3& v) { float length = Length(v); return length < FLT_EPSILON ? v : v * (1.f / length); }
-static Vector3 CrossProduct(const Vector3& lh, const Vector3& rh) { return Vector3{ lh.y * rh.z - lh.z * rh.y, lh.z * rh.x - lh.x * rh.z, lh.x * rh.y - lh.y * rh.x }; }
+always_inline_function static Vector3 operator+ (const Vector3& lh, const Vector3& rh) { return Vector3{ lh.x + rh.x, lh.y + rh.y, lh.z + rh.z }; }
+always_inline_function static Vector3 operator- (const Vector3& lh, const Vector3& rh) { return Vector3{ lh.x - rh.x, lh.y - rh.y, lh.z - rh.z }; }
+always_inline_function static Vector3 operator* (const Vector3& lh, float rh) { return Vector3{ lh.x * rh, lh.y * rh, lh.z * rh }; }
+always_inline_function static Vector3 operator+ (const Vector3& lh, float rh) { return Vector3{ lh.x + rh, lh.y + rh, lh.z + rh }; }
+always_inline_function static Vector3 operator- (const Vector3& lh, float rh) { return Vector3{ lh.x - rh, lh.y - rh, lh.z - rh }; }
+always_inline_function static float DotProduct(const Vector3& lh, const Vector3& rh) { return lh.x * rh.x + lh.y * rh.y + lh.z * rh.z; }
+always_inline_function static float Length(const Vector3& v) { return sqrtf(DotProduct(v, v)); }
+always_inline_function static Vector3 Normalize(const Vector3& v) { float length = Length(v); return length < FLT_EPSILON ? v : v * (1.f / length); }
+always_inline_function static Vector3 CrossProduct(const Vector3& lh, const Vector3& rh) { return Vector3{ lh.y * rh.z - lh.z * rh.y, lh.z * rh.x - lh.x * rh.z, lh.x * rh.y - lh.y * rh.x }; }
 
+always_inline_function static Vector3 VectorMax(const Vector3& lh, const Vector3& rh) {
+	Vector3 result;
+	result.x = lh.x > rh.x ? lh.x : rh.x;
+	result.y = lh.y > rh.y ? lh.y : rh.y;
+	result.z = lh.z > rh.z ? lh.z : rh.z;
+	return result;
+}
+
+always_inline_function static Vector3 VectorMin(const Vector3& lh, const Vector3& rh) {
+	Vector3 result;
+	result.x = lh.x < rh.x ? lh.x : rh.x;
+	result.y = lh.y < rh.y ? lh.y : rh.y;
+	result.z = lh.z < rh.z ? lh.z : rh.z;
+	return result;
+}
 
 static void AccumulateQuadric(Quadric& accumulator, const Quadric& quadric) {
 	accumulator.a00 += quadric.a00;
@@ -2262,11 +2279,7 @@ static void KdTreeBuildElementsForMeshlets(ArrayView<Meshlet> meshlets, Allocato
 		auto& element = elements[meshlet_index];
 		auto& meshlet = meshlets[meshlet_index];
 		
-		auto aabb_min_ps = _mm_load_ps(&meshlet.aabb_min.x);
-		auto aabb_max_ps = _mm_load_ps(&meshlet.aabb_max.x);
-		auto center_ps   = _mm_mul_ps(_mm_add_ps(aabb_min_ps, aabb_max_ps), _mm_set_ps1(0.5f));
-		
-		_mm_store_ps(&element.position.x, center_ps);
+		element.position = (meshlet.aabb_min + meshlet.aabb_max) * 0.5f;
 		element.is_active_element = 1;
 		element.partition_index   = 0;
 	}
@@ -2317,8 +2330,8 @@ static void BuildMeshletsForFaceGroup(
 	FixedSizeArray<AttributesID, meshlet_max_face_count * meshlet_max_face_degree> meshlet_vertices;
 	FixedSizeArray<FaceID, meshlet_max_face_count * candidates_per_face> meshlet_candidate_elements;
 	
-	auto meshlet_aabb_min_ps  = _mm_set_ps1(+FLT_MAX);
-	auto meshlet_aabb_max_ps  = _mm_set_ps1(-FLT_MAX);
+	auto meshlet_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
+	auto meshlet_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 	u32  meshlet_vertex_count = 0;
 	u32  meshlet_face_count   = 0;
 	u32  meshlet_geometry_index = u32_max;
@@ -2331,7 +2344,7 @@ static void BuildMeshletsForFaceGroup(
 		u32 best_candidate_face_index = u32_max;
 		float smallest_distance_to_face = FLT_MAX;
 		
-		auto center_ps = _mm_mul_ps(_mm_add_ps(meshlet_aabb_max_ps, meshlet_aabb_min_ps), _mm_set_ps1(0.5f));
+		auto bounds_center = (meshlet_aabb_max + meshlet_aabb_min) * 0.5f;
 		
 		for (u32 i = 0; i < meshlet_candidate_elements.count;) {
 			auto face_id = meshlet_candidate_elements[i];
@@ -2341,10 +2354,9 @@ static void BuildMeshletsForFaceGroup(
 				ArrayEraseSwap(meshlet_candidate_elements, i);
 				continue;
 			}
-			auto position_ps = _mm_load_ps(&element.position.x);
 			
-			auto bounds_center_to_face_center = _mm_sub_ps(center_ps, position_ps);
-			float distance_to_face = _mm_cvtss_f32(_mm_dp_ps(bounds_center_to_face_center, bounds_center_to_face_center, 0x7F));
+			auto bounds_center_to_face_center = (bounds_center - element.position);
+			float distance_to_face = DotProduct(bounds_center_to_face_center, bounds_center_to_face_center);
 			
 			if (smallest_distance_to_face > distance_to_face) {
 				smallest_distance_to_face = distance_to_face;
@@ -2375,28 +2387,21 @@ static void BuildMeshletsForFaceGroup(
 		bool restart_meshlet = false;
 		bool kd_tree_is_empty = false;
 		if (best_face_id.index == u32_max) {
-			alignas(16) float center[4];
-			if (meshlet_face_count) {
-				auto center_ps = _mm_mul_ps(_mm_add_ps(meshlet_aabb_max_ps, meshlet_aabb_min_ps), _mm_set_ps1(0.5f));
-				_mm_store_ps(center, center_ps);
-			} else {
-				_mm_store_ps(center, _mm_setzero_ps());
-			}
+			auto center = meshlet_face_count ? bounds_center : Vector3{ 0.f, 0.f, 0.f };
 			
 			float min_distance = FLT_MAX;
-			kd_tree_is_empty = KdTreeFindClosestActiveElement(kd_tree, *(Vector3*)center, meshlet_geometry_index, best_face_id.index, min_distance);
+			kd_tree_is_empty = KdTreeFindClosestActiveElement(kd_tree, center, meshlet_geometry_index, best_face_id.index, min_distance);
 			
 			if (best_face_id.index != u32_max && meshlet_face_count >= meshlet_min_face_count) {
 				auto& element = kd_tree.elements[best_face_id.index];
-				auto position_ps = _mm_load_ps(&element.position.x);
 				
-				auto new_aabb_min_ps = _mm_min_ps(meshlet_aabb_min_ps, position_ps);
-				auto new_aabb_max_ps = _mm_max_ps(meshlet_aabb_max_ps, position_ps);
-				auto new_aabb_extent_ps = _mm_sub_ps(new_aabb_max_ps, new_aabb_min_ps);
-				auto old_aabb_extent_ps = _mm_sub_ps(meshlet_aabb_max_ps, meshlet_aabb_min_ps);
+				auto new_aabb_min = VectorMin(meshlet_aabb_min, element.position);
+				auto new_aabb_max = VectorMax(meshlet_aabb_max, element.position);
+				auto new_aabb_extent = (new_aabb_max     - new_aabb_min);
+				auto old_aabb_extent = (meshlet_aabb_max - meshlet_aabb_min);
 				
-				float new_radius = _mm_cvtss_f32(_mm_dp_ps(new_aabb_extent_ps, new_aabb_extent_ps, 0x7F));
-				float old_radius = _mm_cvtss_f32(_mm_dp_ps(old_aabb_extent_ps, old_aabb_extent_ps, 0x7F));
+				float new_radius = DotProduct(new_aabb_extent, new_aabb_extent);
+				float old_radius = DotProduct(old_aabb_extent, old_aabb_extent);
 				
 				restart_meshlet = (new_radius > old_radius * discontinuous_meshlet_max_expansion);
 			}
@@ -2433,8 +2438,8 @@ static void BuildMeshletsForFaceGroup(
 			meshlet_face_count   = 0;
 			meshlet_geometry_index = u32_max;
 			
-			meshlet_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
-			meshlet_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
+			meshlet_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
+			meshlet_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 			
 			ArrayAppend(meshlet_face_prefix_sum, meshlet_faces.count);
 			ArrayAppend(meshlet_corner_prefix_sum, meshlet_corners.count);
@@ -2486,9 +2491,8 @@ static void BuildMeshletsForFaceGroup(
 		
 		meshlet_geometry_index = best_face_geometry_index;
 		
-		auto position = _mm_load_ps(&element.position.x);
-		meshlet_aabb_min_ps = _mm_min_ps(meshlet_aabb_min_ps, position);
-		meshlet_aabb_max_ps = _mm_max_ps(meshlet_aabb_max_ps, position);
+		meshlet_aabb_min = VectorMin(meshlet_aabb_min, element.position);
+		meshlet_aabb_max = VectorMax(meshlet_aabb_max, element.position);
 	}
 	
 	if (meshlet_face_count) {
@@ -2588,8 +2592,8 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 	for (u32 meshlet_index = 0; meshlet_index < meshlet_corner_prefix_sum.count; meshlet_index += 1) {
 		u32 end_corner_index = meshlet_corner_prefix_sum[meshlet_index];
 		
-		auto meshlet_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
-		auto meshlet_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
+		auto meshlet_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
+		auto meshlet_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 		
 		FixedSizeArray<SphereBounds, meshlet_max_vertex_count> vertex_sphere_bounds;
 		assert(end_corner_index - begin_corner_index <= meshlet_max_vertex_count);
@@ -2598,19 +2602,19 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 			auto corner_id = meshlet_corners[corner_index];
 			auto vertex_id = mesh[corner_id].vertex_id;
 			
-			auto position_ps = _mm_load_ps(&mesh[vertex_id].position.x);
-			meshlet_aabb_min_ps = _mm_min_ps(meshlet_aabb_min_ps, position_ps);
-			meshlet_aabb_max_ps = _mm_max_ps(meshlet_aabb_max_ps, position_ps);
+			auto position = mesh[vertex_id].position;
+			meshlet_aabb_min = VectorMin(meshlet_aabb_min, position);
+			meshlet_aabb_max = VectorMax(meshlet_aabb_max, position);
 			
 			SphereBounds bounds;
-			bounds.center = mesh[vertex_id].position;
+			bounds.center = position;
 			bounds.radius = 0.f;
 			ArrayAppend(vertex_sphere_bounds, bounds);
 		}
 		
 		auto& meshlet = meshlets[meshlet_index];
-		_mm_store_ps(&meshlet.aabb_min.x, meshlet_aabb_min_ps);
-		_mm_store_ps(&meshlet.aabb_max.x, meshlet_aabb_max_ps);
+		meshlet.aabb_min = meshlet_aabb_min;
+		meshlet.aabb_max = meshlet_aabb_max;
 		
 		auto meshlet_sphere_bounds = ComputeSphereBoundsUnion(CreateArrayView(vertex_sphere_bounds));
 		meshlet.geometric_sphere_bounds = meshlet_sphere_bounds;
@@ -2762,8 +2766,8 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 	ArrayReserve(meshlet_group_meshlet_indices, allocator, meshlets.count);
 	ArrayReserve(meshlet_group_prefix_sum, allocator, (meshlets.count + meshlet_group_min_meshlet_count - 1) / meshlet_group_min_meshlet_count);
 	
-	auto meshlet_group_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
-	auto meshlet_group_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
+	auto meshlet_group_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
+	auto meshlet_group_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 	
 #if COUNT_KD_TREE_LOOKUPS
 	u32 kd_tree_lookup_count = 0;
@@ -2805,28 +2809,21 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 		
 		bool restart_meshlet_group = false;
 		if (best_candidate_meshlet_index == u32_max) {
-			alignas(16) float center[4];
-			if (meshlet_group.count) {
-				auto center_ps = _mm_mul_ps(_mm_add_ps(meshlet_group_aabb_max_ps, meshlet_group_aabb_min_ps), _mm_set_ps1(0.5f));
-				_mm_store_ps(center, center_ps);
-			} else {
-				_mm_store_ps(center, _mm_setzero_ps());
-			}
+			auto center = meshlet_group.count ? (meshlet_group_aabb_max + meshlet_group_aabb_min) * 0.5f : Vector3{ 0.f, 0.f, 0.f };
 			
 			float min_distance = FLT_MAX;
-			KdTreeFindClosestActiveElement(kd_tree, *(Vector3*)center, u32_max, best_candidate_meshlet_index, min_distance);
+			KdTreeFindClosestActiveElement(kd_tree, center, u32_max, best_candidate_meshlet_index, min_distance);
 			
 			if (best_candidate_meshlet_index != u32_max && meshlet_group.count >= meshlet_group_min_meshlet_count) {
 				auto& element = kd_tree.elements[best_candidate_meshlet_index];
-				auto position_ps = _mm_load_ps(&element.position.x);
 				
-				auto new_aabb_min_ps = _mm_min_ps(meshlet_group_aabb_min_ps, position_ps);
-				auto new_aabb_max_ps = _mm_max_ps(meshlet_group_aabb_max_ps, position_ps);
-				auto new_aabb_extent_ps = _mm_sub_ps(new_aabb_max_ps, new_aabb_min_ps);
-				auto old_aabb_extent_ps = _mm_sub_ps(meshlet_group_aabb_max_ps, meshlet_group_aabb_min_ps);
+				auto new_aabb_min = VectorMin(meshlet_group_aabb_min, element.position);
+				auto new_aabb_max = VectorMax(meshlet_group_aabb_max, element.position);
+				auto new_aabb_extent = (new_aabb_max           - new_aabb_min);
+				auto old_aabb_extent = (meshlet_group_aabb_max - meshlet_group_aabb_min);
 				
-				float new_radius = _mm_cvtss_f32(_mm_dp_ps(new_aabb_extent_ps, new_aabb_extent_ps, 0x7F));
-				float old_radius = _mm_cvtss_f32(_mm_dp_ps(old_aabb_extent_ps, old_aabb_extent_ps, 0x7F));
+				float new_radius = DotProduct(new_aabb_extent, new_aabb_extent);
+				float old_radius = DotProduct(old_aabb_extent, old_aabb_extent);
 				
 				restart_meshlet_group = (new_radius > old_radius * discontinuous_meshlet_group_max_expansion);
 			}
@@ -2841,8 +2838,8 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 		}
 		
 		if (restart_meshlet_group || meshlet_group.count >= meshlet_group.capacity) {
-			meshlet_group_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
-			meshlet_group_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
+			meshlet_group_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
+			meshlet_group_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 			
 			ArrayAppend(meshlet_group_prefix_sum, meshlet_group_meshlet_indices.count);
 			meshlet_group.count = 0;
@@ -2855,9 +2852,8 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 		element.partition_index   = meshlet_group_prefix_sum.count;
 		element.is_active_element = 0;
 		
-		auto position = _mm_load_ps(&element.position.x);
-		meshlet_group_aabb_min_ps = _mm_min_ps(meshlet_group_aabb_min_ps, position);
-		meshlet_group_aabb_max_ps = _mm_max_ps(meshlet_group_aabb_max_ps, position);
+		meshlet_group_aabb_min = VectorMin(meshlet_group_aabb_min, element.position);
+		meshlet_group_aabb_max = VectorMax(meshlet_group_aabb_max, element.position);
 	}
 	
 	if (meshlet_group.count) {
@@ -2951,8 +2947,8 @@ static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuil
 	for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
 		u32 group_meshlet_end_index = meshlet_group_build_result.prefix_sum[group_index];
 		
-		auto meshlet_group_aabb_min_ps = _mm_set_ps1(+FLT_MAX);
-		auto meshlet_group_aabb_max_ps = _mm_set_ps1(-FLT_MAX);
+		auto meshlet_group_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
+		auto meshlet_group_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 		
 		FixedSizeArray<SphereBounds, meshlet_group_max_meshlet_count> meshlet_sphere_bounds;
 		auto meshlet_group_error_metric = meshlet_group_error_metrics[group_index];
@@ -2965,8 +2961,8 @@ static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuil
 			meshlet.coarser_level_error_metric        = meshlet_group_error_metric;
 			meshlet.coarser_level_meshlet_group_index = group_index + meshlet_group_base_index;
 			
-			meshlet_group_aabb_min_ps = _mm_min_ps(meshlet_group_aabb_min_ps, _mm_load_ps(&meshlet.aabb_min.x));
-			meshlet_group_aabb_max_ps = _mm_max_ps(meshlet_group_aabb_max_ps, _mm_load_ps(&meshlet.aabb_max.x));
+			meshlet_group_aabb_min = VectorMin(meshlet_group_aabb_min, meshlet.aabb_min);
+			meshlet_group_aabb_max = VectorMax(meshlet_group_aabb_max, meshlet.aabb_max);
 			
 			ArrayAppend(meshlet_sphere_bounds, meshlet.geometric_sphere_bounds);
 			
@@ -2975,8 +2971,8 @@ static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuil
 		u32 end_meshlet_index = meshlets.count;
 		
 		MeshletGroup meshlet_group;
-		_mm_store_ps(&meshlet_group.aabb_min.x, meshlet_group_aabb_min_ps);
-		_mm_store_ps(&meshlet_group.aabb_max.x, meshlet_group_aabb_max_ps);
+		meshlet_group.aabb_min = meshlet_group_aabb_min;
+		meshlet_group.aabb_max = meshlet_group_aabb_max;
 		
 		meshlet_group.geometric_sphere_bounds = ComputeSphereBoundsUnion(CreateArrayView(meshlet_sphere_bounds));
 		meshlet_group.error_metric            = meshlet_group_error_metric;
