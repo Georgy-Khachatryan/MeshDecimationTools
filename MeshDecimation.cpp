@@ -19,13 +19,15 @@
 #include <string.h>
 #include <type_traits>
 
-#if defined(_MSC_VER)
-#define never_inline_function __declspec(noinline)
-#define always_inline_function __forceinline
-#else // !defined(_MSC_VER)
-#define never_inline_function
-#define always_inline_function
-#endif // !defined(_MSC_VER)
+
+#if defined(VGT_CONFIGURATION_FILE)
+#include VGT_CONFIGURATION_FILE
+#endif // defined(VGT_CONFIGURATION_FILE)
+
+#if !defined(VGT_ASSERT)
+#include <assert.h>
+#define VGT_ASSERT(condition) assert(condition)
+#endif // !defined(VGT_ASSERT) 
 
 #if !defined(VGT_CACHE_LINE_SIZE)
 #define VGT_CACHE_LINE_SIZE 64
@@ -39,7 +41,17 @@
 #define VGT_ENABLE_ATTRIBUTE_SUPPORT 1
 #endif // !defined(VGT_ENABLE_ATTRIBUTE_SUPPORT)
 
+
+#if defined(_MSC_VER)
+#define never_inline_function __declspec(noinline)
+#define always_inline_function __forceinline
+#else // !defined(_MSC_VER)
+#define never_inline_function
+#define always_inline_function
+#endif // !defined(_MSC_VER)
+
 #define compile_const constexpr static const
+
 
 namespace VirtualGeometryTools
 {
@@ -314,7 +326,7 @@ static ElementID CornerListMerge(MeshView mesh, ElementID element_0, ElementID e
 					auto& edge = mesh[mesh[corner_id].edge_id];
 					if (edge.vertex_0.index == element_1.index) edge.vertex_0 = element_0;
 					if (edge.vertex_1.index == element_1.index) edge.vertex_1 = element_0;
-					assert(edge.vertex_0.index != edge.vertex_1.index);
+					VGT_ASSERT(edge.vertex_0.index != edge.vertex_1.index);
 				});
 			} else if constexpr (element_type_t == ElementType::Edge) {
 				mesh[corner_id].edge_id = element_0;
@@ -354,9 +366,9 @@ struct Allocator {
 };
 
 static void* AllocateMemoryBlock(Allocator& allocator, void* old_memory_block, u64 size_bytes) {
-	assert(old_memory_block != nullptr || allocator.memory_block_count < Allocator::max_memory_block_count);
-	assert(old_memory_block == nullptr || allocator.memory_block_count > 0);
-	assert(old_memory_block == nullptr || allocator.memory_blocks[allocator.memory_block_count - 1] == old_memory_block);
+	VGT_ASSERT(old_memory_block != nullptr || allocator.memory_block_count < Allocator::max_memory_block_count);
+	VGT_ASSERT(old_memory_block == nullptr || allocator.memory_block_count > 0);
+	VGT_ASSERT(old_memory_block == nullptr || allocator.memory_blocks[allocator.memory_block_count - 1] == old_memory_block);
 	
 	void* memory_block = allocator.callbacks.realloc(old_memory_block, size_bytes, allocator.callbacks.user_data);
 	u32 memory_block_index = old_memory_block ? allocator.memory_block_count - 1 : allocator.memory_block_count++;
@@ -390,8 +402,8 @@ static u32 AllocatorFindMemoryBlock(Allocator& allocator, void* old_memory_block
 
 
 #define DECLARE_ARRAY_OPERATORS() \
-	T& operator[] (u32 index) { assert(index < count); return data[index]; } \
-	const T& operator[] (u32 index) const { assert(index < count); return data[index]; } \
+	T& operator[] (u32 index) { VGT_ASSERT(index < count); return data[index]; } \
+	const T& operator[] (u32 index) const { VGT_ASSERT(index < count); return data[index]; } \
 	\
 	T* begin() { return data; } \
 	T* end() { return data + count; } \
@@ -464,7 +476,7 @@ static void ArrayResizeMemset(Array<T>& array, Allocator& allocator, u32 new_cou
 
 template<typename ArrayT>
 static void ArrayAppend(ArrayT& array, typename ArrayT::ValueType value) {
-	assert(array.count < array.capacity);
+	VGT_ASSERT(array.count < array.capacity);
 	array.data[array.count++] = value;
 }
 
@@ -490,7 +502,7 @@ static void ArrayAppendMaybeGrow(Array<T>& array, Allocator& allocator, T value)
 
 template<typename ArrayT>
 static void ArrayEraseSwap(ArrayT& array, u32 index) {
-	assert(index < array.count);
+	VGT_ASSERT(index < array.count);
 	
 	array.data[index] = array.data[array.count - 1];
 	array.count -= 1;
@@ -498,7 +510,7 @@ static void ArrayEraseSwap(ArrayT& array, u32 index) {
 
 template<typename ArrayT>
 static typename ArrayT::ValueType& ArrayLastElement(ArrayT& array) {
-	assert(array.count != 0);
+	VGT_ASSERT(array.count != 0);
 	return array.data[array.count - 1];
 }
 
@@ -809,7 +821,7 @@ static MeshView BuildEditableMesh(Allocator& allocator, const VgtTriangleGeometr
 
 static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, Allocator& heap_allocator, u32 max_geometry_desc_count, VgtMeshDecimationResult* result) {
 	u32 allocator_high_water = allocator.memory_block_count;
-	assert(heap_allocator.memory_block_count == 0);
+	VGT_ASSERT(heap_allocator.memory_block_count == 0);
 	
 	Array<VertexID> attributes_id_to_vertex_id;
 	ArrayResizeMemset(attributes_id_to_vertex_id, allocator, mesh.attribute_count, 0xFF);
@@ -857,7 +869,7 @@ static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, Alloc
 		if (face.corner_list_base.index == u32_max) continue;
 		
 		if (geometry_index != face.geometry_index) {
-			assert(geometry_index == u32_max || geometry_index < face.geometry_index);
+			VGT_ASSERT(geometry_index == u32_max || geometry_index < face.geometry_index);
 			
 			if (geometry_index != u32_max) {
 				auto& geometry_desc = geometry_descs[geometry_index];
@@ -912,14 +924,14 @@ struct EdgeCollapseResult {
 static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Allocator& heap_allocator, EdgeDuplicateMap& edge_duplicate_map, RemovedEdgeArray& removed_edge_array) {
 	auto& edge = mesh[edge_id];
 	
-	assert(edge.vertex_0.index != edge.vertex_1.index);
+	VGT_ASSERT(edge.vertex_0.index != edge.vertex_1.index);
 	auto& vertex_0 = mesh[edge.vertex_0];
 	auto& vertex_1 = mesh[edge.vertex_1];
 
-	assert(edge.corner_list_base.index != u32_max);
-	assert(vertex_0.corner_list_base.index != u32_max);
-	assert(vertex_1.corner_list_base.index != u32_max);
-	assert(vertex_0.corner_list_base.index != vertex_1.corner_list_base.index);
+	VGT_ASSERT(edge.corner_list_base.index != u32_max);
+	VGT_ASSERT(vertex_0.corner_list_base.index != u32_max);
+	VGT_ASSERT(vertex_1.corner_list_base.index != u32_max);
+	VGT_ASSERT(vertex_0.corner_list_base.index != vertex_1.corner_list_base.index);
 	
 	removed_edge_array.count = 0;
 	u32 removed_face_count = 0;
@@ -1646,7 +1658,7 @@ static void EdgeCollapseHeapSiftDown(EdgeCollapseHeap& heap, u32 node_index) {
 }
 
 static EdgeID EdgeCollapseHeapPop(EdgeCollapseHeap& heap) {
-	assert(heap.edge_collapse_errors.count != 0);
+	VGT_ASSERT(heap.edge_collapse_errors.count != 0);
 	
 	auto edge_id = heap.heap_index_to_edge_id[0];
 
@@ -1741,7 +1753,7 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 		float twice_mesh_surface_area = 0.f;
 		for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
 			auto& face = mesh[face_id];
-			assert(face.corner_list_base.index != u32_max);
+			VGT_ASSERT(face.corner_list_base.index != u32_max);
 			
 			auto& c1 = mesh[face.corner_list_base];
 			auto& c0 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev];
@@ -1772,7 +1784,7 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 		u32 attribute_stride_dwords = mesh.attribute_stride_dwords;
 		for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
 			auto& face = mesh[face_id];
-			assert(face.corner_list_base.index != u32_max);
+			VGT_ASSERT(face.corner_list_base.index != u32_max);
 			
 			auto& c1 = mesh[face.corner_list_base];
 			auto& c0 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev];
@@ -1799,7 +1811,7 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 		float position_weight = state.position_weight;
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
-			assert(edge.corner_list_base.index != u32_max);
+			VGT_ASSERT(edge.corner_list_base.index != u32_max);
 			
 			auto& c0 = mesh[edge.corner_list_base];
 			auto& c1 = mesh[c0.corner_list_around[(u32)ElementType::Face].next];
@@ -1970,7 +1982,7 @@ static void DecimateMeshFaceGroups(
 			for (u32 face_index = begin_face_index; face_index < end_face_index; face_index += 1) {
 				auto face_id = meshlet_group_faces[face_index];
 				auto& face = mesh[face_id];
-				assert(face.corner_list_base.index != u32_max);
+				VGT_ASSERT(face.corner_list_base.index != u32_max);
 				
 				IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
 					auto& corner = mesh[corner_id];
@@ -1996,14 +2008,14 @@ static void DecimateMeshFaceGroups(
 		
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
-			assert(edge.corner_list_base.index != u32_max);
+			VGT_ASSERT(edge.corner_list_base.index != u32_max);
 			
 			u32 group_index_0 = vertex_group_indices[edge.vertex_0.index];
 			u32 group_index_1 = vertex_group_indices[edge.vertex_1.index];
 			
 			// TODO: Allow edge collapses when only one vertex is locked.
 			bool edge_is_locked = (group_index_0 == vertex_group_index_locked) || (group_index_1 == vertex_group_index_locked);
-			assert(edge_is_locked || group_index_0 == group_index_1);
+			VGT_ASSERT(edge_is_locked || group_index_0 == group_index_1);
 			
 			if (edge_is_locked == false) {
 				meshlet_group_edge_prefix_sum[group_index_0] += 1;
@@ -2022,14 +2034,14 @@ static void DecimateMeshFaceGroups(
 		ArrayResize(meshlet_group_edge_ids, allocator, prefix_sum);
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
-			assert(edge.corner_list_base.index != u32_max);
+			VGT_ASSERT(edge.corner_list_base.index != u32_max);
 			
 			u32 group_index_0 = vertex_group_indices[edge.vertex_0.index];
 			u32 group_index_1 = vertex_group_indices[edge.vertex_1.index];
 			
 			// TODO: Allow edge collapses when only one vertex is locked.
 			bool edge_is_locked = (group_index_0 == vertex_group_index_locked) || (group_index_1 == vertex_group_index_locked);
-			assert(edge_is_locked || group_index_0 == group_index_1);
+			VGT_ASSERT(edge_is_locked || group_index_0 == group_index_1);
 			
 			if (edge_is_locked == false) {
 				meshlet_group_edge_ids[meshlet_group_edge_prefix_sum[group_index_0]++] = edge_id;
@@ -2200,8 +2212,8 @@ static u32 KdTreeBuildNode(Array<KdTreeNode>& nodes, ArrayView<KdTreeElement> el
 	u32 node_index_0 = KdTreeBuildNode(nodes, elements, CreateArrayView(indices, 0, split_index));
 	u32 node_index_1 = KdTreeBuildNode(nodes, elements, CreateArrayView(indices, split_index, indices.count));
 	
-	assert(node_index_0 == node_index + 1); // Left node is always the next node after the local root.
-	assert(node_index_1 > node_index);      // Right node offset is non zero. Zero means branch is pruned.
+	VGT_ASSERT(node_index_0 == node_index + 1); // Left node is always the next node after the local root.
+	VGT_ASSERT(node_index_1 > node_index);      // Right node offset is non zero. Zero means branch is pruned.
 	
 	nodes[node_index].payload = node_index_1 - node_index;
 	
@@ -2293,7 +2305,7 @@ static void KdTreeBuildElementsForFaces(MeshView mesh, Allocator& allocator, Arr
 		auto& element = elements[face_id.index];
 		auto& face    = mesh[face_id];
 		
-		assert(face.corner_list_base.index != u32_max);
+		VGT_ASSERT(face.corner_list_base.index != u32_max);
 		
 		Vector3 position = { 0.f, 0.f, 0.f };
 		float face_degree = 0.f;
@@ -2464,8 +2476,8 @@ static void BuildMeshletsForFaceGroup(
 		}
 		
 		if (restart_meshlet || best_face_id.index == u32_max || (meshlet_vertex_count + new_vertex_count > meshlet_target_vertex_count) || (meshlet_face_count + 1 > meshlet_target_face_count)) {
-			assert(meshlet_face_count   <= meshlet_target_face_count);
-			assert(meshlet_vertex_count <= meshlet_target_vertex_count);
+			VGT_ASSERT(meshlet_face_count   <= meshlet_target_face_count);
+			VGT_ASSERT(meshlet_vertex_count <= meshlet_target_vertex_count);
 			
 			for (auto attributes_id : meshlet_vertices) {
 				vertex_usage_map[attributes_id.index] = 0xFF;
@@ -2488,7 +2500,7 @@ static void BuildMeshletsForFaceGroup(
 		if (best_face_id.index == u32_max) continue;
 		
 		u32 best_face_geometry_index = mesh[best_face_id].geometry_index;
-		assert(meshlet_face_count == 0 || meshlet_geometry_index == best_face_geometry_index);
+		VGT_ASSERT(meshlet_face_count == 0 || meshlet_geometry_index == best_face_geometry_index);
 		
 		new_vertex_count = 0;
 		IterateCornerList<ElementType::Face>(mesh, mesh[best_face_id].corner_list_base, [&](CornerID corner_id) {
@@ -2534,8 +2546,8 @@ static void BuildMeshletsForFaceGroup(
 	}
 	
 	if (meshlet_face_count) {
-		assert(meshlet_face_count   <= meshlet_target_face_count);
-		assert(meshlet_vertex_count <= meshlet_target_vertex_count);
+		VGT_ASSERT(meshlet_face_count   <= meshlet_target_face_count);
+		VGT_ASSERT(meshlet_vertex_count <= meshlet_target_vertex_count);
 		
 		for (auto attributes_id : meshlet_vertices) {
 			vertex_usage_map[attributes_id.index] = 0xFF;
@@ -2576,7 +2588,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 	kd_tree.element_indices.count    = meshlet_group_faces.count;
 	kd_tree.element_indices.capacity = meshlet_group_faces.capacity;
 	static_assert(sizeof(FaceID) == sizeof(u32));
-	assert(kd_tree.elements.count == meshlet_group_faces.count);
+	VGT_ASSERT(kd_tree.elements.count == meshlet_group_faces.count);
 	
 	
 	Array<u8> vertex_usage_map;
@@ -2626,12 +2638,12 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 		
 		ArrayAppend(meshlet_group_meshlet_prefix_sum, meshlet_face_prefix_sum.count);
 		
-		assert(meshlet_faces.count == end_element_index);
+		VGT_ASSERT(meshlet_faces.count == end_element_index);
 		
 		begin_element_index = end_element_index;
 	}
 	
-	assert(meshlet_faces.count == mesh.face_count);
+	VGT_ASSERT(meshlet_faces.count == mesh.face_count);
 	
 	
 	Array<VgtMeshlet> meshlets;
@@ -2645,7 +2657,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 		auto meshlet_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 		
 		FixedSizeArray<VgtSphereBounds, meshlet_max_vertex_count> vertex_sphere_bounds;
-		assert(end_corner_index - begin_corner_index <= meshlet_max_vertex_count);
+		VGT_ASSERT(end_corner_index - begin_corner_index <= meshlet_max_vertex_count);
 		
 		for (u32 corner_index = begin_corner_index; corner_index < end_corner_index; corner_index += 1) {
 			auto corner_id = meshlet_corners[corner_index];
@@ -2737,7 +2749,7 @@ static MeshletAdjacency BuildMeshletAdjacency(MeshView mesh, Allocator& allocato
 					u32 other_meshlet_index = kd_tree_elements[other_face_id.index].partition_index;
 					if (other_meshlet_index == meshlet_index) return;
 					
-					assert(kd_tree_elements[other_face_id.index].is_active_element == 0); // Face isn't a part of any meshlet.
+					VGT_ASSERT(kd_tree_elements[other_face_id.index].is_active_element == 0); // Face isn't a part of any meshlet.
 					
 					u32 adjacency_info_index = meshlet_adjacency_info_indices[other_meshlet_index];
 					if (adjacency_info_index == u32_max) {
@@ -2910,7 +2922,7 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 		ArrayAppend(meshlet_group_prefix_sum, meshlet_group_meshlet_indices.count);
 	}
 	
-	assert(meshlet_group_meshlet_indices.count == meshlets.count);
+	VGT_ASSERT(meshlet_group_meshlet_indices.count == meshlets.count);
 	
 	MeshletGroupBuildResult result;
 	result.meshlet_indices = CreateArrayView(meshlet_group_meshlet_indices);
@@ -2936,9 +2948,9 @@ static void ConvertMeshletGroupsToFaceGroups(
 	Array<u32>& meshlet_group_face_prefix_sum,
 	Array<VgtErrorMetric>& meshlet_group_error_metrics) {
 	
-	assert(meshlet_group_faces.capacity           >= mesh.face_count);
-	assert(meshlet_group_face_prefix_sum.capacity >= mesh.face_count);
-	assert(meshlet_group_error_metrics.capacity   >= mesh.face_count);
+	VGT_ASSERT(meshlet_group_faces.capacity           >= mesh.face_count);
+	VGT_ASSERT(meshlet_group_face_prefix_sum.capacity >= mesh.face_count);
+	VGT_ASSERT(meshlet_group_error_metrics.capacity   >= mesh.face_count);
 	
 	meshlet_group_faces.count           = 0;
 	meshlet_group_face_prefix_sum.count = 0;
@@ -3202,8 +3214,8 @@ static void AppendChangedVertices(MeshView mesh, Allocator& heap_allocator, Arra
 void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVirtualGeometryBuildResult* result, const VgtSystemCallbacks* callbacks) {
 	using namespace VirtualGeometryTools;
 	
-	assert(inputs);
-	assert(result);
+	VGT_ASSERT(inputs);
+	VGT_ASSERT(result);
 	
 	//
 	// Virtual Geometry TODO:
@@ -3327,7 +3339,7 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 	result->meshlet_triangle_count = meshlet_triangles.count;
 	result->vertex_count           = vertices.count / (inputs->mesh.vertex_stride_bytes / sizeof(u32));
 	result->level_count            = levels.count;
-	assert(heap_allocator.memory_block_count == 6);
+	VGT_ASSERT(heap_allocator.memory_block_count == 6);
 	
 	AllocatorFreeMemoryBlocks(allocator);
 }
@@ -3351,8 +3363,8 @@ void VgtFreeVirtualGeometryBuildResult(const VgtVirtualGeometryBuildResult* resu
 void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationResult* result, const VgtSystemCallbacks* callbacks) {
 	using namespace VirtualGeometryTools;
 	
-	assert(inputs);
-	assert(result);
+	VGT_ASSERT(inputs);
+	VGT_ASSERT(result);
 	
 	
 	Allocator allocator;
@@ -3390,7 +3402,7 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 
 	result->max_error = max_error;
 	EditableMeshToIndexedMesh(mesh, allocator, heap_allocator, inputs->mesh.geometry_desc_count, result);
-	assert(heap_allocator.memory_block_count == 3);
+	VGT_ASSERT(heap_allocator.memory_block_count == 3);
 	
 	AllocatorFreeMemoryBlocks(allocator);
 }

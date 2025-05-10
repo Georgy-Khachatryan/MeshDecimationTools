@@ -3,8 +3,11 @@
 #ifndef MESHDECIMATION_H
 #define MESHDECIMATION_H
 
-#include <assert.h>
 #include <stdint.h>
+
+#if defined(__cplusplus)
+extern "C" {
+#endif // defined(__cplusplus)
 
 struct VgtVector3 {
 	float x;
@@ -178,5 +181,9 @@ void VgtFreeVirtualGeometryBuildResult(const struct VgtVirtualGeometryBuildResul
 void VgtFreeMeshDecimationResult(const struct VgtMeshDecimationResult* result, const struct VgtSystemCallbacks* callbacks);
 
 struct VgtSphereBounds VgtComputeSphereBoundsUnion(const struct VgtSphereBounds* source_sphere_bounds, uint32_t source_sphere_bounds_count);
+
+#if defined(__cplusplus)
+} // extern "C"
+#endif // defined(__cplusplus)
 
 #endif // MESHDECIMATION_H
