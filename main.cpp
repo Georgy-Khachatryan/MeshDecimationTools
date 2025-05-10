@@ -354,8 +354,9 @@ int main() {
 #endif // ENABLE_ALLOCATOR_VALIDATION
 #else // !BUILD_VIRTUAL_GEOMETRY
 	VgtMeshDecimationInputs inputs;
-	inputs.mesh = mesh_desc;
-	inputs.target_face_count = ((u32)triangle_mesh.indices.size() / 3) / 138;
+	inputs.mesh               = mesh_desc;
+	inputs.target_face_count  = ((u32)triangle_mesh.indices.size() / 3) / 138;
+	inputs.target_error_limit = FLT_MAX;
 	
 	VgtMeshDecimationResult result;
 	VgtDecimateMesh(&inputs, &result, &callbacks);

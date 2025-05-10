@@ -74,8 +74,7 @@ struct VgtMeshDecimationInputs {
 	struct VgtTriangleMeshDesc mesh;
 	
 	uint32_t target_face_count;
-	// TODO: Add support for error limit.
-	// float error_limit = 0.f;
+	float target_error_limit;
 	
 	// TODO: Generate multiple levels of detail at once.
 	// uint32_t level_of_detail_count = 0;

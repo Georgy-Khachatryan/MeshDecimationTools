@@ -1844,7 +1844,11 @@ static float DecimateMeshFaceGroup(
 	VgtNormalizeVertexAttributes normalize_vertex_attributes,
 	VertexID* changed_attribute_vertex_ids,
 	u32 target_face_count,
-	u32 active_face_count) {
+	u32 active_face_count,
+	float target_error_limit = FLT_MAX) {
+	
+	target_error_limit = target_error_limit * state.position_weight;
+	target_error_limit = target_error_limit * target_error_limit;
 	
 	float max_error = 0.f;
 	while (active_face_count > target_face_count && edge_collapse_heap.edge_collapse_errors.count) {
@@ -1866,6 +1870,7 @@ static float DecimateMeshFaceGroup(
 		
 		// 2% of the execution time
 		auto collapse_error = ComputeEdgeCollapseError(mesh, heap_allocator, state, edge_id);
+		if (collapse_error.min_error > target_error_limit) break;
 		
 		max_error = max_error < collapse_error.min_error ? collapse_error.min_error : max_error;
 		
@@ -3356,7 +3361,7 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 	
 	u32 target_face_count = inputs->target_face_count;
 	u32 active_face_count = mesh.face_count;
-	float max_error = DecimateMeshFaceGroup(mesh, heap_allocator, state, edge_collapse_heap, inputs->mesh.normalize_vertex_attributes, nullptr, target_face_count, active_face_count);
+	float max_error = DecimateMeshFaceGroup(mesh, heap_allocator, state, edge_collapse_heap, inputs->mesh.normalize_vertex_attributes, nullptr, target_face_count, active_face_count, inputs->target_error_limit);
 	
 	AllocatorFreeMemoryBlocks(heap_allocator);
 
