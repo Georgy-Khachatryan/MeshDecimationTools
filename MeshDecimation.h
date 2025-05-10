@@ -6,46 +6,46 @@
 #include <assert.h>
 #include <stdint.h>
 
-struct Vector3 {
+struct VgtVector3 {
 	float x;
 	float y;
 	float z;
 
 #if defined(__cplusplus)	
-	friend bool operator== (const Vector3& lh, const Vector3& rh) { return lh.x == rh.x && lh.y == rh.y && lh.z == rh.z; }
+	friend bool operator== (const VgtVector3& lh, const VgtVector3& rh) { return lh.x == rh.x && lh.y == rh.y && lh.z == rh.z; }
 	float& operator[] (uint32_t index) { return (&x)[index]; }
 	float operator[] (uint32_t index) const { return (&x)[index]; }
 #endif // defined(__cplusplus)	
 };
 
-struct SphereBounds {
-	struct Vector3 center;
-	float          radius;
+struct VgtSphereBounds {
+	struct VgtVector3 center;
+	float             radius;
 };
 
-struct ErrorMetric {
-	struct SphereBounds bounds;
-	float               error;
+struct VgtErrorMetric {
+	struct VgtSphereBounds bounds;
+	float                  error;
 };
 
 
-typedef void* (*ReallocCallback)(void* old_memory_block, uint64_t size_bytes, void* user_data);
+typedef void* (*VgtReallocCallback)(void* old_memory_block, uint64_t size_bytes, void* user_data);
 
-struct AllocatorCallbacks {
-	ReallocCallback realloc;
-	void* user_data;
+struct VgtAllocatorCallbacks {
+	VgtReallocCallback realloc;
+	void*            user_data;
 };
 
-struct SystemCallbacks {
+struct VgtSystemCallbacks {
 	// Optional memory allocation callbacks. If they're not provided the system falls back to realloc().
-	struct AllocatorCallbacks temp_allocator; // Memory blocks are allocated and freed in stack order.
-	struct AllocatorCallbacks heap_allocator; // Memory blocks are allocated and freed in any order.
+	struct VgtAllocatorCallbacks temp_allocator; // Memory blocks are allocated and freed in stack order.
+	struct VgtAllocatorCallbacks heap_allocator; // Memory blocks are allocated and freed in any order.
 };
 
 
-typedef void(*NormalizeVertexAttributes)(float* attributes);
+typedef void (*VgtNormalizeVertexAttributes)(float* attributes);
 
-struct TriangleGeometryDesc {
+struct VgtTriangleGeometryDesc {
 	const uint32_t* indices;
 	uint32_t index_count;
 	
@@ -53,25 +53,25 @@ struct TriangleGeometryDesc {
 	uint32_t vertex_count;
 };
 
-struct TriangleMeshDesc {
-	const struct TriangleGeometryDesc* geometry_descs;
+struct VgtTriangleMeshDesc {
+	const struct VgtTriangleGeometryDesc* geometry_descs;
 	uint32_t geometry_desc_count;
 	uint32_t vertex_stride_bytes;
 	
 	float* attribute_weights;
-	NormalizeVertexAttributes normalize_vertex_attributes;
+	VgtNormalizeVertexAttributes normalize_vertex_attributes;
 };
 
-struct VirtualGeometryBuildInputs {
-	struct TriangleMeshDesc mesh;
+struct VgtVirtualGeometryBuildInputs {
+	struct VgtTriangleMeshDesc mesh;
 	
 	// TODO: Custom meshlet size.
 	// uint32_t meshlet_max_vertex_count   = 128;
 	// uint32_t meshlet_max_triangle_count = 128;
 };
 
-struct MeshDecimationInputs {
-	struct TriangleMeshDesc mesh;
+struct VgtMeshDecimationInputs {
+	struct VgtTriangleMeshDesc mesh;
 	
 	uint32_t target_face_count;
 	// TODO: Add support for error limit.
@@ -81,21 +81,27 @@ struct MeshDecimationInputs {
 	// uint32_t level_of_detail_count = 0;
 };
 
-struct Meshlet {
+struct VgtMeshletTriangle {
+	uint32_t i0 : 10;
+	uint32_t i1 : 10;
+	uint32_t i2 : 10;
+};
+
+struct VgtMeshlet {
 	// Bounding box over meshlet vertex positions.
-	struct Vector3 aabb_min;
-	struct Vector3 aabb_max;
+	struct VgtVector3 aabb_min;
+	struct VgtVector3 aabb_max;
 	
 	// Bounding sphere over meshlet vertex positions.
-	struct SphereBounds geometric_sphere_bounds;
+	struct VgtSphereBounds geometric_sphere_bounds;
 	
 	// Error metric of this meshlet. Transferred from the group this meshlet was built from.
-	struct ErrorMetric current_level_error_metric;
+	struct VgtErrorMetric current_level_error_metric;
 	// current_level_error_metric is extracted from this meshlet group.
 	uint32_t current_level_meshlet_group_index;
 	
 	// Error metric of one level coarser representation of this meshlet. Transferred from the group that was built using this meshlet.
-	struct ErrorMetric coarser_level_error_metric;
+	struct VgtErrorMetric coarser_level_error_metric;
 	// coarser_level_error_metric is extracted from this meshlet group.
 	uint32_t coarser_level_meshlet_group_index;
 	
@@ -108,17 +114,17 @@ struct Meshlet {
 	uint32_t geometry_index;
 };
 
-struct MeshletGroup {
+struct VgtMeshletGroup {
 	// Bounding box over child bounding boxes.
-	struct Vector3 aabb_min;
-	struct Vector3 aabb_max;
+	struct VgtVector3 aabb_min;
+	struct VgtVector3 aabb_max;
 	
 	// Bounding sphere over child bounding spheres.
-	struct SphereBounds geometric_sphere_bounds;
+	struct VgtSphereBounds geometric_sphere_bounds;
 	
 	// Internal nodes store union of child node error metrics.
 	// Leaf nodes store coarser_level_error_metric from child meshlets (it is the same by construction).
-	struct ErrorMetric error_metric;
+	struct VgtErrorMetric error_metric;
 	
 	uint32_t begin_meshlet_index;
 	uint32_t end_meshlet_index;
@@ -126,7 +132,7 @@ struct MeshletGroup {
 	uint32_t level_of_detail_index;
 };
 
-struct VirtualGeometryLevel {
+struct VgtVirtualGeometryLevel {
 	uint32_t begin_meshlet_groups_index;
 	uint32_t end_meshlet_groups_index;
 	
@@ -134,13 +140,13 @@ struct VirtualGeometryLevel {
 	uint32_t end_meshlets_index;
 };
 
-struct VirtualGeometryBuildResult {
-	struct MeshletGroup* meshlet_groups;
-	struct Meshlet* meshlets;
+struct VgtVirtualGeometryBuildResult {
+	struct VgtMeshletGroup* meshlet_groups;
+	struct VgtMeshlet* meshlets;
 	uint32_t* meshlet_vertex_indices;
-	uint8_t* meshlet_triangles;
+	struct VgtMeshletTriangle* meshlet_triangles;
 	float* vertices;
-	struct VirtualGeometryLevel* levels;
+	struct VgtVirtualGeometryLevel* levels;
 	
 	uint32_t meshlet_group_count;
 	uint32_t meshlet_count;
@@ -150,7 +156,7 @@ struct VirtualGeometryBuildResult {
 	uint32_t level_count;
 };
 
-struct MeshDecimationResult {
+struct VgtMeshDecimationResult {
 	// TODO: Output per geometry index and vertex ranges.
 	uint32_t* indices;
 	float* vertices;
@@ -161,12 +167,12 @@ struct MeshDecimationResult {
 	float max_error;
 };
 
-void BuildVirtualGeometry(const struct VirtualGeometryBuildInputs* inputs, struct VirtualGeometryBuildResult* result, const struct SystemCallbacks* callbacks);
-void DecimateMesh(const struct MeshDecimationInputs* inputs, struct MeshDecimationResult* result, const struct SystemCallbacks* callbacks);
+void VgtBuildVirtualGeometry(const struct VgtVirtualGeometryBuildInputs* inputs, struct VgtVirtualGeometryBuildResult* result, const struct VgtSystemCallbacks* callbacks);
+void VgtDecimateMesh(const struct VgtMeshDecimationInputs* inputs, struct VgtMeshDecimationResult* result, const struct VgtSystemCallbacks* callbacks);
 
-void FreeVirtualGeometryBuildResult(const struct VirtualGeometryBuildResult* result, const struct SystemCallbacks* callbacks);
-void FreeMeshDecimationResult(const struct MeshDecimationResult* result, const struct SystemCallbacks* callbacks);
+void VgtFreeVirtualGeometryBuildResult(const struct VgtVirtualGeometryBuildResult* result, const struct VgtSystemCallbacks* callbacks);
+void VgtFreeMeshDecimationResult(const struct VgtMeshDecimationResult* result, const struct VgtSystemCallbacks* callbacks);
 
-struct SphereBounds ComputeSphereBoundsUnion(const struct SphereBounds* source_sphere_bounds, uint32_t source_sphere_bounds_count);
+struct VgtSphereBounds VgtComputeSphereBoundsUnion(const struct VgtSphereBounds* source_sphere_bounds, uint32_t source_sphere_bounds_count);
 
 #endif // MESHDECIMATION_H

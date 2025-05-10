@@ -27,17 +27,21 @@
 #define always_inline_function
 #endif // !defined(_MSC_VER)
 
-#if !defined(CACHE_LINE_SIZE)
-#define CACHE_LINE_SIZE 64
-#endif // !defined(CACHE_LINE_SIZE)
+#if !defined(VGT_CACHE_LINE_SIZE)
+#define VGT_CACHE_LINE_SIZE 64
+#endif // !defined(VGT_CACHE_LINE_SIZE)
 
-#if !defined(MAX_ATTRIBUTE_STRIDE_DWORDS)
-#define MAX_ATTRIBUTE_STRIDE_DWORDS 5
-#endif // !defined(MAX_ATTRIBUTE_STRIDE_DWORDS)
+#if !defined(VGT_MAX_ATTRIBUTE_STRIDE_DWORDS)
+#define VGT_MAX_ATTRIBUTE_STRIDE_DWORDS 5
+#endif // !defined(VGT_MAX_ATTRIBUTE_STRIDE_DWORDS)
+
+#if !defined(VGT_ENABLE_ATTRIBUTE_SUPPORT)
+#define VGT_ENABLE_ATTRIBUTE_SUPPORT 1
+#endif // !defined(VGT_ENABLE_ATTRIBUTE_SUPPORT)
 
 #define compile_const constexpr static const
 
-namespace MeshDecimation
+namespace VirtualGeometryTools
 {
 
 using u8  = uint8_t;
@@ -52,6 +56,7 @@ compile_const u8  u8_max  = (u8)0xFF;
 compile_const u32 u32_max = (u32)0xFFFF'FFFF;
 compile_const u64 u64_max = (u64)0xFFFF'FFFF'FFFF'FFFF;
 
+using Vector3 = VgtVector3;
 
 compile_const u32 meshlet_max_vertex_count = 128;
 compile_const u32 meshlet_max_face_degree  = 3;
@@ -175,7 +180,7 @@ struct alignas(16) Vertex {
 };
 
 
-struct alignas(CACHE_LINE_SIZE) MeshView {
+struct alignas(VGT_CACHE_LINE_SIZE) MeshView {
 	Face*   faces      = nullptr;
 	Edge*   edges      = nullptr;
 	Vertex* vertices   = nullptr;
@@ -342,7 +347,7 @@ static ElementID CornerListMerge(MeshView mesh, ElementID element_0, ElementID e
 struct Allocator {
 	compile_const u32 max_memory_block_count = 48;
 	
-	AllocatorCallbacks callbacks;
+	VgtAllocatorCallbacks callbacks;
 	
 	u32 memory_block_count = 0;
 	void* memory_blocks[max_memory_block_count] = {};
@@ -361,7 +366,7 @@ static void* AllocateMemoryBlock(Allocator& allocator, void* old_memory_block, u
 	return memory_block;
 }
 
-static void InitializeAllocator(Allocator& allocator, const AllocatorCallbacks* callbacks) {
+static void InitializeAllocator(Allocator& allocator, const VgtAllocatorCallbacks* callbacks) {
 	if (callbacks) {
 		allocator.callbacks = *callbacks;
 	} else {
@@ -671,7 +676,7 @@ static u32 ComputeHashTableSize(u32 max_element_count) {
 }
 
 
-static MeshView BuildEditableMesh(Allocator& allocator, const TriangleGeometryDesc* geometry_descs, u32 geometry_desc_count, u32 vertex_stride_bytes) {
+static MeshView BuildEditableMesh(Allocator& allocator, const VgtTriangleGeometryDesc* geometry_descs, u32 geometry_desc_count, u32 vertex_stride_bytes) {
 	u32 vertices_count = 0;
 	u32 indices_count  = 0;
 	
@@ -802,7 +807,7 @@ static MeshView BuildEditableMesh(Allocator& allocator, const TriangleGeometryDe
 	return mesh;
 }
 
-static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, Allocator& heap_allocator, MeshDecimationResult* result) {
+static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, Allocator& heap_allocator, VgtMeshDecimationResult* result) {
 	u32 allocator_high_water = allocator.memory_block_count;
 	assert(heap_allocator.memory_block_count == 0);
 	
@@ -980,15 +985,13 @@ struct Quadric {
 	float weight = 0.f;
 };
 
-#define ENABLE_ATTRIBUTE_SUPPORT 1
-
 struct QuadricWithAttributes : Quadric {
-#if ENABLE_ATTRIBUTE_SUPPORT
+#if VGT_ENABLE_ATTRIBUTE_SUPPORT
 	struct {
 		Vector3 g = { 0.f, 0.f, 0.f };
 		float d = 0.f;
-	} attributes[MAX_ATTRIBUTE_STRIDE_DWORDS];
-#endif // ENABLE_ATTRIBUTE_SUPPORT
+	} attributes[VGT_MAX_ATTRIBUTE_STRIDE_DWORDS];
+#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
 };
 
 
@@ -1047,7 +1050,7 @@ static void AccumulateQuadric(Quadric& accumulator, const Quadric& quadric) {
 static void AccumulateQuadricWithAttributes(QuadricWithAttributes& accumulator, const QuadricWithAttributes& quadric, u32 attribute_stride_dwords) {
 	AccumulateQuadric(accumulator, quadric);
 	
-#if ENABLE_ATTRIBUTE_SUPPORT
+#if VGT_ENABLE_ATTRIBUTE_SUPPORT
 	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
 		auto& attribute_accumulator = accumulator.attributes[i];
 		auto& attribute_quadric     = quadric.attributes[i];
@@ -1057,7 +1060,7 @@ static void AccumulateQuadricWithAttributes(QuadricWithAttributes& accumulator, 
 		attribute_accumulator.g.z += attribute_quadric.g.z;
 		attribute_accumulator.d   += attribute_quadric.d;
 	}
-#endif // ENABLE_ATTRIBUTE_SUPPORT
+#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
 }
 
 static void ComputePlanarQuadric(Quadric& quadric, const Vector3& n, float d, float weight) {
@@ -1113,7 +1116,7 @@ static void ComputeFaceQuadricWithAttributes(QuadricWithAttributes& quadric, con
 	ComputePlanarQuadric(quadric, n, -DotProduct(n, p0), weight);
 	
 	
-#if ENABLE_ATTRIBUTE_SUPPORT
+#if VGT_ENABLE_ATTRIBUTE_SUPPORT
 	//
 	// For reference see [Hugues Hoppe 1999] Section 4 New Quadric Error Metric.
 	//
@@ -1185,7 +1188,7 @@ static void ComputeFaceQuadricWithAttributes(QuadricWithAttributes& quadric, con
 		quadric.attributes[i].g = g * weight;
 		quadric.attributes[i].d = d * weight;
 	}
-#endif // ENABLE_ATTRIBUTE_SUPPORT
+#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
 }
 
 static float ComputeQuadricError(const Quadric& q, const Vector3& p) {
@@ -1218,7 +1221,7 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 	// 
 	float weighted_error = ComputeQuadricError(q, p);
 	
-#if ENABLE_ATTRIBUTE_SUPPORT
+#if VGT_ENABLE_ATTRIBUTE_SUPPORT
 	if (q.weight < FLT_EPSILON) return weighted_error;
 	
 	float rcp_weight = 1.f / q.weight;
@@ -1242,12 +1245,12 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 		
 		weighted_error += weighted_attribute_error;
 	}
-#endif // ENABLE_ATTRIBUTE_SUPPORT
+#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
 	
 	return fabsf(weighted_error);
 }
 
-#if ENABLE_ATTRIBUTE_SUPPORT
+#if VGT_ENABLE_ATTRIBUTE_SUPPORT
 // Attribute computation for zero weight quadrics should be handled by the caller.
 static bool ComputeWedgeAttributes(const QuadricWithAttributes& q, const Vector3& p, float* attributes, float* rcp_attribute_weights, u32 attribute_stride_dwords) {
 	if (q.weight < FLT_EPSILON) return false;
@@ -1264,7 +1267,7 @@ static bool ComputeWedgeAttributes(const QuadricWithAttributes& q, const Vector3
 	
 	return true;
 }
-#endif // ENABLE_ATTRIBUTE_SUPPORT
+#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
 
 static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, Vector3& optimal_position, u32 attribute_stride_dwords) {
 	//
@@ -1289,7 +1292,7 @@ static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, V
 	float h1 = 0.f;
 	float h2 = 0.f;
 	
-#if ENABLE_ATTRIBUTE_SUPPORT
+#if VGT_ENABLE_ATTRIBUTE_SUPPORT
 	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
 		auto g = quadric.attributes[i].g;
 		auto d = quadric.attributes[i].d;
@@ -1307,7 +1310,7 @@ static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, V
 		h1 += (g.y * d);
 		h2 += (g.z * d);
 	}
-#endif // ENABLE_ATTRIBUTE_SUPPORT
+#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
 	
 	// M = C - B * B^T * (1.0 / alpha)
 	float rcp_weight = 1.f / quadric.weight;
@@ -1429,7 +1432,7 @@ static u32 AttributeWedgeMapFind(AttributeWedgeMap& small_set, AttributesID key)
 }
 
 
-struct alignas(CACHE_LINE_SIZE) MeshDecimationState {
+struct alignas(VGT_CACHE_LINE_SIZE) MeshDecimationState {
 	// Edge quadrics accumulated on vertices.
 	Array<Quadric> vertex_edge_quadrics;
 	
@@ -1443,8 +1446,8 @@ struct alignas(CACHE_LINE_SIZE) MeshDecimationState {
 	Array<AttributesID> wedge_attributes_ids;
 	AttributeWedgeMap wedge_attribute_set;
 	
-	alignas(16) float attribute_weights[MAX_ATTRIBUTE_STRIDE_DWORDS];
-	alignas(16) float rcp_attribute_weights[MAX_ATTRIBUTE_STRIDE_DWORDS];
+	alignas(16) float attribute_weights[VGT_MAX_ATTRIBUTE_STRIDE_DWORDS];
+	alignas(16) float rcp_attribute_weights[VGT_MAX_ATTRIBUTE_STRIDE_DWORDS];
 	
 	float position_weight;
 	float rcp_position_weight;
@@ -1689,7 +1692,7 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 	HashTableGrow(state.edge_duplicate_map,  heap_allocator, ComputeHashTableSize(128u));
 	
 	
-	for (u32 i = 0; i < MAX_ATTRIBUTE_STRIDE_DWORDS; i += 1) {
+	for (u32 i = 0; i < VGT_MAX_ATTRIBUTE_STRIDE_DWORDS; i += 1) {
 		float attribute_weight = attribute_weights && i < mesh.attribute_stride_dwords ? attribute_weights[i] : 0.f;
 		
 		if (attribute_weight > FLT_EPSILON) {
@@ -1814,7 +1817,7 @@ static float DecimateMeshFaceGroup(
 	Allocator& heap_allocator,
 	MeshDecimationState& state,
 	EdgeCollapseHeap& edge_collapse_heap,
-	NormalizeVertexAttributes normalize_vertex_attributes,
+	VgtNormalizeVertexAttributes normalize_vertex_attributes,
 	VertexID* changed_attribute_vertex_ids,
 	u32 target_face_count,
 	u32 active_face_count) {
@@ -1864,7 +1867,7 @@ static float DecimateMeshFaceGroup(
 			state.vertex_edge_quadrics[edge.vertex_1.index] = quadric;
 		}
 		
-#if ENABLE_ATTRIBUTE_SUPPORT
+#if VGT_ENABLE_ATTRIBUTE_SUPPORT
 		// Update attributes.
 		if (remaining_vertex_id.index != u32_max) {
 			u32 wedge_count = state.wedge_quadrics.count;
@@ -1891,7 +1894,7 @@ static float DecimateMeshFaceGroup(
 				if (index != u32_max) mesh[corner_id].attributes_id = state.wedge_attributes_ids[index];
 			});
 		}
-#endif // ENABLE_ATTRIBUTE_SUPPORT
+#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
 	}
 	
 	HashTableClear(state.edge_duplicate_map);
@@ -1904,11 +1907,11 @@ static void DecimateMeshFaceGroups(
 	MeshView mesh,
 	Allocator& allocator,
 	Allocator& heap_allocator,
-	NormalizeVertexAttributes normalize_vertex_attributes,
+	VgtNormalizeVertexAttributes normalize_vertex_attributes,
 	float* attribute_weights,
 	Array<FaceID> meshlet_group_faces,
 	Array<u32> meshlet_group_face_prefix_sum,
-	Array<ErrorMetric> meshlet_group_error_metrics,
+	Array<VgtErrorMetric> meshlet_group_error_metrics,
 	Array<VertexID> changed_attribute_vertex_ids) {
 	
 	u32 allocator_high_water = allocator.memory_block_count;
@@ -2268,7 +2271,7 @@ static void KdTreeBuildElementsForFaces(MeshView mesh, Allocator& allocator, Arr
 	}
 }
 
-static void KdTreeBuildElementsForMeshlets(ArrayView<Meshlet> meshlets, Allocator& allocator, Array<KdTreeElement>& elements) {
+static void KdTreeBuildElementsForMeshlets(ArrayView<VgtMeshlet> meshlets, Allocator& allocator, Array<KdTreeElement>& elements) {
 	ArrayResize(elements, allocator, meshlets.count);
 	
 	for (u32 meshlet_index = 0; meshlet_index < meshlets.count; meshlet_index += 1) {
@@ -2281,8 +2284,8 @@ static void KdTreeBuildElementsForMeshlets(ArrayView<Meshlet> meshlets, Allocato
 	}
 }
 
-static SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds) {
-	return ComputeSphereBoundsUnion(source_sphere_bounds.data, source_sphere_bounds.count);
+static VgtSphereBounds ComputeSphereBoundsUnion(ArrayView<VgtSphereBounds> source_sphere_bounds) {
+	return VgtComputeSphereBoundsUnion(source_sphere_bounds.data, source_sphere_bounds.count);
 }
 
 struct MeshletAdjacencyInfo {
@@ -2298,7 +2301,7 @@ struct MeshletAdjacency {
 struct MeshletBuildResult {
 	ArrayView<FaceID>  meshlet_faces;
 	ArrayView<u32>     meshlet_face_prefix_sum;
-	ArrayView<Meshlet> meshlets;
+	ArrayView<VgtMeshlet> meshlets;
 	
 	ArrayView<u8>       meshlet_triangles;
 	ArrayView<CornerID> meshlet_corners;
@@ -2514,7 +2517,7 @@ static void BuildMeshletsForFaceGroup(
 }
 
 // Note that FaceIDs inside groups are going to be scrambled inside groups during KdTree build. This leaves prefix sum in a valid, but different state.
-static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& allocator, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<ErrorMetric> meshlet_group_error_metrics, u32 meshlet_group_base_index) {
+static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& allocator, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<VgtErrorMetric> meshlet_group_error_metrics, u32 meshlet_group_base_index) {
 	KdTree kd_tree;
 	KdTreeBuildElementsForFaces(mesh, allocator, kd_tree.elements);
 	ArrayReserve(kd_tree.nodes, allocator, kd_tree.elements.count * 2);
@@ -2581,7 +2584,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 	assert(meshlet_faces.count == mesh.face_count);
 	
 	
-	Array<Meshlet> meshlets;
+	Array<VgtMeshlet> meshlets;
 	ArrayResize(meshlets, allocator, meshlet_corner_prefix_sum.count);
 	
 	u32 begin_corner_index = 0;
@@ -2591,7 +2594,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 		auto meshlet_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
 		auto meshlet_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 		
-		FixedSizeArray<SphereBounds, meshlet_max_vertex_count> vertex_sphere_bounds;
+		FixedSizeArray<VgtSphereBounds, meshlet_max_vertex_count> vertex_sphere_bounds;
 		assert(end_corner_index - begin_corner_index <= meshlet_max_vertex_count);
 		
 		for (u32 corner_index = begin_corner_index; corner_index < end_corner_index; corner_index += 1) {
@@ -2602,7 +2605,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 			meshlet_aabb_min = VectorMin(meshlet_aabb_min, position);
 			meshlet_aabb_max = VectorMax(meshlet_aabb_max, position);
 			
-			SphereBounds bounds;
+			VgtSphereBounds bounds;
 			bounds.center = position;
 			bounds.radius = 0.f;
 			ArrayAppend(vertex_sphere_bounds, bounds);
@@ -2750,7 +2753,7 @@ struct MeshletGroupBuildResult {
 	ArrayView<u32> prefix_sum;
 };
 
-static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allocator, ArrayView<Meshlet> meshlets, MeshletAdjacency meshlet_adjacency, ArrayView<u32> meshlet_face_prefix_sum) {
+static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allocator, ArrayView<VgtMeshlet> meshlets, MeshletAdjacency meshlet_adjacency, ArrayView<u32> meshlet_face_prefix_sum) {
 	KdTree kd_tree;
 	KdTreeBuildElementsForMeshlets(meshlets, allocator, kd_tree.elements);
 	KdTreeBuild(kd_tree, allocator);
@@ -2881,7 +2884,7 @@ static void ConvertMeshletGroupsToFaceGroups(
 	MeshletGroupBuildResult meshlet_group_build_result,
 	Array<FaceID>& meshlet_group_faces,
 	Array<u32>& meshlet_group_face_prefix_sum,
-	Array<ErrorMetric>& meshlet_group_error_metrics) {
+	Array<VgtErrorMetric>& meshlet_group_error_metrics) {
 	
 	assert(meshlet_group_faces.capacity           >= mesh.face_count);
 	assert(meshlet_group_face_prefix_sum.capacity >= mesh.face_count);
@@ -2895,7 +2898,7 @@ static void ConvertMeshletGroupsToFaceGroups(
 	for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
 		u32 group_meshlet_end_index = meshlet_group_build_result.prefix_sum[group_index];
 		
-		FixedSizeArray<SphereBounds, meshlet_group_max_meshlet_count> meshlet_error_sphere_bounds;
+		FixedSizeArray<VgtSphereBounds, meshlet_group_max_meshlet_count> meshlet_error_sphere_bounds;
 		float max_error = 0.f;
 		
 		for (u32 group_meshlet_index = group_meshlet_begin_index; group_meshlet_index < group_meshlet_end_index; group_meshlet_index += 1) {
@@ -2919,7 +2922,7 @@ static void ConvertMeshletGroupsToFaceGroups(
 		//
 		// See [Karis 2021] for reference on monotonic error metric.
 		//
-		ErrorMetric meshlet_group_minimum_error_metric;
+		VgtErrorMetric meshlet_group_minimum_error_metric;
 		meshlet_group_minimum_error_metric.bounds = ComputeSphereBoundsUnion(CreateArrayView(meshlet_error_sphere_bounds));
 		meshlet_group_minimum_error_metric.error  = max_error;
 		ArrayAppend(meshlet_group_error_metrics, meshlet_group_minimum_error_metric);
@@ -2928,7 +2931,7 @@ static void ConvertMeshletGroupsToFaceGroups(
 	}
 }
 
-static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<ErrorMetric> meshlet_group_error_metrics, Array<MeshletGroup>& meshlet_groups, Array<Meshlet>& meshlets, u32 level_index) {
+static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<VgtErrorMetric> meshlet_group_error_metrics, Array<VgtMeshletGroup>& meshlet_groups, Array<VgtMeshlet>& meshlets, u32 level_index) {
 	if (meshlet_groups.capacity == 0) {
 		ArrayReserve(meshlet_groups, heap_allocator, meshlet_group_build_result.prefix_sum.count * 4);
 	}
@@ -2946,7 +2949,7 @@ static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuil
 		auto meshlet_group_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
 		auto meshlet_group_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 		
-		FixedSizeArray<SphereBounds, meshlet_group_max_meshlet_count> meshlet_sphere_bounds;
+		FixedSizeArray<VgtSphereBounds, meshlet_group_max_meshlet_count> meshlet_sphere_bounds;
 		auto meshlet_group_error_metric = meshlet_group_error_metrics[group_index];
 		
 		u32 begin_meshlet_index = meshlets.count;
@@ -2966,7 +2969,7 @@ static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuil
 		}
 		u32 end_meshlet_index = meshlets.count;
 		
-		MeshletGroup meshlet_group;
+		VgtMeshletGroup meshlet_group;
 		meshlet_group.aabb_min = meshlet_group_aabb_min;
 		meshlet_group.aabb_max = meshlet_group_aabb_max;
 		
@@ -3052,15 +3055,16 @@ static void CompactMesh(MeshView& mesh, Allocator& allocator, Array<FaceID>& mes
 }
 
 // TODO: Rework vertex indexing code. This can be a just memcpy. Or even better we could output this data directly into the output buffers.
-static void BuildMeshletVertexAndIndexBuffers(MeshView mesh, Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, Array<u32> attributes_id_to_vertex_index, Array<u32>& meshlet_vertex_indices, Array<u8>& meshlet_triangles) {
+static void BuildMeshletVertexAndIndexBuffers(MeshView mesh, Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, Array<u32> attributes_id_to_vertex_index, Array<u32>& meshlet_vertex_indices, Array<VgtMeshletTriangle>& meshlet_triangles) {
 	auto meshlet_corner_prefix_sum = meshlet_build_result.meshlet_corner_prefix_sum;
 	
 	if (meshlet_vertex_indices.count + meshlet_build_result.meshlet_corners.count > meshlet_vertex_indices.capacity) {
 		ArrayGrow(meshlet_vertex_indices, heap_allocator, ArrayComputeNewCapacity(meshlet_vertex_indices.capacity, meshlet_vertex_indices.count + meshlet_build_result.meshlet_corners.count));
 	}
 	
-	if (meshlet_triangles.count + meshlet_build_result.meshlet_triangles.count > meshlet_triangles.capacity) {
-		ArrayGrow(meshlet_triangles, heap_allocator, ArrayComputeNewCapacity(meshlet_triangles.capacity, meshlet_triangles.count + meshlet_build_result.meshlet_triangles.count));
+	u32 new_meshlets_triangle_count = (meshlet_build_result.meshlet_triangles.count / 3);
+	if (meshlet_triangles.count + new_meshlets_triangle_count > meshlet_triangles.capacity) {
+		ArrayGrow(meshlet_triangles, heap_allocator, ArrayComputeNewCapacity(meshlet_triangles.capacity, meshlet_triangles.count + new_meshlets_triangle_count));
 	}
 	
 	u32 begin_corner_index = 0;
@@ -3092,13 +3096,12 @@ static void BuildMeshletVertexAndIndexBuffers(MeshView mesh, Allocator& heap_all
 		
 		u32 begin_meshlet_triangles_index = meshlet_triangles.count;
 		for (u32 face_index = begin_face_index; face_index < end_face_index; face_index += 1) {
-			u8 i0 = meshlet_build_result.meshlet_triangles[face_index * 3 + 0];
-			u8 i1 = meshlet_build_result.meshlet_triangles[face_index * 3 + 1];
-			u8 i2 = meshlet_build_result.meshlet_triangles[face_index * 3 + 2];
-			
-			ArrayAppend(meshlet_triangles, i0);
-			ArrayAppend(meshlet_triangles, i1);
-			ArrayAppend(meshlet_triangles, i2);
+			VgtMeshletTriangle triangle;
+			triangle.i0 = meshlet_build_result.meshlet_triangles[face_index * 3 + 0];
+			triangle.i1 = meshlet_build_result.meshlet_triangles[face_index * 3 + 1];
+			triangle.i2 = meshlet_build_result.meshlet_triangles[face_index * 3 + 2];
+
+			ArrayAppend(meshlet_triangles, triangle);
 		}
 		u32 end_meshlet_triangles_index = meshlet_triangles.count;
 		
@@ -3143,11 +3146,11 @@ static void AppendChangedVertices(MeshView mesh, Allocator& heap_allocator, Arra
 	}
 }
 
-} // namespace MeshDecimation
+} // namespace VirtualGeometryTools
 
 
-void BuildVirtualGeometry(const VirtualGeometryBuildInputs* inputs, VirtualGeometryBuildResult* result, const SystemCallbacks* callbacks) {
-	using namespace MeshDecimation;
+void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVirtualGeometryBuildResult* result, const VgtSystemCallbacks* callbacks) {
+	using namespace VirtualGeometryTools;
 	
 	assert(inputs);
 	assert(result);
@@ -3170,7 +3173,7 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs* inputs, VirtualGeome
 	
 	Array<FaceID> meshlet_group_faces;
 	Array<u32> meshlet_group_face_prefix_sum;
-	Array<ErrorMetric> meshlet_group_error_metrics;
+	Array<VgtErrorMetric> meshlet_group_error_metrics;
 	ArrayResize(meshlet_group_faces, allocator, mesh.face_count);
 	ArrayReserve(meshlet_group_face_prefix_sum, allocator, mesh.face_count);
 	ArrayReserve(meshlet_group_error_metrics, allocator, mesh.face_count);
@@ -3211,14 +3214,14 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs* inputs, VirtualGeome
 		AppendChangedVertices(mesh, heap_allocator, changed_attribute_vertex_ids, attributes_id_to_vertex_index, vertices);
 	}
 	
-	Array<VirtualGeometryLevel> levels;
+	Array<VgtVirtualGeometryLevel> levels;
 	ArrayReserve(levels, heap_allocator, virtual_geometry_max_levels_of_details);
 	
-	Array<MeshletGroup> meshlet_groups;
-	Array<Meshlet>      meshlets;
+	Array<VgtMeshletGroup> meshlet_groups;
+	Array<VgtMeshlet>      meshlets;
 	
 	Array<u32> meshlet_vertex_indices;
-	Array<u8>  meshlet_triangles;
+	Array<VgtMeshletTriangle> meshlet_triangles;
 	
 	for (u32 level_index = 0; level_index < virtual_geometry_max_levels_of_details; level_index += 1) {
 		u32 allocator_high_water = allocator.memory_block_count;
@@ -3244,7 +3247,7 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs* inputs, VirtualGeome
 			for (auto& error_metric : meshlet_group_error_metrics) error_metric.error = FLT_MAX;
 		}
 		
-		VirtualGeometryLevel level;
+		VgtVirtualGeometryLevel level;
 		level.begin_meshlet_groups_index = meshlet_groups.count;
 		level.begin_meshlets_index       = meshlets.count;
 		
@@ -3277,8 +3280,8 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs* inputs, VirtualGeome
 	AllocatorFreeMemoryBlocks(allocator);
 }
 
-void FreeVirtualGeometryBuildResult(const VirtualGeometryBuildResult* result, const SystemCallbacks* callbacks) {
-	using namespace MeshDecimation;
+void VgtFreeVirtualGeometryBuildResult(const VgtVirtualGeometryBuildResult* result, const VgtSystemCallbacks* callbacks) {
+	using namespace VirtualGeometryTools;
 	
 	Allocator heap_allocator;
 	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
@@ -3293,8 +3296,8 @@ void FreeVirtualGeometryBuildResult(const VirtualGeometryBuildResult* result, co
 }
 
 
-void DecimateMesh(const MeshDecimationInputs* inputs, MeshDecimationResult* result, const SystemCallbacks* callbacks) {
-	using namespace MeshDecimation;
+void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationResult* result, const VgtSystemCallbacks* callbacks) {
+	using namespace VirtualGeometryTools;
 	
 	assert(inputs);
 	assert(result);
@@ -3340,8 +3343,8 @@ void DecimateMesh(const MeshDecimationInputs* inputs, MeshDecimationResult* resu
 	AllocatorFreeMemoryBlocks(allocator);
 }
 
-void FreeMeshDecimationResult(const MeshDecimationResult* result, const SystemCallbacks* callbacks) {
-	using namespace MeshDecimation;
+void VgtFreeMeshDecimationResult(const VgtMeshDecimationResult* result, const VgtSystemCallbacks* callbacks) {
+	using namespace VirtualGeometryTools;
 	
 	Allocator heap_allocator;
 	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
@@ -3355,8 +3358,8 @@ void FreeMeshDecimationResult(const MeshDecimationResult* result, const SystemCa
 //
 // Based on [Kapoulkine 2025].
 //
-SphereBounds ComputeSphereBoundsUnion(const SphereBounds* source_sphere_bounds, uint32_t source_sphere_bounds_count) {
-	using namespace MeshDecimation;
+VgtSphereBounds VgtComputeSphereBoundsUnion(const VgtSphereBounds* source_sphere_bounds, uint32_t source_sphere_bounds_count) {
+	using namespace VirtualGeometryTools;
 	
 	u32 aabb_min_index[3] = { 0, 0, 0 };
 	u32 aabb_max_index[3] = { 0, 0, 0 };
@@ -3397,7 +3400,7 @@ SphereBounds ComputeSphereBoundsUnion(const SphereBounds* source_sphere_bounds, 
 		}
 	}
 	
-	SphereBounds result_bounds;
+	VgtSphereBounds result_bounds;
 	result_bounds.center = (source_sphere_bounds[aabb_min_index[max_axis_length_index]].center + source_sphere_bounds[aabb_max_index[max_axis_length_index]].center) * 0.5f;
 	result_bounds.radius = max_axis_length * 0.5f;
 	

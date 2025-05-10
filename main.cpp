@@ -49,6 +49,8 @@ struct Vector2 {
 	float y = 0.f;
 };
 
+using Vector3 = VgtVector3;
+
 struct ObjVertex {
 	Vector3 position;
 	Vector2 texcoord;
@@ -156,7 +158,7 @@ static ObjTriangleMesh ParseWavefrontObj(const char* string) {
 	return mesh;
 }
 
-void WriteWavefrontObjFile(const MeshDecimationResult& mesh) {
+void WriteWavefrontObjFile(const VgtMeshDecimationResult& mesh) {
 	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/Output/StanfordDragon.obj", "wb");
 	if (file == nullptr) return;
 	
@@ -181,7 +183,7 @@ void WriteWavefrontObjFile(const MeshDecimationResult& mesh) {
 	fclose(file);
 }
 
-void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
+void WriteWavefrontObjFile(const VgtVirtualGeometryBuildResult& mesh) {
 	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/Output/StanfordDragon.obj", "wb");
 	if (file == nullptr) return;
 	
@@ -218,10 +220,11 @@ void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
 		fprintf(file, "o Meshlet%u\n", meshlet_index);
 #endif
 		
-		for (u32 i = meshlet.begin_meshlet_triangles_index; i < meshlet.end_meshlet_triangles_index; i += 3) {
-			u32 i0 = mesh.meshlet_vertex_indices[mesh.meshlet_triangles[i + 0] + meshlet.begin_vertex_indices_index] + 1;
-			u32 i1 = mesh.meshlet_vertex_indices[mesh.meshlet_triangles[i + 1] + meshlet.begin_vertex_indices_index] + 1;
-			u32 i2 = mesh.meshlet_vertex_indices[mesh.meshlet_triangles[i + 2] + meshlet.begin_vertex_indices_index] + 1;
+		for (u32 i = meshlet.begin_meshlet_triangles_index; i < meshlet.end_meshlet_triangles_index; i += 1) {
+			auto triangle = mesh.meshlet_triangles[i];
+			u32 i0 = mesh.meshlet_vertex_indices[triangle.i0 + meshlet.begin_vertex_indices_index] + 1;
+			u32 i1 = mesh.meshlet_vertex_indices[triangle.i1 + meshlet.begin_vertex_indices_index] + 1;
+			u32 i2 = mesh.meshlet_vertex_indices[triangle.i2 + meshlet.begin_vertex_indices_index] + 1;
 			
 			fprintf(file, "f %u/%u/%u %u/%u/%u %u/%u/%u\n", i0, i0, i0, i1, i1, i1, i2, i2, i2);
 		}
@@ -288,7 +291,7 @@ int main() {
 	u32 split_index = (((u32)triangle_mesh.indices.size() / 3) / 2) * 3;
 	
 	compile_const u32 geometry_desc_count = 2;
-	TriangleGeometryDesc geometry_descs[geometry_desc_count];
+	VgtTriangleGeometryDesc geometry_descs[geometry_desc_count];
 	geometry_descs[0].indices      = triangle_mesh.indices.data() + split_index;
 	geometry_descs[0].index_count  = (u32)triangle_mesh.indices.size() - split_index;
 	geometry_descs[0].vertices     = (float*)triangle_mesh.vertices.data();
@@ -300,7 +303,7 @@ int main() {
 	geometry_descs[1].vertex_count = (u32)triangle_mesh.vertices.size();
 #else
 	compile_const u32 geometry_desc_count = 1;
-	TriangleGeometryDesc geometry_descs[geometry_desc_count];
+	VgtTriangleGeometryDesc geometry_descs[geometry_desc_count];
 	geometry_descs[0].indices      = triangle_mesh.indices.data();
 	geometry_descs[0].index_count  = (u32)triangle_mesh.indices.size();
 	geometry_descs[0].vertices     = (float*)triangle_mesh.vertices.data();
@@ -317,7 +320,7 @@ int main() {
 	attribute_weights[3] = normal_weight;
 	attribute_weights[4] = normal_weight;
 	
-	TriangleMeshDesc mesh_desc;
+	VgtTriangleMeshDesc mesh_desc;
 	mesh_desc.geometry_descs      = geometry_descs;
 	mesh_desc.geometry_desc_count = geometry_desc_count;
 	mesh_desc.vertex_stride_bytes = sizeof(ObjVertex);
@@ -327,7 +330,7 @@ int main() {
 	ValidatedAllocator temp_allocator;
 	ValidatedAllocator heap_allocator;
 	
-	SystemCallbacks callbacks;
+	VgtSystemCallbacks callbacks;
 	callbacks.temp_allocator.realloc   = &ValidatedAllocatorRealloc;
 	callbacks.temp_allocator.user_data = &temp_allocator;
 	callbacks.heap_allocator.realloc   = &ValidatedAllocatorRealloc;
@@ -335,22 +338,22 @@ int main() {
 	
 #define BUILD_VIRTUAL_GEOMETRY 1
 #if BUILD_VIRTUAL_GEOMETRY
-	VirtualGeometryBuildInputs inputs;
+	VgtVirtualGeometryBuildInputs inputs;
 	inputs.mesh = mesh_desc;
 	
-	VirtualGeometryBuildResult result;
-	BuildVirtualGeometry(&inputs, &result, &callbacks);
+	VgtVirtualGeometryBuildResult result;
+	VgtBuildVirtualGeometry(&inputs, &result, &callbacks);
 
 #if ENABLE_ALLOCATOR_VALIDATION
 	assert(heap_allocator.allocation_count == heap_allocator.deallocation_count + 6); // 6 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 #else // !BUILD_VIRTUAL_GEOMETRY
-	MeshDecimationInputs inputs;
+	VgtMeshDecimationInputs inputs;
 	inputs.mesh = mesh_desc;
 	inputs.target_face_count = ((u32)triangle_mesh.indices.size() / 3) / 138;
 	
-	MeshDecimationResult result;
-	DecimateMesh(&inputs, &result, &callbacks);
+	VgtMeshDecimationResult result;
+	VgtDecimateMesh(&inputs, &result, &callbacks);
 	
 #if ENABLE_ALLOCATOR_VALIDATION
 	assert(heap_allocator.allocation_count == heap_allocator.deallocation_count + 2); // 2 live heap allocations.
@@ -367,9 +370,9 @@ int main() {
 	WriteWavefrontObjFile(result);
 
 #if BUILD_VIRTUAL_GEOMETRY
-	FreeVirtualGeometryBuildResult(&result, &callbacks);
+	VgtFreeVirtualGeometryBuildResult(&result, &callbacks);
 #else // !BUILD_VIRTUAL_GEOMETRY
-	FreeMeshDecimationResult(&result, &callbacks);
+	VgtFreeMeshDecimationResult(&result, &callbacks);
 #endif // !BUILD_VIRTUAL_GEOMETRY
 
 #if ENABLE_ALLOCATOR_VALIDATION
