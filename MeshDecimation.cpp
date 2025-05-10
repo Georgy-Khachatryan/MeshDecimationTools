@@ -12,7 +12,6 @@
 // - Arseny Kapoulkine. 2025. Meshoptimizer library. https://github.com/zeux/meshoptimizer. See license in THIRD_PARTY_LICENSES.md.
 //
 
-#include <assert.h>
 #include <float.h>
 #include <intrin.h>
 #include <math.h>
@@ -33,6 +32,23 @@
 #if !defined(MAX_ATTRIBUTE_STRIDE_DWORDS)
 #define MAX_ATTRIBUTE_STRIDE_DWORDS 5
 #endif // !defined(MAX_ATTRIBUTE_STRIDE_DWORDS)
+
+#define compile_const constexpr static const
+
+namespace MeshDecimation
+{
+
+using u8  = uint8_t;
+using u32 = uint32_t;
+using u64 = uint64_t;
+
+static_assert(sizeof(u8)  == 1);
+static_assert(sizeof(u32) == 4);
+static_assert(sizeof(u64) == 8);
+
+compile_const u8  u8_max  = (u8)0xFF;
+compile_const u32 u32_max = (u32)0xFFFF'FFFF;
+compile_const u64 u64_max = (u64)0xFFFF'FFFF'FFFF'FFFF;
 
 
 compile_const u32 meshlet_max_vertex_count = 128;
@@ -183,8 +199,8 @@ static_assert(sizeof(MeshView) == 64);
 static u64 PackEdgeKey(VertexID vertex_id_0, VertexID vertex_id_1) {
 	// Always pack VertexIDs in ascending order to ensure that PackEdgeKey(A, B) == PackEdgeKey(B, A) and they hash to the same value.
 	return vertex_id_1.index > vertex_id_0.index ?
-		((u64)vertex_id_1.index << u32_bit_count) | (u64)vertex_id_0.index :
-		((u64)vertex_id_0.index << u32_bit_count) | (u64)vertex_id_1.index;
+		((u64)vertex_id_1.index << 32) | (u64)vertex_id_0.index :
+		((u64)vertex_id_0.index << 32) | (u64)vertex_id_1.index;
 }
 
 template<ElementType element_type_t> auto GetElementID(const Corner& corner) {
@@ -1857,56 +1873,6 @@ static float DecimateMeshFaceGroup(
 	return sqrtf(max_error) * state.rcp_position_weight;
 }
 
-void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& result, const SystemCallbacks& callbacks) {
-	Allocator allocator;
-	InitializeAllocator(allocator, callbacks.temp_allocator);
-
-	Allocator heap_allocator;
-	InitializeAllocator(heap_allocator, callbacks.heap_allocator);
-	
-	auto mesh = BuildEditableMesh(allocator, inputs.mesh.geometry_descs, inputs.mesh.geometry_desc_count, inputs.mesh.vertex_stride_bytes);
-	
-	MeshDecimationState state;
-	InitializeMeshDecimationState(mesh, inputs.mesh.attribute_weights, allocator, heap_allocator, state);
-	
-	
-	EdgeCollapseHeap edge_collapse_heap;
-	ArrayResize(edge_collapse_heap.edge_collapse_errors,  allocator, mesh.edge_count);
-	ArrayResize(edge_collapse_heap.edge_id_to_heap_index, allocator, mesh.edge_count);
-	ArrayResize(edge_collapse_heap.heap_index_to_edge_id, allocator, mesh.edge_count);
-	
-	for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
-		auto collapse_error = ComputeEdgeCollapseError(mesh, heap_allocator, state, edge_id);
-		
-		edge_collapse_heap.edge_collapse_errors[edge_id.index]  = collapse_error.min_error;
-		edge_collapse_heap.edge_id_to_heap_index[edge_id.index] = edge_id.index;
-		edge_collapse_heap.heap_index_to_edge_id[edge_id.index] = edge_id;
-	}
-	EdgeCollapseHeapInitialize(edge_collapse_heap);
-	
-	
-	u32 target_face_count = inputs.target_face_count;
-	u32 active_face_count = mesh.face_count;
-	float max_error = DecimateMeshFaceGroup(mesh, heap_allocator, state, edge_collapse_heap, inputs.mesh.normalize_vertex_attributes, nullptr, target_face_count, active_face_count);
-	
-	AllocatorFreeMemoryBlocks(heap_allocator);
-
-	result.max_error = max_error;
-	EditableMeshToIndexedMesh(mesh, allocator, heap_allocator, result);
-	assert(heap_allocator.memory_block_count == 2);
-	
-	AllocatorFreeMemoryBlocks(allocator);
-}
-
-void FreeResultBuffers(const MeshDecimationResult& result, const SystemCallbacks& callbacks) {
-	Allocator heap_allocator;
-	InitializeAllocator(heap_allocator, callbacks.heap_allocator);
-	
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.indices.data;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.vertices.data;
-	AllocatorFreeMemoryBlocks(heap_allocator);
-}
-
 static void DecimateMeshFaceGroups(
 	MeshView mesh,
 	Allocator& allocator,
@@ -2953,7 +2919,7 @@ static void ConvertMeshletGroupsToFaceGroups(
 	}
 }
 
-static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<ErrorMetric> meshlet_group_error_metrics, Array<MeshletGroup>& meshlet_groups, Array<Meshlet>& meshlets) {
+static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<ErrorMetric> meshlet_group_error_metrics, Array<MeshletGroup>& meshlet_groups, Array<Meshlet>& meshlets, u32 level_index) {
 	if (meshlet_groups.capacity == 0) {
 		ArrayReserve(meshlet_groups, heap_allocator, meshlet_group_build_result.prefix_sum.count * 4);
 	}
@@ -2999,6 +2965,7 @@ static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuil
 		meshlet_group.error_metric            = meshlet_group_error_metric;
 		meshlet_group.begin_meshlet_index     = begin_meshlet_index;
 		meshlet_group.end_meshlet_index       = end_meshlet_index;
+		meshlet_group.level_of_detail_index   = level_index;
 		
 		ArrayAppendMaybeGrow(meshlet_groups, heap_allocator, meshlet_group);
 		
@@ -3167,8 +3134,12 @@ static void AppendChangedVertices(MeshView mesh, Allocator& heap_allocator, Arra
 	}
 }
 
+} // namespace MeshDecimation
+
 
 void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeometryBuildResult& result, const SystemCallbacks& callbacks) {
+	using namespace MeshDecimation;
+	
 	//
 	// Virtual Geometry TODO:
 	//
@@ -3266,7 +3237,7 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 		level.begin_meshlets_index       = meshlets.count;
 		
 		meshlet_group_base_index = meshlet_groups.count;
-		BuildMeshletsAndMeshletGroups(heap_allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_error_metrics, meshlet_groups, meshlets);
+		BuildMeshletsAndMeshletGroups(heap_allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_error_metrics, meshlet_groups, meshlets, level_index);
 		
 		level.end_meshlet_groups_index = meshlet_groups.count;
 		level.end_meshlets_index  = meshlets.count;
@@ -3289,6 +3260,8 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 }
 
 void FreeResultBuffers(const VirtualGeometryBuildResult& result, const SystemCallbacks& callbacks) {
+	using namespace MeshDecimation;
+	
 	Allocator heap_allocator;
 	InitializeAllocator(heap_allocator, callbacks.heap_allocator);
 	
@@ -3302,10 +3275,67 @@ void FreeResultBuffers(const VirtualGeometryBuildResult& result, const SystemCal
 }
 
 
+void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& result, const SystemCallbacks& callbacks) {
+	using namespace MeshDecimation;
+	
+	Allocator allocator;
+	InitializeAllocator(allocator, callbacks.temp_allocator);
+
+	Allocator heap_allocator;
+	InitializeAllocator(heap_allocator, callbacks.heap_allocator);
+	
+	auto mesh = BuildEditableMesh(allocator, inputs.mesh.geometry_descs, inputs.mesh.geometry_desc_count, inputs.mesh.vertex_stride_bytes);
+	
+	MeshDecimationState state;
+	InitializeMeshDecimationState(mesh, inputs.mesh.attribute_weights, allocator, heap_allocator, state);
+	
+	
+	EdgeCollapseHeap edge_collapse_heap;
+	ArrayResize(edge_collapse_heap.edge_collapse_errors,  allocator, mesh.edge_count);
+	ArrayResize(edge_collapse_heap.edge_id_to_heap_index, allocator, mesh.edge_count);
+	ArrayResize(edge_collapse_heap.heap_index_to_edge_id, allocator, mesh.edge_count);
+	
+	for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
+		auto collapse_error = ComputeEdgeCollapseError(mesh, heap_allocator, state, edge_id);
+		
+		edge_collapse_heap.edge_collapse_errors[edge_id.index]  = collapse_error.min_error;
+		edge_collapse_heap.edge_id_to_heap_index[edge_id.index] = edge_id.index;
+		edge_collapse_heap.heap_index_to_edge_id[edge_id.index] = edge_id;
+	}
+	EdgeCollapseHeapInitialize(edge_collapse_heap);
+	
+	
+	u32 target_face_count = inputs.target_face_count;
+	u32 active_face_count = mesh.face_count;
+	float max_error = DecimateMeshFaceGroup(mesh, heap_allocator, state, edge_collapse_heap, inputs.mesh.normalize_vertex_attributes, nullptr, target_face_count, active_face_count);
+	
+	AllocatorFreeMemoryBlocks(heap_allocator);
+
+	result.max_error = max_error;
+	EditableMeshToIndexedMesh(mesh, allocator, heap_allocator, result);
+	assert(heap_allocator.memory_block_count == 2);
+	
+	AllocatorFreeMemoryBlocks(allocator);
+}
+
+void FreeResultBuffers(const MeshDecimationResult& result, const SystemCallbacks& callbacks) {
+	using namespace MeshDecimation;
+	
+	Allocator heap_allocator;
+	InitializeAllocator(heap_allocator, callbacks.heap_allocator);
+	
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.indices.data;
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.vertices.data;
+	AllocatorFreeMemoryBlocks(heap_allocator);
+}
+
+
 //
 // Based on [Kapoulkine 2025].
 //
 SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds) {
+	using namespace MeshDecimation;
+	
 	u32 aabb_min_index[3] = { 0, 0, 0 };
 	u32 aabb_max_index[3] = { 0, 0, 0 };
 	

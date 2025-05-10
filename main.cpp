@@ -38,6 +38,12 @@ static const char* EatWhiteSpaceAndComments(const char* string) {
 	return string;
 }
 
+
+#define compile_const constexpr static const
+
+using u32 = uint32_t;
+using u64 = uint64_t;
+
 struct Vector2 {
 	float x = 0.f;
 	float y = 0.f;
@@ -196,7 +202,7 @@ void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
 	// Output an LOD with a given target error.
 	float target_error = 0.05f;
 	
-	u32 group_index = u32_max;
+	u32 group_index = ~0u;
 	for (u32 meshlet_index = 0; meshlet_index < mesh.meshlets.count; meshlet_index += 1) {
 		auto& meshlet = mesh.meshlets[meshlet_index];
 		
