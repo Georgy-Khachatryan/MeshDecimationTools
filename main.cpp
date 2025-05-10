@@ -54,7 +54,6 @@ struct ObjVertex {
 	Vector2 texcoord;
 	Vector3 normal;
 };
-compile_const u32 obj_vertex_stride_dwords = sizeof(ObjVertex) / sizeof(u32);
 
 static void NormalizeObjVertexAttributes(float* attributes) {
 	auto& normal = *(Vector3*)(attributes + 2);
@@ -164,16 +163,15 @@ void WriteWavefrontObjFile(const MeshDecimationResult& mesh) {
 	fprintf(file, "# MeshDecimation\n");
 	fprintf(file, "o Object\n");
 	
-	u32 vertex_count = mesh.vertices.count / obj_vertex_stride_dwords;
-	auto* vertices = (ObjVertex*)mesh.vertices.data;
-	for (u32 index = 0; index < vertex_count; index += 1) {
+	auto* vertices = (ObjVertex*)mesh.vertices;
+	for (u32 index = 0; index < mesh.vertex_count; index += 1) {
 		auto& v = vertices[index];
 		fprintf(file, "v %f %f %f\n", v.position.x, v.position.y, v.position.z);
 		fprintf(file, "vn %f %f %f\n", v.normal.x, v.normal.y, v.normal.z);
 		fprintf(file, "vt %f %f\n", v.texcoord.x, v.texcoord.y);
 	}
 	
-	for (u32 corner = 0; corner < mesh.indices.count; corner += 3) {
+	for (u32 corner = 0; corner < mesh.index_count; corner += 3) {
 		u32 i0 = mesh.indices[corner + 0] + 1;
 		u32 i1 = mesh.indices[corner + 1] + 1;
 		u32 i2 = mesh.indices[corner + 2] + 1;
@@ -190,9 +188,8 @@ void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
 	fprintf(file, "# MeshDecimation\n");
 	fprintf(file, "o Object\n");
 	
-	u32 vertex_count = mesh.vertices.count / obj_vertex_stride_dwords;
-	auto* vertices = (ObjVertex*)mesh.vertices.data;
-	for (u32 index = 0; index < vertex_count; index += 1) {
+	auto* vertices = (ObjVertex*)mesh.vertices;
+	for (u32 index = 0; index < mesh.vertex_count; index += 1) {
 		auto& v = vertices[index];
 		fprintf(file, "v %f %f %f\n", v.position.x, v.position.y, v.position.z);
 		fprintf(file, "vn %f %f %f\n", v.normal.x, v.normal.y, v.normal.z);
@@ -203,7 +200,7 @@ void WriteWavefrontObjFile(const VirtualGeometryBuildResult& mesh) {
 	float target_error = 0.05f;
 	
 	u32 group_index = ~0u;
-	for (u32 meshlet_index = 0; meshlet_index < mesh.meshlets.count; meshlet_index += 1) {
+	for (u32 meshlet_index = 0; meshlet_index < mesh.meshlet_count; meshlet_index += 1) {
 		auto& meshlet = mesh.meshlets[meshlet_index];
 		
 		bool draw_current_level = (meshlet.current_level_error_metric.error <= target_error);
@@ -336,28 +333,29 @@ int main() {
 	callbacks.heap_allocator.realloc   = &ValidatedAllocatorRealloc;
 	callbacks.heap_allocator.user_data = &heap_allocator;
 	
-#if 1
+#define BUILD_VIRTUAL_GEOMETRY 1
+#if BUILD_VIRTUAL_GEOMETRY
 	VirtualGeometryBuildInputs inputs;
 	inputs.mesh = mesh_desc;
 	
 	VirtualGeometryBuildResult result;
-	BuildVirtualGeometry(inputs, result, callbacks);
+	BuildVirtualGeometry(&inputs, &result, &callbacks);
 
 #if ENABLE_ALLOCATOR_VALIDATION
 	assert(heap_allocator.allocation_count == heap_allocator.deallocation_count + 6); // 6 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
-#else
+#else // !BUILD_VIRTUAL_GEOMETRY
 	MeshDecimationInputs inputs;
 	inputs.mesh = mesh_desc;
 	inputs.target_face_count = ((u32)triangle_mesh.indices.size() / 3) / 138;
 	
 	MeshDecimationResult result;
-	DecimateMesh(inputs, result, callbacks);
+	DecimateMesh(&inputs, &result, &callbacks);
 	
 #if ENABLE_ALLOCATOR_VALIDATION
 	assert(heap_allocator.allocation_count == heap_allocator.deallocation_count + 2); // 2 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
-#endif
+#endif // !BUILD_VIRTUAL_GEOMETRY
 	
 	t1 = std::chrono::high_resolution_clock::now();
 	printf("Decimation Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
@@ -367,7 +365,12 @@ int main() {
 #endif // ENABLE_ALLOCATOR_VALIDATION
 	
 	WriteWavefrontObjFile(result);
-	FreeResultBuffers(result, callbacks);
+
+#if BUILD_VIRTUAL_GEOMETRY
+	FreeVirtualGeometryBuildResult(&result, &callbacks);
+#else // !BUILD_VIRTUAL_GEOMETRY
+	FreeMeshDecimationResult(&result, &callbacks);
+#endif // !BUILD_VIRTUAL_GEOMETRY
 
 #if ENABLE_ALLOCATOR_VALIDATION
 	printf("Temp Allocation Count: %u\n", temp_allocator.allocation_count);
@@ -379,6 +382,3 @@ int main() {
 	
 	return 0;
 }
-
-
-

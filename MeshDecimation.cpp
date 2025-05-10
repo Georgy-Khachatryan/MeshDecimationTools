@@ -359,9 +359,9 @@ static void* AllocateMemoryBlock(Allocator& allocator, void* old_memory_block, u
 	return memory_block;
 }
 
-static void InitializeAllocator(Allocator& allocator, AllocatorCallbacks callbacks) {
-	if (callbacks.realloc) {
-		allocator.callbacks = callbacks;
+static void InitializeAllocator(Allocator& allocator, const AllocatorCallbacks* callbacks) {
+	if (callbacks) {
+		allocator.callbacks = *callbacks;
 	} else {
 		allocator.callbacks.realloc = [](void* old_memory_block, u64 size_bytes, void*) { return realloc(old_memory_block, size_bytes); };
 	}
@@ -382,14 +382,14 @@ static u32 AllocatorFindMemoryBlock(Allocator& allocator, void* old_memory_block
 }
 
 
-#define ARRAY_OPERATORS \
-T& operator[] (u32 index) { assert(index < count); return data[index]; } \
-const T& operator[] (u32 index) const { assert(index < count); return data[index]; } \
-\
-T* begin() { return data; } \
-T* end() { return data + count; } \
-const T* begin() const { return data; } \
-const T* end() const { return data + count; }
+#define DECLARE_ARRAY_OPERATORS() \
+	T& operator[] (u32 index) { assert(index < count); return data[index]; } \
+	const T& operator[] (u32 index) const { assert(index < count); return data[index]; } \
+	\
+	T* begin() { return data; } \
+	T* end() { return data + count; } \
+	const T* begin() const { return data; } \
+	const T* end() const { return data + count; }
 
 
 // Should be used only with simple types.
@@ -401,10 +401,9 @@ struct Array {
 	u32 count    = 0;
 	u32 capacity = 0;
 	
-	ARRAY_OPERATORS
+	DECLARE_ARRAY_OPERATORS()
 };
 static_assert(sizeof(Array<u32>) == 16);
-static_assert(sizeof(ArrayView<u32>) == 16);
 
 template<typename T, u32 compile_time_capacity>
 struct FixedSizeArray {
@@ -414,9 +413,22 @@ struct FixedSizeArray {
 	T data[capacity] = {};
 	u32 count = 0;
 
-	ARRAY_OPERATORS
+	DECLARE_ARRAY_OPERATORS()
 };
-#undef ARRAY_OPERATORS
+static_assert(sizeof(FixedSizeArray<u32, 1>) == 8);
+
+template<typename T>
+struct ArrayView {
+	using ValueType = T;
+	
+	T* data = nullptr;
+	u32 count = 0;
+	
+	DECLARE_ARRAY_OPERATORS()
+};
+static_assert(sizeof(ArrayView<u32>) == 16);
+
+#undef DECLARE_ARRAY_OPERATORS
 
 static u32 ArrayComputeNewCapacity(u32 old_capacity, u32 required_capacity = 0) {
 	u32 new_capacity = old_capacity ? (old_capacity + old_capacity / 2) : 16;
@@ -788,7 +800,7 @@ static MeshView BuildEditableMesh(Allocator& allocator, const TriangleGeometryDe
 	return mesh;
 }
 
-static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, Allocator& heap_allocator, MeshDecimationResult& result) {
+static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, Allocator& heap_allocator, MeshDecimationResult* result) {
 	u32 allocator_high_water = allocator.memory_block_count;
 	assert(heap_allocator.memory_block_count == 0);
 	
@@ -851,8 +863,10 @@ static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, Alloc
 		output_vertex_index += 1;
 	}
 	
-	result.indices  = CreateArrayView(indices);
-	result.vertices = CreateArrayView(vertices);
+	result->indices      = indices.data;
+	result->vertices     = vertices.data;
+	result->index_count  = indices.count;
+	result->vertex_count = vertices.count / vertex_stride_dwords;
 
 	AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 }
@@ -2258,6 +2272,9 @@ static void KdTreeBuildElementsForMeshlets(ArrayView<Meshlet> meshlets, Allocato
 	}
 }
 
+static SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds) {
+	return ComputeSphereBoundsUnion(source_sphere_bounds.data, source_sphere_bounds.count);
+}
 
 struct MeshletAdjacencyInfo {
 	u32 meshlet_index     = 0;
@@ -3137,8 +3154,11 @@ static void AppendChangedVertices(MeshView mesh, Allocator& heap_allocator, Arra
 } // namespace MeshDecimation
 
 
-void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeometryBuildResult& result, const SystemCallbacks& callbacks) {
+void BuildVirtualGeometry(const VirtualGeometryBuildInputs* inputs, VirtualGeometryBuildResult* result, const SystemCallbacks* callbacks) {
 	using namespace MeshDecimation;
+	
+	assert(inputs);
+	assert(result);
 	
 	//
 	// Virtual Geometry TODO:
@@ -3148,12 +3168,12 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 	//
 
 	Allocator allocator;
-	InitializeAllocator(allocator, callbacks.temp_allocator);
+	InitializeAllocator(allocator, callbacks ? &callbacks->temp_allocator : nullptr);
 
 	Allocator heap_allocator;
-	InitializeAllocator(heap_allocator, callbacks.heap_allocator);
+	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
 	
-	auto mesh = BuildEditableMesh(allocator, inputs.mesh.geometry_descs, inputs.mesh.geometry_desc_count, inputs.mesh.vertex_stride_bytes);
+	auto mesh = BuildEditableMesh(allocator, inputs->mesh.geometry_descs, inputs->mesh.geometry_desc_count, inputs->mesh.vertex_stride_bytes);
 	
 	
 	Array<FaceID> meshlet_group_faces;
@@ -3221,7 +3241,7 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 		last_level_meshlet_count = meshlet_build_result.meshlets.count;
 		
 		if (is_last_level == false) {
-			DecimateMeshFaceGroups(mesh, allocator, heap_allocator, inputs.mesh.normalize_vertex_attributes, inputs.mesh.attribute_weights, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, changed_attribute_vertex_ids);
+			DecimateMeshFaceGroups(mesh, allocator, heap_allocator, inputs->mesh.normalize_vertex_attributes, inputs->mesh.attribute_weights, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, changed_attribute_vertex_ids);
 			AppendChangedVertices(mesh, heap_allocator, changed_attribute_vertex_ids, attributes_id_to_vertex_index, vertices);
 			
 			// Compact the mesh after decimation to remove unused faces and edges.
@@ -3248,46 +3268,56 @@ void BuildVirtualGeometry(const VirtualGeometryBuildInputs& inputs, VirtualGeome
 		if (is_last_level) break;
 	}
 	
-	result.meshlet_groups         = CreateArrayView(meshlet_groups);
-	result.meshlets               = CreateArrayView(meshlets);
-	result.meshlet_vertex_indices = CreateArrayView(meshlet_vertex_indices);
-	result.meshlet_triangles      = CreateArrayView(meshlet_triangles);
-	result.vertices               = CreateArrayView(vertices);
-	result.levels                 = CreateArrayView(levels);
+	result->meshlet_groups         = meshlet_groups.data;
+	result->meshlets               = meshlets.data;
+	result->meshlet_vertex_indices = meshlet_vertex_indices.data;
+	result->meshlet_triangles      = meshlet_triangles.data;
+	result->vertices               = vertices.data;
+	result->levels                 = levels.data;
+	result->meshlet_group_count    = meshlet_groups.count;
+	result->meshlet_count          = meshlets.count;
+	result->meshlet_vertex_index_count = meshlet_vertex_indices.count;
+	result->meshlet_triangle_count = meshlet_triangles.count;
+	result->vertex_count           = vertices.count / (inputs->mesh.vertex_stride_bytes / sizeof(u32));
+	result->level_count            = levels.count;
 	assert(heap_allocator.memory_block_count == 6);
 	
 	AllocatorFreeMemoryBlocks(allocator);
 }
 
-void FreeResultBuffers(const VirtualGeometryBuildResult& result, const SystemCallbacks& callbacks) {
+void FreeVirtualGeometryBuildResult(const VirtualGeometryBuildResult* result, const SystemCallbacks* callbacks) {
 	using namespace MeshDecimation;
 	
 	Allocator heap_allocator;
-	InitializeAllocator(heap_allocator, callbacks.heap_allocator);
+	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
 	
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.meshlet_groups.data;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.meshlets.data;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.meshlet_vertex_indices.data;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.meshlet_triangles.data;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.vertices.data;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.levels.data;
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->meshlet_groups;
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->meshlets;
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->meshlet_vertex_indices;
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->meshlet_triangles;
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->vertices;
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->levels;
 	AllocatorFreeMemoryBlocks(heap_allocator);
 }
 
 
-void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& result, const SystemCallbacks& callbacks) {
+void DecimateMesh(const MeshDecimationInputs* inputs, MeshDecimationResult* result, const SystemCallbacks* callbacks) {
 	using namespace MeshDecimation;
 	
+	assert(inputs);
+	assert(result);
+	
+	
 	Allocator allocator;
-	InitializeAllocator(allocator, callbacks.temp_allocator);
+	InitializeAllocator(allocator, callbacks ? &callbacks->temp_allocator : nullptr);
 
 	Allocator heap_allocator;
-	InitializeAllocator(heap_allocator, callbacks.heap_allocator);
+	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
 	
-	auto mesh = BuildEditableMesh(allocator, inputs.mesh.geometry_descs, inputs.mesh.geometry_desc_count, inputs.mesh.vertex_stride_bytes);
+	auto mesh = BuildEditableMesh(allocator, inputs->mesh.geometry_descs, inputs->mesh.geometry_desc_count, inputs->mesh.vertex_stride_bytes);
 	
 	MeshDecimationState state;
-	InitializeMeshDecimationState(mesh, inputs.mesh.attribute_weights, allocator, heap_allocator, state);
+	InitializeMeshDecimationState(mesh, inputs->mesh.attribute_weights, allocator, heap_allocator, state);
 	
 	
 	EdgeCollapseHeap edge_collapse_heap;
@@ -3305,27 +3335,27 @@ void DecimateMesh(const MeshDecimationInputs& inputs, MeshDecimationResult& resu
 	EdgeCollapseHeapInitialize(edge_collapse_heap);
 	
 	
-	u32 target_face_count = inputs.target_face_count;
+	u32 target_face_count = inputs->target_face_count;
 	u32 active_face_count = mesh.face_count;
-	float max_error = DecimateMeshFaceGroup(mesh, heap_allocator, state, edge_collapse_heap, inputs.mesh.normalize_vertex_attributes, nullptr, target_face_count, active_face_count);
+	float max_error = DecimateMeshFaceGroup(mesh, heap_allocator, state, edge_collapse_heap, inputs->mesh.normalize_vertex_attributes, nullptr, target_face_count, active_face_count);
 	
 	AllocatorFreeMemoryBlocks(heap_allocator);
 
-	result.max_error = max_error;
+	result->max_error = max_error;
 	EditableMeshToIndexedMesh(mesh, allocator, heap_allocator, result);
 	assert(heap_allocator.memory_block_count == 2);
 	
 	AllocatorFreeMemoryBlocks(allocator);
 }
 
-void FreeResultBuffers(const MeshDecimationResult& result, const SystemCallbacks& callbacks) {
+void FreeMeshDecimationResult(const MeshDecimationResult* result, const SystemCallbacks* callbacks) {
 	using namespace MeshDecimation;
 	
 	Allocator heap_allocator;
-	InitializeAllocator(heap_allocator, callbacks.heap_allocator);
+	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
 	
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.indices.data;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result.vertices.data;
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->indices;
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->vertices;
 	AllocatorFreeMemoryBlocks(heap_allocator);
 }
 
@@ -3333,7 +3363,7 @@ void FreeResultBuffers(const MeshDecimationResult& result, const SystemCallbacks
 //
 // Based on [Kapoulkine 2025].
 //
-SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_bounds) {
+SphereBounds ComputeSphereBoundsUnion(const SphereBounds* source_sphere_bounds, uint32_t source_sphere_bounds_count) {
 	using namespace MeshDecimation;
 	
 	u32 aabb_min_index[3] = { 0, 0, 0 };
@@ -3342,7 +3372,7 @@ SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_boun
 	float aabb_min[3] = { +FLT_MAX, +FLT_MAX, +FLT_MAX };
 	float aabb_max[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
 	
-	for (u32 i = 0; i < source_sphere_bounds.count; i += 1) {
+	for (u32 i = 0; i < source_sphere_bounds_count; i += 1) {
 		auto source_bounds = source_sphere_bounds[i];
 		
 		auto min = source_bounds.center - source_bounds.radius;
@@ -3379,7 +3409,7 @@ SphereBounds ComputeSphereBoundsUnion(ArrayView<SphereBounds> source_sphere_boun
 	result_bounds.center = (source_sphere_bounds[aabb_min_index[max_axis_length_index]].center + source_sphere_bounds[aabb_max_index[max_axis_length_index]].center) * 0.5f;
 	result_bounds.radius = max_axis_length * 0.5f;
 	
-	for (u32 i = 0; i < source_sphere_bounds.count; i += 1) {
+	for (u32 i = 0; i < source_sphere_bounds_count; i += 1) {
 		auto source_bounds = source_sphere_bounds[i];
 		
 		float distance = Length(source_bounds.center - result_bounds.center);
