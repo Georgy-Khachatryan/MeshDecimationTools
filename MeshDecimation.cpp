@@ -1535,12 +1535,8 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 		
 		u32 valid_position_mask = ValidateEdgeCollapsePositions(mesh, edge, candidate_positions, candidate_position_count);
 		for (u32 i = 0; i < candidate_position_count; i += 1) {
-			
-			compile_const float edge_collapse_inversion_error = 1.f;
-			
-			float error = valid_position_mask & (1u << i) ? 0.f : edge_collapse_inversion_error;
+			float error = valid_position_mask & (1u << i) ? 0.f : total_quadric.weight;
 			if (error > collapse_error.min_error) continue;
-			
 			
 			auto p = candidate_positions[i] * state.position_weight;
 			error += ComputeQuadricError(edge_quadrics, p);
