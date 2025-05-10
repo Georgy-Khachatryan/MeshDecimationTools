@@ -3116,7 +3116,7 @@ static void CompactMesh(MeshView& mesh, Allocator& allocator, Array<FaceID>& mes
 	}
 }
 
-// TODO: Rework vertex indexing code. This can be a just memcpy. Or even better we could output this data directly into the output buffers.
+// TODO: Rework vertex indexing code. This can be a just memcpy. Or even better we could write this data directly into the output buffers from BuildMeshletsForFaceGroups.
 static void BuildMeshletVertexAndIndexBuffers(MeshView mesh, Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, Array<u32> attributes_id_to_vertex_index, Array<u32>& meshlet_vertex_indices, Array<VgtMeshletTriangle>& meshlet_triangles) {
 	auto meshlet_corner_prefix_sum = meshlet_build_result.meshlet_corner_prefix_sum;
 	
@@ -3220,8 +3220,7 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 	//
 	// Virtual Geometry TODO:
 	//
-	// - Allow arbitrary vertex formats (<32 DWORDs).
-	// - Rework allocation patterns. Minimize size, number, and duration of allocations. Implement allocator for growable outputs.
+	// - Rework allocation patterns. Minimize size, number, and duration of allocations.
 	//
 
 	Allocator allocator;
@@ -3365,6 +3364,12 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 	
 	VGT_ASSERT(inputs);
 	VGT_ASSERT(result);
+	
+	//
+	// Discrete LOD generation TODO:
+	//
+	// - Generate multiple levels of detail in a single call.
+	//
 	
 	
 	Allocator allocator;

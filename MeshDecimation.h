@@ -32,57 +32,114 @@ struct VgtErrorMetric {
 };
 
 
+//
+// Memory reallocation function similar to C realloc():
+// - Allocate new memory block if (old_memory_block == NULL && size_bytes != 0).
+// - Free old memory block if (old_memory_block != NULL && size_bytes == 0).
+// - Extend old memory block or allocate a new memory block and memcpy old contents to it if (old_memory_block != NULL && size_bytes != 0).
+//
 typedef void* (*VgtReallocCallback)(void* old_memory_block, uint64_t size_bytes, void* user_data);
 
 struct VgtAllocatorCallbacks {
+	// Reallocation callback, see definition of VgtReallocCallback for reference.
 	VgtReallocCallback realloc;
-	void*            user_data;
+	
+	// User defined allocator state, passed to VgtReallocCallback as user_data argument.
+	void* user_data;
 };
 
+// Optional memory allocation callbacks. If they're not provided the system falls back to C realloc().
 struct VgtSystemCallbacks {
-	// Optional memory allocation callbacks. If they're not provided the system falls back to realloc().
-	struct VgtAllocatorCallbacks temp_allocator; // Memory blocks are allocated and freed in stack order.
-	struct VgtAllocatorCallbacks heap_allocator; // Memory blocks are allocated and freed in any order.
+	//
+	// Temporary allocator that is used as a stack. Falls back to C realloc() if not provided.
+	// Memory blocks are allocated and freed from the end.
+	//
+	struct VgtAllocatorCallbacks temp_allocator;
+	
+	//
+	// Heap allocator used for small number of growable arrays and all output allocations. Falls back to C realloc() if not provided.
+	// Memory blocks are allocated and freed in arbitrary order.
+	//
+	struct VgtAllocatorCallbacks heap_allocator;
 };
 
 
+// See normalize_vertex_attributes in VgtTriangleMeshDesc for reference.
 typedef void (*VgtNormalizeVertexAttributes)(float* attributes);
 
 struct VgtTriangleGeometryDesc {
+	// Array of vertex indices. 3 consecutive indices form a triangle.
 	const uint32_t* indices;
+	
+	// Array of vertices with stride equal to 'vertex_stride_bytes'. 
+	const float* vertices;
+	
+	// Size of the 'indices' array. Must be a multiple of 3.
 	uint32_t index_count;
 	
-	const float* vertices;
+	// Size of the 'vertices' array, in vertices of size 'vertex_stride_bytes' (NOT in floats).
 	uint32_t vertex_count;
 };
 
 struct VgtTriangleMeshDesc {
+	//
+	// Array of geometry descriptions. One mesh may contain multiple geometries that get simplified
+	// without forming cracks in between. This is useful when different geometries use different
+	// materials or rendering using different techniques. For example a window might have transparent
+	// glass as one geometry and opaque wood frame as another geometry. This also matches the way
+	// raytracing acceleration structure build APIs work.
+	//
 	const struct VgtTriangleGeometryDesc* geometry_descs;
+	
+	// Size of the 'geometry_descs' array.
 	uint32_t geometry_desc_count;
+	
+	// Byte offset between individual vertices in geometries.
 	uint32_t vertex_stride_bytes;
 	
+	//
+	// Relative error weights of vertex attributes. Size must be equal to VGT_MAX_ATTRIBUTE_STRIDE_DWORDS
+	// or set to NULL for default weights==1.0.
+	// Vertex positions are internally scaled such that the average face area is equal to one square unit.
+	// Default weights==1.0 work well in most cases (unit vectors, quaternions, UV coordinates, colors, etc).
+	// 
 	float* attribute_weights;
+	
+	//
+	// Vertex attribute normalization callback. Note that only attributes are passed in. Can be set to NULL.
+	// This callback is called when a new set of attributes is computed and can be used to normalize unit
+	// vectors and quaternions, or clamp coordinates or colors.
+	//
 	VgtNormalizeVertexAttributes normalize_vertex_attributes;
 };
 
 struct VgtVirtualGeometryBuildInputs {
+	// Source triangle mesh containing multiple geometries. See structure definition for reference.
 	struct VgtTriangleMeshDesc mesh;
 	
+	// Target triangle count for meshlet builder. It will try to get as close to this value,
+	// but never go above it. Internally clamped between 1 and 128 triangles.
 	uint32_t meshlet_target_triangle_count;
+	
+	// Target vertex count for meshlet builder. It will try to get as close to this value,
+	// but never go above it. Internally clamped between 1 and 254 vertices.
 	uint32_t meshlet_target_vertex_count;
 };
 
 struct VgtMeshDecimationInputs {
+	// Source triangle mesh containing multiple geometries. See structure definition for reference.
 	struct VgtTriangleMeshDesc mesh;
 	
+	// Target face count for decimated mesh. Decimation algorithm will terminate once face count is
+	// below or equal to the target face count.
 	uint32_t target_face_count;
-	float target_error_limit;
 	
-	// TODO: Generate multiple levels of detail at once.
-	// uint32_t level_of_detail_count = 0;
+	// Target error limit for decimated mesh. Decimation algorithm will terminate before the limit is exceeded.
+	float target_error_limit;
 };
 
 struct VgtMeshletTriangle {
+	// Three indices into meshlet_vertex_indices array. See VgtMeshlet and VgtVirtualGeometryBuildResult definitions for reference.
 	uint32_t i0 : 10;
 	uint32_t i1 : 10;
 	uint32_t i2 : 10;
@@ -96,47 +153,105 @@ struct VgtMeshlet {
 	// Bounding sphere over meshlet vertex positions.
 	struct VgtSphereBounds geometric_sphere_bounds;
 	
+	//
 	// Error metric of this meshlet. Transferred from the group this meshlet was built from.
+	// Meshlet should be drawn if (EvaluateErrorMetric(meshlet.current_level_error_metric) <= target_error).
+	//
 	struct VgtErrorMetric current_level_error_metric;
+	//
+	// Index of a meshlet group from which this meshlet was built.
 	// current_level_error_metric is extracted from this meshlet group.
+	//
 	uint32_t current_level_meshlet_group_index;
 	
+	
+	//
 	// Error metric of one level coarser representation of this meshlet. Transferred from the group that was built using this meshlet.
+	// Meshlet should be drawn if (EvaluateErrorMetric(meshlet.coarser_level_error_metric) > target_error).
+	//
 	struct VgtErrorMetric coarser_level_error_metric;
+	//
+	// Index of a meshlet group that was built from and contains this meshlet.
 	// coarser_level_error_metric is extracted from this meshlet group.
+	//
 	uint32_t coarser_level_meshlet_group_index;
 	
+	//
+	// Range of meshlet_vertex_indices for this meshlet.
+	// To iterate over all meshlet vertices use this loop:
+	// for (u32 i = meshlet.begin_vertex_indices_index; i < meshlet.end_vertex_indices_index; i += 1) {
+	//     u32 vertex_index = result.meshlet_vertex_indices[i];
+	//     float* vertex = &result.vertices[vertex_index * vertex_stride_dwords];
+	// }
+	//
 	uint32_t begin_vertex_indices_index;
 	uint32_t end_vertex_indices_index;
 	
+	//
+	// Range of meshlet_triangles for this meshlet.
+	// To iterate over all meshlet triangles use this loop:
+	// for (u32 i = meshlet.begin_meshlet_triangles_index; i < meshlet.end_meshlet_triangles_index; i += 1) {
+	//     VgtMeshletTriangle triangle = result.meshlet_triangles[i];
+	//     u32 vertex_index0 = result.meshlet_vertex_indices[triangle.i0 + meshlet.begin_vertex_indices_index];
+	//     u32 vertex_index1 = result.meshlet_vertex_indices[triangle.i1 + meshlet.begin_vertex_indices_index];
+	//     u32 vertex_index2 = result.meshlet_vertex_indices[triangle.i2 + meshlet.begin_vertex_indices_index];
+	//     float* vertex0 = &result.vertices[vertex_index0 * vertex_stride_dwords];
+	//     float* vertex1 = &result.vertices[vertex_index1 * vertex_stride_dwords];
+	//     float* vertex2 = &result.vertices[vertex_index2 * vertex_stride_dwords];
+	// }
+	//
 	uint32_t begin_meshlet_triangles_index;
 	uint32_t end_meshlet_triangles_index;
 	
+	//
+	// Index of the source geometry. Each meshlet is built from faces and vertices of only one geometry.
+	// Note that meshlet groups may contain meshlets from different geometries. See definition of
+	// VgtTriangleMeshDesc for more information.
+	//
 	uint32_t geometry_index;
 };
 
 struct VgtMeshletGroup {
-	// Bounding box over child bounding boxes.
+	// Bounding box over source meshlet bounding boxes.
 	struct VgtVector3 aabb_min;
 	struct VgtVector3 aabb_max;
 	
-	// Bounding sphere over child bounding spheres.
+	// Bounding sphere over source meshlet bounding spheres.
 	struct VgtSphereBounds geometric_sphere_bounds;
 	
-	// Internal nodes store union of child node error metrics.
-	// Leaf nodes store coarser_level_error_metric from child meshlets (it is the same by construction).
+	//
+	// Union of source meshlet current_level_error_metrics and decimation error for this meshlet group.
+	// Source meshlet current_level_error_metric is the same as this error_metric.
+	// This error_metric can be used to accelerate LOD tests by first checking that it's error is
+	// larger than the target error, and only then checking source meshlets if their error is
+	// smaller than the target error:
+	// if (EvaluateErrorMetric(error_metric) > target_error) {
+	//     for (u32 i = group.begin_meshlet_index; i < group.end_meshlet_index; i += 1) {
+	//         if (EvaluateErrorMetric(meshlets[i].current_level_error_metric) <= target_error) {
+	//             DrawMeshlet(i);
+	//         }
+	//     }
+	// }
+	//
 	struct VgtErrorMetric error_metric;
 	
+	// Range of source meshlets for this meshlet group. Groups can contain up to 32 meshlets.
 	uint32_t begin_meshlet_index;
 	uint32_t end_meshlet_index;
 	
+	//
+	// LOD of source meshlets in range [0, 16).
+	// Level 0 is the highest quality (i.e. source geometry), level 15 is the lowest quality.
+	//
 	uint32_t level_of_detail_index;
 };
 
 struct VgtVirtualGeometryLevel {
+	// Range of meshlet groups for this level of detail.
 	uint32_t begin_meshlet_groups_index;
 	uint32_t end_meshlet_groups_index;
 	
+	// Range of meshlets for this level of detail.
 	uint32_t begin_meshlets_index;
 	uint32_t end_meshlets_index;
 };
