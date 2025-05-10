@@ -807,7 +807,7 @@ static MeshView BuildEditableMesh(Allocator& allocator, const VgtTriangleGeometr
 	return mesh;
 }
 
-static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, Allocator& heap_allocator, VgtMeshDecimationResult* result) {
+static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, Allocator& heap_allocator, u32 max_geometry_desc_count, VgtMeshDecimationResult* result) {
 	u32 allocator_high_water = allocator.memory_block_count;
 	assert(heap_allocator.memory_block_count == 0);
 	
@@ -839,24 +839,46 @@ static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, Alloc
 	for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
 		face_count += mesh[face_id].corner_list_base.index != u32_max ? 1 : 0;
 	}
-
+	
 	u32 attribute_stride_dwords = mesh.attribute_stride_dwords;
 	u32 vertex_stride_dwords    = (attribute_stride_dwords + 3);
-
+	
 	Array<u32>   indices;
 	Array<float> vertices;
+	Array<VgtDecimatedTriangleGeometryDesc> geometry_descs;
 	
 	ArrayReserve(indices, heap_allocator, face_count * 3);
 	ArrayResize(vertices, heap_allocator, attribute_count * vertex_stride_dwords);
+	ArrayResizeMemset(geometry_descs, heap_allocator, max_geometry_desc_count, 0);
 	
+	u32 geometry_index = u32_max;
 	for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
 		auto& face = mesh[face_id];
 		if (face.corner_list_base.index == u32_max) continue;
+		
+		if (geometry_index != face.geometry_index) {
+			assert(geometry_index == u32_max || geometry_index < face.geometry_index);
+			
+			if (geometry_index != u32_max) {
+				auto& geometry_desc = geometry_descs[geometry_index];
+				geometry_desc.end_indices_index = indices.count;
+			}
+			geometry_index = face.geometry_index;
+			
+			auto& geometry_desc = geometry_descs[geometry_index];
+			geometry_desc.begin_indices_index = indices.count;
+			geometry_desc.end_indices_index   = indices.count;
+		}
 		
 		IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
 			auto& corner = mesh[corner_id];
 			ArrayAppend(indices, attribute_id_remap[corner.attributes_id.index]);
 		});
+	}
+	
+	if (geometry_index != u32_max) {
+		auto& geometry_desc = geometry_descs[geometry_index];
+		geometry_desc.end_indices_index = indices.count;
 	}
 	
 	u32 output_vertex_index = 0;
@@ -870,11 +892,13 @@ static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, Alloc
 		output_vertex_index += 1;
 	}
 	
-	result->indices      = indices.data;
-	result->vertices     = vertices.data;
-	result->index_count  = indices.count;
-	result->vertex_count = vertices.count / vertex_stride_dwords;
-
+	result->geometry_descs      = geometry_descs.data;
+	result->indices             = indices.data;
+	result->vertices            = vertices.data;
+	result->index_count         = indices.count;
+	result->vertex_count        = vertices.count / vertex_stride_dwords;
+	result->geometry_desc_count = geometry_descs.count;
+	
 	AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 }
 
@@ -3337,8 +3361,8 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 	AllocatorFreeMemoryBlocks(heap_allocator);
 
 	result->max_error = max_error;
-	EditableMeshToIndexedMesh(mesh, allocator, heap_allocator, result);
-	assert(heap_allocator.memory_block_count == 2);
+	EditableMeshToIndexedMesh(mesh, allocator, heap_allocator, inputs->mesh.geometry_desc_count, result);
+	assert(heap_allocator.memory_block_count == 3);
 	
 	AllocatorFreeMemoryBlocks(allocator);
 }
@@ -3349,6 +3373,7 @@ void VgtFreeMeshDecimationResult(const VgtMeshDecimationResult* result, const Vg
 	Allocator heap_allocator;
 	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
 	
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->geometry_descs;
 	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->indices;
 	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->vertices;
 	AllocatorFreeMemoryBlocks(heap_allocator);

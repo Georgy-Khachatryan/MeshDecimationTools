@@ -163,7 +163,6 @@ void WriteWavefrontObjFile(const VgtMeshDecimationResult& mesh) {
 	if (file == nullptr) return;
 	
 	fprintf(file, "# MeshDecimation\n");
-	fprintf(file, "o Object\n");
 	
 	auto* vertices = (ObjVertex*)mesh.vertices;
 	for (u32 index = 0; index < mesh.vertex_count; index += 1) {
@@ -173,11 +172,17 @@ void WriteWavefrontObjFile(const VgtMeshDecimationResult& mesh) {
 		fprintf(file, "vt %f %f\n", v.texcoord.x, v.texcoord.y);
 	}
 	
-	for (u32 corner = 0; corner < mesh.index_count; corner += 3) {
-		u32 i0 = mesh.indices[corner + 0] + 1;
-		u32 i1 = mesh.indices[corner + 1] + 1;
-		u32 i2 = mesh.indices[corner + 2] + 1;
-		fprintf(file, "f %u/%u/%u %u/%u/%u %u/%u/%u\n", i0, i0, i0, i1, i1, i1, i2, i2, i2);
+	for (u32 geometry_index = 0; geometry_index < mesh.geometry_desc_count; geometry_index += 1) {
+		auto& geometry_desc = mesh.geometry_descs[geometry_index];
+
+		fprintf(file, "o Object%u\n", geometry_index);
+
+		for (u32 corner = geometry_desc.begin_indices_index; corner < geometry_desc.end_indices_index; corner += 3) {
+			u32 i0 = mesh.indices[corner + 0] + 1;
+			u32 i1 = mesh.indices[corner + 1] + 1;
+			u32 i2 = mesh.indices[corner + 2] + 1;
+			fprintf(file, "f %u/%u/%u %u/%u/%u %u/%u/%u\n", i0, i0, i0, i1, i1, i1, i2, i2, i2);
+		}
 	}
 	
 	fclose(file);
@@ -356,7 +361,7 @@ int main() {
 	VgtDecimateMesh(&inputs, &result, &callbacks);
 	
 #if ENABLE_ALLOCATOR_VALIDATION
-	assert(heap_allocator.allocation_count == heap_allocator.deallocation_count + 2); // 2 live heap allocations.
+	assert(heap_allocator.allocation_count == heap_allocator.deallocation_count + 3); // 3 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 #endif // !BUILD_VIRTUAL_GEOMETRY
 	

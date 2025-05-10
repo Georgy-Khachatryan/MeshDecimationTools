@@ -156,11 +156,17 @@ struct VgtVirtualGeometryBuildResult {
 	uint32_t level_count;
 };
 
+struct VgtDecimatedTriangleGeometryDesc {
+	uint32_t begin_indices_index;
+	uint32_t end_indices_index;
+};
+
 struct VgtMeshDecimationResult {
-	// TODO: Output per geometry index and vertex ranges.
+	struct VgtDecimatedTriangleGeometryDesc* geometry_descs;
 	uint32_t* indices;
 	float* vertices;
 	
+	uint32_t geometry_desc_count;
 	uint32_t index_count;
 	uint32_t vertex_count;
 	
