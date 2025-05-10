@@ -58,7 +58,7 @@ compile_const u64 u64_max = (u64)0xFFFF'FFFF'FFFF'FFFF;
 
 using Vector3 = VgtVector3;
 
-compile_const u32 meshlet_max_vertex_count = 128;
+compile_const u32 meshlet_max_vertex_count = 254;
 compile_const u32 meshlet_max_face_degree  = 3;
 
 compile_const u32 meshlet_max_face_count = 128;
@@ -1054,6 +1054,14 @@ always_inline_function static Vector3 VectorMin(const Vector3& lh, const Vector3
 	result.z = lh.z < rh.z ? lh.z : rh.z;
 	return result;
 }
+
+template<typename T>
+always_inline_function T Clamp(T value, T min, T max) {
+	if (value < min) value = min;
+	if (value > max) value = max;
+	return value;
+}
+
 
 static void AccumulateQuadric(Quadric& accumulator, const Quadric& quadric) {
 	accumulator.a00 += quadric.a00;
@@ -2347,6 +2355,8 @@ static MeshletAdjacency BuildMeshletAdjacency(MeshView mesh, Allocator& allocato
 static void BuildMeshletsForFaceGroup(
 	MeshView mesh,
 	KdTree kd_tree,
+	u32 meshlet_target_face_count,
+	u32 meshlet_target_vertex_count,
 	Array<u8> vertex_usage_map,
 	Array<FaceID>& meshlet_faces,
 	Array<u8>& meshlet_triangles,
@@ -2453,9 +2463,9 @@ static void BuildMeshletsForFaceGroup(
 			});
 		}
 		
-		if (restart_meshlet || best_face_id.index == u32_max || (meshlet_vertex_count + new_vertex_count > meshlet_max_vertex_count) || (meshlet_face_count + 1 > meshlet_max_face_count)) {
-			assert(meshlet_face_count   <= meshlet_max_face_count);
-			assert(meshlet_vertex_count <= meshlet_max_vertex_count);
+		if (restart_meshlet || best_face_id.index == u32_max || (meshlet_vertex_count + new_vertex_count > meshlet_target_vertex_count) || (meshlet_face_count + 1 > meshlet_target_face_count)) {
+			assert(meshlet_face_count   <= meshlet_target_face_count);
+			assert(meshlet_vertex_count <= meshlet_target_vertex_count);
 			
 			for (auto attributes_id : meshlet_vertices) {
 				vertex_usage_map[attributes_id.index] = 0xFF;
@@ -2524,8 +2534,8 @@ static void BuildMeshletsForFaceGroup(
 	}
 	
 	if (meshlet_face_count) {
-		assert(meshlet_face_count   <= meshlet_max_face_count);
-		assert(meshlet_vertex_count <= meshlet_max_vertex_count);
+		assert(meshlet_face_count   <= meshlet_target_face_count);
+		assert(meshlet_vertex_count <= meshlet_target_vertex_count);
 		
 		for (auto attributes_id : meshlet_vertices) {
 			vertex_usage_map[attributes_id.index] = 0xFF;
@@ -2546,7 +2556,16 @@ static void BuildMeshletsForFaceGroup(
 }
 
 // Note that FaceIDs inside groups are going to be scrambled inside groups during KdTree build. This leaves prefix sum in a valid, but different state.
-static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& allocator, Array<FaceID> meshlet_group_faces, Array<u32> meshlet_group_face_prefix_sum, Array<VgtErrorMetric> meshlet_group_error_metrics, u32 meshlet_group_base_index) {
+static MeshletBuildResult BuildMeshletsForFaceGroups(
+	MeshView mesh,
+	Allocator& allocator,
+	Array<FaceID> meshlet_group_faces,
+	Array<u32> meshlet_group_face_prefix_sum,
+	Array<VgtErrorMetric> meshlet_group_error_metrics,
+	u32 meshlet_target_face_count,
+	u32 meshlet_target_vertex_count,
+	u32 meshlet_group_base_index) {
+	
 	KdTree kd_tree;
 	KdTreeBuildElementsForFaces(mesh, allocator, kd_tree.elements);
 	ArrayReserve(kd_tree.nodes, allocator, kd_tree.elements.count * 2);
@@ -2595,6 +2614,8 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(MeshView mesh, Allocator& a
 		BuildMeshletsForFaceGroup(
 			mesh,
 			kd_tree,
+			meshlet_target_face_count,
+			meshlet_target_vertex_count,
 			vertex_usage_map,
 			meshlet_faces,
 			meshlet_triangles,
@@ -3199,6 +3220,8 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 	
 	auto mesh = BuildEditableMesh(allocator, inputs->mesh.geometry_descs, inputs->mesh.geometry_desc_count, inputs->mesh.vertex_stride_bytes);
 	
+	u32 meshlet_target_face_count   = Clamp(inputs->meshlet_target_triangle_count, 1u, meshlet_max_face_count);
+	u32 meshlet_target_vertex_count = Clamp(inputs->meshlet_target_vertex_count, 1u, meshlet_max_vertex_count);
 	
 	Array<FaceID> meshlet_group_faces;
 	Array<u32> meshlet_group_face_prefix_sum;
@@ -3255,13 +3278,13 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 	for (u32 level_index = 0; level_index < virtual_geometry_max_levels_of_details; level_index += 1) {
 		u32 allocator_high_water = allocator.memory_block_count;
 		
-		auto meshlet_build_result = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, meshlet_group_base_index);
+		auto meshlet_build_result = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, meshlet_target_face_count, meshlet_target_vertex_count, meshlet_group_base_index);
 		BuildMeshletVertexAndIndexBuffers(mesh, heap_allocator, meshlet_build_result, attributes_id_to_vertex_index, meshlet_vertex_indices, meshlet_triangles);
 		
 		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, meshlet_build_result.meshlets, meshlet_build_result.meshlet_adjacency, meshlet_build_result.meshlet_face_prefix_sum);
 		ConvertMeshletGroupsToFaceGroups(mesh, allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics);
 		
-		bool is_last_level = (level_index + 1 == virtual_geometry_max_levels_of_details) || (mesh.face_count <= meshlet_max_face_count) || (last_level_meshlet_count == meshlet_build_result.meshlets.count);
+		bool is_last_level = (level_index + 1 == virtual_geometry_max_levels_of_details) || (mesh.face_count <= meshlet_target_face_count) || (last_level_meshlet_count == meshlet_build_result.meshlets.count);
 		last_level_meshlet_count = meshlet_build_result.meshlets.count;
 		
 		if (is_last_level == false) {

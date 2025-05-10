@@ -65,9 +65,8 @@ struct VgtTriangleMeshDesc {
 struct VgtVirtualGeometryBuildInputs {
 	struct VgtTriangleMeshDesc mesh;
 	
-	// TODO: Custom meshlet size.
-	// uint32_t meshlet_max_vertex_count   = 128;
-	// uint32_t meshlet_max_triangle_count = 128;
+	uint32_t meshlet_target_triangle_count;
+	uint32_t meshlet_target_vertex_count;
 };
 
 struct VgtMeshDecimationInputs {

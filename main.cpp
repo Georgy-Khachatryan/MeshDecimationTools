@@ -344,7 +344,9 @@ int main() {
 #define BUILD_VIRTUAL_GEOMETRY 1
 #if BUILD_VIRTUAL_GEOMETRY
 	VgtVirtualGeometryBuildInputs inputs;
-	inputs.mesh = mesh_desc;
+	inputs.mesh                          = mesh_desc;
+	inputs.meshlet_target_vertex_count   = 128;
+	inputs.meshlet_target_triangle_count = 128;
 	
 	VgtVirtualGeometryBuildResult result;
 	VgtBuildVirtualGeometry(&inputs, &result, &callbacks);
