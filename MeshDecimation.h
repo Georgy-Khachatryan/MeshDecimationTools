@@ -71,7 +71,7 @@ struct VgtTriangleGeometryDesc {
 	// Array of vertex indices. 3 consecutive indices form a triangle.
 	const uint32_t* indices;
 	
-	// Array of vertices with stride equal to 'vertex_stride_bytes'. 
+	// Array of vertices. Stride is equal to 'vertex_stride_bytes' and provided via VgtTriangleMeshDesc.
 	const float* vertices;
 	
 	// Size of the 'indices' array. Must be a multiple of 3.
@@ -85,7 +85,7 @@ struct VgtTriangleMeshDesc {
 	//
 	// Array of geometry descriptions. One mesh may contain multiple geometries that get simplified
 	// without forming cracks in between. This is useful when different geometries use different
-	// materials or rendering using different techniques. For example a window might have transparent
+	// materials or rendered using different techniques. For example a window might have transparent
 	// glass as one geometry and opaque wood frame as another geometry. This also matches the way
 	// raytracing acceleration structure build APIs work.
 	//
@@ -114,7 +114,7 @@ struct VgtTriangleMeshDesc {
 };
 
 struct VgtVirtualGeometryBuildInputs {
-	// Source triangle mesh containing multiple geometries. See structure definition for reference.
+	// Source triangle mesh containing multiple geometries. See VgtTriangleMeshDesc definition for reference.
 	struct VgtTriangleMeshDesc mesh;
 	
 	// Target triangle count for meshlet builder. It will try to get as close to this value,
@@ -122,12 +122,12 @@ struct VgtVirtualGeometryBuildInputs {
 	uint32_t meshlet_target_triangle_count;
 	
 	// Target vertex count for meshlet builder. It will try to get as close to this value,
-	// but never go above it. Internally clamped between 1 and 254 vertices.
+	// but never go above it. Internally clamped between 3 and 254 vertices.
 	uint32_t meshlet_target_vertex_count;
 };
 
 struct VgtMeshDecimationInputs {
-	// Source triangle mesh containing multiple geometries. See structure definition for reference.
+	// Source triangle mesh containing multiple geometries. See VgtTriangleMeshDesc definition for reference.
 	struct VgtTriangleMeshDesc mesh;
 	
 	// Target face count for decimated mesh. Decimation algorithm will terminate once face count is
@@ -140,9 +140,9 @@ struct VgtMeshDecimationInputs {
 
 struct VgtMeshletTriangle {
 	// Three indices into meshlet_vertex_indices array. See VgtMeshlet and VgtVirtualGeometryBuildResult definitions for reference.
-	uint32_t i0 : 10;
-	uint32_t i1 : 10;
-	uint32_t i2 : 10;
+	uint8_t i0;
+	uint8_t i1;
+	uint8_t i2;
 };
 
 struct VgtMeshlet {
@@ -155,11 +155,12 @@ struct VgtMeshlet {
 	
 	//
 	// Error metric of this meshlet. Transferred from the group this meshlet was built from.
+	// For the first level meshlets the error is set to 0.
 	// Meshlet should be drawn if (EvaluateErrorMetric(meshlet.current_level_error_metric) <= target_error).
 	//
 	struct VgtErrorMetric current_level_error_metric;
 	//
-	// Index of a meshlet group from which this meshlet was built.
+	// Index of a meshlet group from which this meshlet was built. Set to UINT32_MAX for the first level meshlets.
 	// current_level_error_metric is extracted from this meshlet group.
 	//
 	uint32_t current_level_meshlet_group_index;
@@ -167,11 +168,12 @@ struct VgtMeshlet {
 	
 	//
 	// Error metric of one level coarser representation of this meshlet. Transferred from the group that was built using this meshlet.
+	// For the last level meshlet groups the error is set to FLT_MAX.
 	// Meshlet should be drawn if (EvaluateErrorMetric(meshlet.coarser_level_error_metric) > target_error).
 	//
 	struct VgtErrorMetric coarser_level_error_metric;
 	//
-	// Index of a meshlet group that was built from and contains this meshlet.
+	// Index of a meshlet group that was built from and contains this meshlet. This index is always valid, even for the last level meshlets.
 	// coarser_level_error_metric is extracted from this meshlet group.
 	//
 	uint32_t coarser_level_meshlet_group_index;
@@ -221,7 +223,9 @@ struct VgtMeshletGroup {
 	
 	//
 	// Union of source meshlet current_level_error_metrics and decimation error for this meshlet group.
-	// Source meshlet current_level_error_metric is the same as this error_metric.
+	// Source meshlet current_level_error_metric is the same as this error_metric. For the last level
+	// meshlet groups the error is set to FLT_MAX.
+	//
 	// This error_metric can be used to accelerate LOD tests by first checking that it's error is
 	// larger than the target error, and only then checking source meshlets if their error is
 	// smaller than the target error:
@@ -257,13 +261,47 @@ struct VgtVirtualGeometryLevel {
 };
 
 struct VgtVirtualGeometryBuildResult {
+	//
+	// Array of meshlet groups.
+	// Meshlet groups are the unit of mesh decimation and thus LOD swapping.
+	// See definition of VgtMeshletGroup for more details.
+	//
 	struct VgtMeshletGroup* meshlet_groups;
+	
+	//
+	// Array of meshlets.
+	// Meshlets are spatially and topologically small regions of a mesh. They have a limited
+	// number of faces and vertices. See definition of VgtMeshlet for more details.
+	//
 	struct VgtMeshlet* meshlets;
+	
+	//
+	// Flattened arrays of vertex indices for each meshlet. Use [begin_vertex_indices_index, end_vertex_indices_index)
+	// range to extract vertex indices of a given meshlet. See definition of VgtMeshlet for more details.
+	//
 	uint32_t* meshlet_vertex_indices;
+	
+	//
+	// Flattened arrays of triangles for each meshlet. Each triangle contains indices into meshlet_vertex_indices array.
+	// Use [begin_meshlet_triangles_index, end_meshlet_triangles_index) range to extract triangles of a given meshlet.
+	// See definition of VgtMeshlet for more details.
+	//
 	struct VgtMeshletTriangle* meshlet_triangles;
+	
+	//
+	// Array of vertices shared by all meshlets across all levels. Indexed using elements from
+	// meshlet_vertex_indices array. Vertex stride matches the stride passed in VgtTriangleMeshDesc.
+	//
 	float* vertices;
+	
+	// Meshlet and meshlet group ranges for each level of detail.
 	struct VgtVirtualGeometryLevel* levels;
 	
+	
+	//
+	// Sizes for each corresponding array defined above.
+	// Vertex count is in vertices of size 'vertex_stride_bytes' (NOT in floats).
+	//
 	uint32_t meshlet_group_count;
 	uint32_t meshlet_count;
 	uint32_t meshlet_vertex_index_count;
@@ -273,19 +311,30 @@ struct VgtVirtualGeometryBuildResult {
 };
 
 struct VgtDecimatedTriangleGeometryDesc {
+	// Range of vertex indices corresponding to a single geometry.
 	uint32_t begin_indices_index;
 	uint32_t end_indices_index;
 };
 
 struct VgtMeshDecimationResult {
+	// Array of per geometry ranges of vertex indices.
 	struct VgtDecimatedTriangleGeometryDesc* geometry_descs;
+	
+	// Array of vertex indices for all geometries.
 	uint32_t* indices;
+	
+	// Array of vertices for all geometries. Vertex stride matches the stride passed in VgtTriangleMeshDesc.
 	float* vertices;
 	
+	//
+	// Sizes for each corresponding array defined above.
+	// Vertex count is in vertices of size 'vertex_stride_bytes' (NOT in floats).
+	//
 	uint32_t geometry_desc_count;
 	uint32_t index_count;
 	uint32_t vertex_count;
 	
+	// Maximum edge collapse error encountered during simplification.
 	float max_error;
 };
 

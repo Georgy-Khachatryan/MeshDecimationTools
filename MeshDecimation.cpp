@@ -689,6 +689,12 @@ static u32 ComputeHashTableSize(u32 max_element_count) {
 
 
 static MeshView BuildEditableMesh(Allocator& allocator, const VgtTriangleGeometryDesc* geometry_descs, u32 geometry_desc_count, u32 vertex_stride_bytes) {
+	u32 vertex_stride_dwords    = vertex_stride_bytes / sizeof(u32);
+	u32 attribute_stride_dwords = vertex_stride_dwords - 3;
+	
+	if (vertex_stride_dwords < 3 || attribute_stride_dwords > VGT_MAX_ATTRIBUTE_STRIDE_DWORDS) return {};
+	
+	
 	u32 vertices_count = 0;
 	u32 indices_count  = 0;
 	
@@ -699,8 +705,6 @@ static MeshView BuildEditableMesh(Allocator& allocator, const VgtTriangleGeometr
 	}
 	u32 triangle_count = (indices_count / 3);
 	
-	u32 vertex_stride_dwords    = vertex_stride_bytes / sizeof(u32);
-	u32 attribute_stride_dwords = vertex_stride_dwords - 3;
 	
 	Array<Face>   faces;
 	Array<Edge>   edges;
@@ -3232,7 +3236,7 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 	auto mesh = BuildEditableMesh(allocator, inputs->mesh.geometry_descs, inputs->mesh.geometry_desc_count, inputs->mesh.vertex_stride_bytes);
 	
 	u32 meshlet_target_face_count   = Clamp(inputs->meshlet_target_triangle_count, 1u, meshlet_max_face_count);
-	u32 meshlet_target_vertex_count = Clamp(inputs->meshlet_target_vertex_count, 1u, meshlet_max_vertex_count);
+	u32 meshlet_target_vertex_count = Clamp(inputs->meshlet_target_vertex_count, 3u, meshlet_max_vertex_count);
 	
 	Array<FaceID> meshlet_group_faces;
 	Array<u32> meshlet_group_face_prefix_sum;
