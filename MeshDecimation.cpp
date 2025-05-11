@@ -34,7 +34,7 @@
 #endif // !defined(VGT_CACHE_LINE_SIZE)
 
 #if !defined(VGT_MAX_ATTRIBUTE_STRIDE_DWORDS)
-#define VGT_MAX_ATTRIBUTE_STRIDE_DWORDS 5
+#define VGT_MAX_ATTRIBUTE_STRIDE_DWORDS 16
 #endif // !defined(VGT_MAX_ATTRIBUTE_STRIDE_DWORDS)
 
 #if !defined(VGT_ENABLE_ATTRIBUTE_SUPPORT)
@@ -475,7 +475,7 @@ static void ArrayResizeMemset(Array<T>& array, Allocator& allocator, u32 new_cou
 }
 
 template<typename ArrayT>
-static void ArrayAppend(ArrayT& array, typename ArrayT::ValueType value) {
+always_inline_function static void ArrayAppend(ArrayT& array, const typename ArrayT::ValueType& value) {
 	VGT_ASSERT(array.count < array.capacity);
 	array.data[array.count++] = value;
 }
@@ -494,7 +494,7 @@ never_inline_function static void ArrayGrow(Array<T>& array, Allocator& allocato
 }
 
 template<typename T>
-static void ArrayAppendMaybeGrow(Array<T>& array, Allocator& allocator, T value) {
+static void ArrayAppendMaybeGrow(Array<T>& array, Allocator& allocator, const T& value) {
 	if (array.count >= array.capacity) ArrayGrow(array, allocator, ArrayComputeNewCapacity(array.capacity, array.count + 1));
 	
 	array.data[array.count++] = value;
@@ -1024,15 +1024,23 @@ struct Quadric {
 	
 	float weight = 0.f;
 };
+static_assert(sizeof(Quadric) == sizeof(float) * 11);
+
+struct QuadricAttributeGradient {
+	Vector3 g = { 0.f, 0.f, 0.f };
+	float   d = 0.f;
+};
 
 struct QuadricWithAttributes : Quadric {
 #if VGT_ENABLE_ATTRIBUTE_SUPPORT
-	struct {
-		Vector3 g = { 0.f, 0.f, 0.f };
-		float d = 0.f;
-	} attributes[VGT_MAX_ATTRIBUTE_STRIDE_DWORDS];
+	QuadricAttributeGradient attributes[VGT_MAX_ATTRIBUTE_STRIDE_DWORDS]; // Note that this array is used as a 'flexible array'.
+	
+	// Quadric with attributes cannot be copied by value as it's variable size (i.e. it might be missing trailing attributes).
+	QuadricWithAttributes& operator= (const QuadricWithAttributes&) = delete;
+	QuadricWithAttributes& operator= (QuadricWithAttributes&&) = delete;
 #endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
 };
+static_assert(sizeof(QuadricWithAttributes) == sizeof(Quadric) + sizeof(QuadricAttributeGradient) * VGT_MAX_ATTRIBUTE_STRIDE_DWORDS);
 
 
 //
@@ -1479,18 +1487,61 @@ static u32 AttributeWedgeMapFind(AttributeWedgeMap& small_set, AttributesID key)
 	return u32_max;
 }
 
+struct QuadricWithAttributesArray {
+	void* data   = nullptr;
+	u32 count    = 0;
+	u32 capacity = 0;
+	u32 data_stride_bytes = 0;
+	
+	QuadricWithAttributes& operator[] (u32 index) { VGT_ASSERT(index < count); return *(QuadricWithAttributes*)((u8*)data + index * data_stride_bytes); }
+};
+
+// TODO: Reuse existing array functions.
+never_inline_function static void ArrayGrow(QuadricWithAttributesArray& array, Allocator& allocator, u32 new_capacity) {
+	u32 old_memory_block_index = AllocatorFindMemoryBlock(allocator, array.data);
+	
+	void* memory_block = allocator.callbacks.realloc(array.data, new_capacity * array.data_stride_bytes + sizeof(QuadricWithAttributes), allocator.callbacks.user_data);
+	u32 memory_block_index = old_memory_block_index != u32_max ? old_memory_block_index : allocator.memory_block_count++;
+	
+	allocator.memory_blocks[memory_block_index] = memory_block;
+	
+	array.data     = memory_block;
+	array.capacity = new_capacity;
+}
+
+// TODO: Reuse existing array functions.
+static void ArrayAppendMaybeGrow(QuadricWithAttributesArray& array, Allocator& allocator, const QuadricWithAttributes& value) {
+	if (array.count >= array.capacity) ArrayGrow(array, allocator, ArrayComputeNewCapacity(array.capacity, array.count + 1));
+	
+	memcpy(&array[array.count++], &value, array.data_stride_bytes);
+}
+
+// TODO: Reuse existing array functions.
+static void ArrayReserve(QuadricWithAttributesArray& array, Allocator& allocator, u32 capacity, u32 attribute_stride_dwords) {
+	array.data_stride_bytes = sizeof(Quadric) + sizeof(QuadricAttributeGradient) * attribute_stride_dwords;
+	array.data     = AllocateMemoryBlock(allocator, array.data, capacity * array.data_stride_bytes + sizeof(QuadricWithAttributes));
+	array.capacity = capacity;
+}
+
+// TODO: Reuse existing array functions.
+static void ArrayResizeMemset(QuadricWithAttributesArray& array, Allocator& allocator, u32 new_count, u32 attribute_stride_dwords, u8 pattern) { // Fills new elements with a byte pattern.
+	ArrayReserve(array, allocator, new_count, attribute_stride_dwords);
+	array.count = new_count;
+	memset(array.data, pattern, new_count * array.data_stride_bytes);
+}
+
 
 struct alignas(VGT_CACHE_LINE_SIZE) MeshDecimationState {
 	// Edge quadrics accumulated on vertices.
 	Array<Quadric> vertex_edge_quadrics;
 	
 	// Face quadrics accumulated on attributes.
-	Array<QuadricWithAttributes> attribute_face_quadrics;
+	QuadricWithAttributesArray attribute_face_quadrics;
 	
 	EdgeDuplicateMap edge_duplicate_map;
 	RemovedEdgeArray removed_edge_array;
 	
-	Array<QuadricWithAttributes> wedge_quadrics;
+	QuadricWithAttributesArray wedge_quadrics;
 	Array<AttributesID> wedge_attributes_ids;
 	AttributeWedgeMap wedge_attribute_set;
 	
@@ -1732,9 +1783,9 @@ static void EdgeCollapseHeapInitialize(EdgeCollapseHeap& heap) {
 
 static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weights, Allocator& allocator, Allocator& heap_allocator, MeshDecimationState& state) {
 	ArrayResizeMemset(state.vertex_edge_quadrics, allocator, mesh.vertex_count, 0);
-	ArrayResizeMemset(state.attribute_face_quadrics, allocator, mesh.attribute_count, 0);
+	ArrayResizeMemset(state.attribute_face_quadrics, allocator, mesh.attribute_count, mesh.attribute_stride_dwords, 0);
 	
-	ArrayReserve(state.wedge_quadrics,       heap_allocator, 64);
+	ArrayReserve(state.wedge_quadrics,       heap_allocator, 64, mesh.attribute_stride_dwords);
 	ArrayReserve(state.wedge_attributes_ids, heap_allocator, 64);
 	ArrayReserve(state.removed_edge_array,   heap_allocator, 64);
 	HashTableGrow(state.edge_duplicate_map,  heap_allocator, ComputeHashTableSize(128u));
@@ -1932,7 +1983,7 @@ static float DecimateMeshFaceGroup(
 				auto  attributes_id = state.wedge_attributes_ids[i];
 				auto* attributes    = mesh[attributes_id];
 				
-				state.attribute_face_quadrics[attributes_id.index] = wedge_quadric;
+				memcpy(&state.attribute_face_quadrics[attributes_id.index], &wedge_quadric, state.attribute_face_quadrics.data_stride_bytes);
 				if (ComputeWedgeAttributes(wedge_quadric, weighted_new_position, attributes, state.rcp_attribute_weights, attribute_stride_dwords) && normalize_vertex_attributes) {
 					normalize_vertex_attributes(attributes);
 				}
