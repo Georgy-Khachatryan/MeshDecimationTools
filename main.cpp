@@ -1,6 +1,5 @@
 #include "MeshDecimation.h"
 
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -259,7 +258,7 @@ static void* ValidatedAllocatorRealloc(void* old_memory_block, u64 size_bytes, v
 	} else if (old_memory_block == nullptr && size_bytes != 0) { // Allocate.
 		allocator->allocation_count += 1;
 	} else {
-		assert(old_memory_block == nullptr && size_bytes == 0); // No op.
+		VGT_ASSERT(old_memory_block == nullptr && size_bytes == 0); // No op.
 	}
 #endif // ENABLE_ALLOCATOR_VALIDATION
 	
@@ -319,7 +318,7 @@ int main() {
 	compile_const float uv_weight     = 1.f;
 	compile_const float normal_weight = 1.f;
 	
-	float attribute_weights[5];
+	float attribute_weights[VGT_MAX_ATTRIBUTE_STRIDE_DWORDS] = {};
 	attribute_weights[0] = uv_weight;
 	attribute_weights[1] = uv_weight;
 	attribute_weights[2] = normal_weight;
@@ -353,7 +352,7 @@ int main() {
 	VgtBuildVirtualGeometry(&inputs, &result, &callbacks);
 
 #if ENABLE_ALLOCATOR_VALIDATION
-	assert(heap_allocator.allocation_count == heap_allocator.deallocation_count + 6); // 6 live heap allocations.
+	VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 6); // 6 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 #else // !BUILD_VIRTUAL_GEOMETRY
 	VgtMeshDecimationInputs inputs;
@@ -365,7 +364,7 @@ int main() {
 	VgtDecimateMesh(&inputs, &result, &callbacks);
 	
 #if ENABLE_ALLOCATOR_VALIDATION
-	assert(heap_allocator.allocation_count == heap_allocator.deallocation_count + 3); // 3 live heap allocations.
+	VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 3); // 3 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 #endif // !BUILD_VIRTUAL_GEOMETRY
 	
@@ -373,7 +372,7 @@ int main() {
 	printf("Decimation Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 	
 #if ENABLE_ALLOCATOR_VALIDATION
-	assert(temp_allocator.allocation_count == temp_allocator.deallocation_count); // No live temp allocations.
+	VGT_ASSERT(temp_allocator.allocation_count == temp_allocator.deallocation_count); // No live temp allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 	
 	WriteWavefrontObjFile(result);
@@ -387,7 +386,7 @@ int main() {
 #if ENABLE_ALLOCATOR_VALIDATION
 	printf("Temp Allocation Count: %u\n", temp_allocator.allocation_count);
 	printf("Heap Allocation Count: %u\n", heap_allocator.allocation_count);
-	assert(heap_allocator.allocation_count == heap_allocator.deallocation_count); // No live heap allocations.
+	VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count); // No live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 	
 	fclose(file);

@@ -5,6 +5,29 @@
 
 #include <stdint.h>
 
+
+#if defined(VGT_CONFIGURATION_FILE)
+#include VGT_CONFIGURATION_FILE
+#endif // defined(VGT_CONFIGURATION_FILE)
+
+#if !defined(VGT_ASSERT)
+#include <assert.h>
+#define VGT_ASSERT(condition) assert(condition)
+#endif // !defined(VGT_ASSERT) 
+
+#if !defined(VGT_MAX_ATTRIBUTE_STRIDE_DWORDS)
+#define VGT_MAX_ATTRIBUTE_STRIDE_DWORDS 16
+#endif // !defined(VGT_MAX_ATTRIBUTE_STRIDE_DWORDS)
+
+#if !defined(VGT_MESHLET_GROUP_SIZE)
+#define VGT_MESHLET_GROUP_SIZE 32
+#endif // !defined(VGT_MESHLET_GROUP_SIZE)
+
+#if !defined(VGT_ENABLE_ATTRIBUTE_SUPPORT)
+#define VGT_ENABLE_ATTRIBUTE_SUPPORT 1
+#endif // !defined(VGT_ENABLE_ATTRIBUTE_SUPPORT)
+
+
 #if defined(__cplusplus)
 extern "C" {
 #endif // defined(__cplusplus)
@@ -34,9 +57,9 @@ struct VgtErrorMetric {
 
 //
 // Memory reallocation function similar to C realloc():
-// - Allocate new memory block if (old_memory_block == NULL && size_bytes != 0).
-// - Free old memory block if (old_memory_block != NULL && size_bytes == 0).
-// - Extend old memory block or allocate a new memory block and memcpy old contents to it if (old_memory_block != NULL && size_bytes != 0).
+// - Allocate a new memory block if (old_memory_block == NULL && size_bytes != 0).
+// - Free the old memory block if (old_memory_block != NULL && size_bytes == 0).
+// - Extend the old memory block or allocate a new memory block and memcpy the old contents to it if (old_memory_block != NULL && size_bytes != 0).
 //
 typedef void* (*VgtReallocCallback)(void* old_memory_block, uint64_t size_bytes, void* user_data);
 
@@ -263,7 +286,7 @@ struct VgtVirtualGeometryLevel {
 struct VgtVirtualGeometryBuildResult {
 	//
 	// Array of meshlet groups.
-	// Meshlet groups are the unit of mesh decimation and thus LOD swapping.
+	// Meshlet groups are the unit of mesh decimation.
 	// See definition of VgtMeshletGroup for more details.
 	//
 	struct VgtMeshletGroup* meshlet_groups;

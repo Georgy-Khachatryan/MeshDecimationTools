@@ -20,26 +20,9 @@
 #include <type_traits>
 
 
-#if defined(VGT_CONFIGURATION_FILE)
-#include VGT_CONFIGURATION_FILE
-#endif // defined(VGT_CONFIGURATION_FILE)
-
-#if !defined(VGT_ASSERT)
-#include <assert.h>
-#define VGT_ASSERT(condition) assert(condition)
-#endif // !defined(VGT_ASSERT) 
-
 #if !defined(VGT_CACHE_LINE_SIZE)
 #define VGT_CACHE_LINE_SIZE 64
 #endif // !defined(VGT_CACHE_LINE_SIZE)
-
-#if !defined(VGT_MAX_ATTRIBUTE_STRIDE_DWORDS)
-#define VGT_MAX_ATTRIBUTE_STRIDE_DWORDS 16
-#endif // !defined(VGT_MAX_ATTRIBUTE_STRIDE_DWORDS)
-
-#if !defined(VGT_ENABLE_ATTRIBUTE_SUPPORT)
-#define VGT_ENABLE_ATTRIBUTE_SUPPORT 1
-#endif // !defined(VGT_ENABLE_ATTRIBUTE_SUPPORT)
 
 
 #if defined(_MSC_VER)
@@ -77,8 +60,8 @@ compile_const u32 meshlet_max_face_count = 128;
 compile_const u32 meshlet_min_face_count = 32;
 compile_const float discontinuous_meshlet_max_expansion = 2.f; // Sqrt of the maximum AABB expansion when adding a discontinuous face to a meshlet.
 
-compile_const u32 meshlet_group_max_meshlet_count = 32;
-compile_const u32 meshlet_group_min_meshlet_count = 16;
+compile_const u32 meshlet_group_max_meshlet_count = VGT_MESHLET_GROUP_SIZE;
+compile_const u32 meshlet_group_min_meshlet_count = meshlet_group_max_meshlet_count / 2;
 compile_const float discontinuous_meshlet_group_max_expansion = 4.f; // Sqrt of the maximum AABB expansion when adding a discontinuous meshlet to a group.
 
 compile_const u32 virtual_geometry_max_levels_of_details = 16;
