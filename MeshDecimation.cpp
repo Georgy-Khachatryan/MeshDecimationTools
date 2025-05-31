@@ -806,109 +806,13 @@ static MeshView BuildEditableMesh(Allocator& allocator, const VgtTriangleGeometr
 	return mesh;
 }
 
-static void EditableMeshToIndexedMesh(MeshView mesh, Allocator& allocator, Allocator& heap_allocator, u32 max_geometry_desc_count, VgtMeshDecimationResult* result) {
-	u32 allocator_high_water = allocator.memory_block_count;
-	VGT_ASSERT(heap_allocator.memory_block_count == 0);
-	
-	Array<VertexID> attributes_id_to_vertex_id;
-	ArrayResizeMemset(attributes_id_to_vertex_id, allocator, mesh.attribute_count, 0xFF);
-	
-	Array<u32> attribute_id_remap;
-	ArrayResize(attribute_id_remap, allocator, mesh.attribute_count);
-	
-	
-	for (VertexID vertex_id = { 0 }; vertex_id.index < mesh.vertex_count; vertex_id.index += 1) {
-		auto& vertex = mesh[vertex_id];
-		if (vertex.corner_list_base.index == u32_max) continue;
-		
-		IterateCornerList<ElementType::Vertex>(mesh, vertex.corner_list_base, [&](CornerID corner_id) {
-			auto attributes_ids = mesh[corner_id].attributes_id;
-			attributes_id_to_vertex_id[attributes_ids.index] = vertex_id;
-		});
-	}
-	
-	u32 attribute_count = 0;
-	for (AttributesID attribute_id = { 0 }; attribute_id.index < mesh.attribute_count; attribute_id.index += 1) {
-		bool is_active = (attributes_id_to_vertex_id[attribute_id.index].index != u32_max);
-		attribute_id_remap[attribute_id.index] = attribute_count;
-		attribute_count += is_active ? 1 : 0;
-	}
-	
-	u32 face_count = 0;
-	for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
-		face_count += mesh[face_id].corner_list_base.index != u32_max ? 1 : 0;
-	}
-	
-	u32 attribute_stride_dwords = mesh.attribute_stride_dwords;
-	u32 vertex_stride_dwords    = (attribute_stride_dwords + 3);
-	
-	Array<u32>   indices;
-	Array<float> vertices;
-	Array<VgtDecimatedTriangleGeometryDesc> geometry_descs;
-	
-	ArrayReserve(indices, heap_allocator, face_count * 3);
-	ArrayResize(vertices, heap_allocator, attribute_count * vertex_stride_dwords);
-	ArrayResizeMemset(geometry_descs, heap_allocator, max_geometry_desc_count, 0);
-	
-	u32 geometry_index = u32_max;
-	for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
-		auto& face = mesh[face_id];
-		if (face.corner_list_base.index == u32_max) continue;
-		
-		if (geometry_index != face.geometry_index) {
-			VGT_ASSERT(geometry_index == u32_max || geometry_index < face.geometry_index);
-			
-			if (geometry_index != u32_max) {
-				auto& geometry_desc = geometry_descs[geometry_index];
-				geometry_desc.end_indices_index = indices.count;
-			}
-			geometry_index = face.geometry_index;
-			
-			auto& geometry_desc = geometry_descs[geometry_index];
-			geometry_desc.begin_indices_index = indices.count;
-			geometry_desc.end_indices_index   = indices.count;
-		}
-		
-		IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
-			auto& corner = mesh[corner_id];
-			ArrayAppend(indices, attribute_id_remap[corner.attributes_id.index]);
-		});
-	}
-	
-	if (geometry_index != u32_max) {
-		auto& geometry_desc = geometry_descs[geometry_index];
-		geometry_desc.end_indices_index = indices.count;
-	}
-	
-	u32 output_vertex_index = 0;
-	for (AttributesID attribute_id = { 0 }; attribute_id.index < mesh.attribute_count; attribute_id.index += 1) {
-		auto vertex_id = attributes_id_to_vertex_id[attribute_id.index];
-		if (vertex_id.index == u32_max) continue;
-		
-		auto* vertex = &vertices[output_vertex_index * vertex_stride_dwords];
-		memcpy(vertex + 0, &mesh[vertex_id].position, sizeof(Vector3));
-		memcpy(vertex + 3, mesh[attribute_id], attribute_stride_dwords * sizeof(u32));
-		output_vertex_index += 1;
-	}
-	
-	result->geometry_descs      = geometry_descs.data;
-	result->indices             = indices.data;
-	result->vertices            = vertices.data;
-	result->index_count         = indices.count;
-	result->vertex_count        = vertices.count / vertex_stride_dwords;
-	result->geometry_desc_count = geometry_descs.count;
-	
-	AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
-}
-
-using RemovedEdgeArray = Array<EdgeID>;
 
 struct EdgeCollapseResult {
 	VertexID remaining_vertex_id;
 	u32 removed_face_count = 0;
 };
 
-static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Allocator& heap_allocator, EdgeDuplicateMap& edge_duplicate_map, RemovedEdgeArray& removed_edge_array) {
+static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Allocator& heap_allocator, EdgeDuplicateMap& edge_duplicate_map, Array<EdgeID>& removed_edge_array) {
 	auto& edge = mesh[edge_id];
 	
 	VGT_ASSERT(edge.vertex_0.index != edge.vertex_1.index);
@@ -1522,7 +1426,7 @@ struct alignas(VGT_CACHE_LINE_SIZE) MeshDecimationState {
 	QuadricWithAttributesArray attribute_face_quadrics;
 	
 	EdgeDuplicateMap edge_duplicate_map;
-	RemovedEdgeArray removed_edge_array;
+	Array<EdgeID>    removed_edge_array;
 	
 	QuadricWithAttributesArray wedge_quadrics;
 	Array<AttributesID> wedge_attributes_ids;
@@ -1900,7 +1804,7 @@ static float DecimateMeshFaceGroup(
 	MeshDecimationState& state,
 	EdgeCollapseHeap& edge_collapse_heap,
 	VgtNormalizeVertexAttributes normalize_vertex_attributes,
-	VertexID* changed_attribute_vertex_ids,
+	u8* changed_vertex_mask,
 	u32 target_face_count,
 	u32 active_face_count,
 	float target_error_limit = FLT_MAX) {
@@ -1970,10 +1874,10 @@ static float DecimateMeshFaceGroup(
 				if (ComputeWedgeAttributes(wedge_quadric, weighted_new_position, attributes, state.rcp_attribute_weights, attribute_stride_dwords) && normalize_vertex_attributes) {
 					normalize_vertex_attributes(attributes);
 				}
+			}
 				
-				if (changed_attribute_vertex_ids) {
-					changed_attribute_vertex_ids[attributes_id.index] = remaining_vertex_id;
-				}
+			if (changed_vertex_mask) {
+				changed_vertex_mask[remaining_vertex_id.index] = 0xFF;
 			}
 			
 			IterateCornerList<ElementType::Vertex>(mesh, mesh[remaining_vertex_id].corner_list_base, [&](CornerID corner_id) {
@@ -1999,7 +1903,7 @@ static void DecimateMeshFaceGroups(
 	Array<FaceID> meshlet_group_faces,
 	Array<u32> meshlet_group_face_prefix_sum,
 	Array<VgtErrorMetric> meshlet_group_error_metrics,
-	Array<VertexID> changed_attribute_vertex_ids) {
+	Array<u8> changed_vertex_mask) {
 	
 	u32 allocator_high_water = allocator.memory_block_count;
 	u32 heap_allocator_high_water = heap_allocator.memory_block_count;
@@ -2125,7 +2029,16 @@ static void DecimateMeshFaceGroups(
 		
 		u32 target_face_count = face_count / 2;
 		u32 active_face_count = face_count;
-		float decimation_error = DecimateMeshFaceGroup(mesh, heap_allocator, state, edge_collapse_heap, normalize_vertex_attributes, changed_attribute_vertex_ids.data, target_face_count, active_face_count);
+		float decimation_error = DecimateMeshFaceGroup(
+			mesh,
+			heap_allocator,
+			state,
+			edge_collapse_heap,
+			normalize_vertex_attributes,
+			changed_vertex_mask.data,
+			target_face_count,
+			active_face_count
+		);
 		
 		auto& error_metric = meshlet_group_error_metrics[group_index];
 		error_metric.error = error_metric.error > decimation_error ? error_metric.error : decimation_error;
@@ -3106,7 +3019,12 @@ static u32 CreateMeshElementRemap(MeshView mesh, Array<ElementID> old_element_id
 	return new_element_count;
 }
 
-static void CompactMesh(MeshView& mesh, Allocator& allocator, Array<FaceID>& meshlet_group_faces, Array<u32>& meshlet_group_face_prefix_sum) {
+struct MeshElementRemap {
+	Array<FaceID> old_face_id_to_new_face_id;
+	Array<EdgeID> old_edge_id_to_new_edge_id;
+};
+
+static MeshElementRemap CompactMesh(MeshView& mesh, Allocator& allocator) {
 	Array<FaceID> old_face_id_to_new_face_id;
 	ArrayResize(old_face_id_to_new_face_id, allocator, mesh.face_count);
 	
@@ -3115,7 +3033,6 @@ static void CompactMesh(MeshView& mesh, Allocator& allocator, Array<FaceID>& mes
 	
 	mesh.face_count = CreateMeshElementRemap<FaceID>(mesh, old_face_id_to_new_face_id);
 	mesh.edge_count = CreateMeshElementRemap<EdgeID>(mesh, old_edge_id_to_new_edge_id);
-	
 	
 	// Remap mesh corners.
 	for (u32 i = 0; i < mesh.corner_count; i += 1) {
@@ -3129,33 +3046,46 @@ static void CompactMesh(MeshView& mesh, Allocator& allocator, Array<FaceID>& mes
 		}
 	}
 	
-	
-	// Remap meshlet group faces.
-	{
-		u32 new_prefix_sum = 0;
-		
-		u32 begin_face_index = 0;
-		for (u32 group_index = 0; group_index < meshlet_group_face_prefix_sum.count; group_index += 1) {
-			u32 end_face_index = meshlet_group_face_prefix_sum[group_index];
-			
-			for (u32 face_index = begin_face_index; face_index < end_face_index; face_index += 1) {
-				auto old_face_id = meshlet_group_faces[face_index];
-				auto new_face_id = old_face_id_to_new_face_id[old_face_id.index];
-				if (new_face_id.index == u32_max) continue;
-				
-				meshlet_group_faces[new_prefix_sum++] = new_face_id;
-			}
-			meshlet_group_face_prefix_sum[group_index] = new_prefix_sum;
-			
-			begin_face_index = end_face_index;
-		}
-		
-		meshlet_group_faces.count = new_prefix_sum;
-	}
+	MeshElementRemap remap;
+	remap.old_face_id_to_new_face_id = old_face_id_to_new_face_id;
+	remap.old_edge_id_to_new_edge_id = old_edge_id_to_new_edge_id;
+
+	return remap;
 }
 
-// TODO: Rework vertex indexing code. This can be a just memcpy. Or even better we could write this data directly into the output buffers from BuildMeshletsForFaceGroups.
-static void BuildMeshletVertexAndIndexBuffers(MeshView mesh, Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, Array<u32> attributes_id_to_vertex_index, Array<u32>& meshlet_vertex_indices, Array<VgtMeshletTriangle>& meshlet_triangles) {
+static void CompactMeshletGroupFaces(MeshElementRemap remap, Array<FaceID>& meshlet_group_faces, Array<u32>& meshlet_group_face_prefix_sum) {
+	auto old_face_id_to_new_face_id = remap.old_face_id_to_new_face_id;
+	
+	u32 new_prefix_sum = 0;
+	
+	u32 begin_face_index = 0;
+	for (u32 group_index = 0; group_index < meshlet_group_face_prefix_sum.count; group_index += 1) {
+		u32 end_face_index = meshlet_group_face_prefix_sum[group_index];
+		
+		for (u32 face_index = begin_face_index; face_index < end_face_index; face_index += 1) {
+			auto old_face_id = meshlet_group_faces[face_index];
+			auto new_face_id = old_face_id_to_new_face_id[old_face_id.index];
+			if (new_face_id.index == u32_max) continue;
+			
+			meshlet_group_faces[new_prefix_sum++] = new_face_id;
+		}
+		meshlet_group_face_prefix_sum[group_index] = new_prefix_sum;
+		
+		begin_face_index = end_face_index;
+	}
+	
+	meshlet_group_faces.count = new_prefix_sum;
+}
+
+// TODO: We could write this data directly into the output buffers from BuildMeshletsForFaceGroups.
+static void BuildMeshletVertexAndIndexBuffers(
+	MeshView mesh,
+	Allocator& heap_allocator,
+	MeshletBuildResult meshlet_build_result,
+	Array<u32> attributes_id_to_vertex_index,
+	Array<u32>& meshlet_vertex_indices,
+	Array<VgtMeshletTriangle>& meshlet_triangles) {
+	
 	auto meshlet_corner_prefix_sum = meshlet_build_result.meshlet_corner_prefix_sum;
 	
 	if (meshlet_vertex_indices.count + meshlet_build_result.meshlet_corners.count > meshlet_vertex_indices.capacity) {
@@ -3213,12 +3143,33 @@ static void BuildMeshletVertexAndIndexBuffers(MeshView mesh, Allocator& heap_all
 	}
 }
 
-// TODO: Rework vertex indexing code.
-static void AppendChangedVertices(MeshView mesh, Allocator& heap_allocator, Array<VertexID> changed_attribute_vertex_ids, Array<u32> attributes_id_to_vertex_index, Array<float>& vertices) {
+static void AppendChangedVertices(
+	MeshView mesh,
+	Allocator& allocator,
+	Allocator& heap_allocator,
+	Array<u8> changed_vertex_mask,
+	Array<u32> attributes_id_to_vertex_index,
+	Array<float>& vertices) {
+	
+	Array<VertexID> attributes_id_to_vertex_id;
+	ArrayResizeMemset(attributes_id_to_vertex_id, allocator, mesh.attribute_count, 0xFF);
+	
+	for (VertexID vertex_id = { 0 }; vertex_id.index < mesh.vertex_count; vertex_id.index += 1) {
+		auto& vertex = mesh[vertex_id];
+		if (vertex.corner_list_base.index == u32_max)  continue;
+		if (changed_vertex_mask[vertex_id.index] == 0) continue;
+		
+		IterateCornerList<ElementType::Vertex>(mesh, vertex.corner_list_base, [&](CornerID corner_id) {
+			auto attributes_ids = mesh[corner_id].attributes_id;
+			attributes_id_to_vertex_id[attributes_ids.index] = vertex_id;
+		});
+	}
+	memset(changed_vertex_mask.data, 0, changed_vertex_mask.count);
+
 	u32 changed_vertex_count = 0;
-	for (AttributesID attributes_id = { 0 }; attributes_id.index < changed_attribute_vertex_ids.count; attributes_id.index += 1) {
-		auto vertex_id = changed_attribute_vertex_ids[attributes_id.index];
-		changed_vertex_count += (vertex_id.index != u32_max) ? 1 : 0;
+	for (AttributesID attributes_id = { 0 }; attributes_id.index < mesh.attribute_count; attributes_id.index += 1) {
+		auto vertex_id = attributes_id_to_vertex_id[attributes_id.index];
+		changed_vertex_count += vertex_id.index != u32_max ? 1 : 0;
 	}
 	
 	u32 attribute_stride_dwords = mesh.attribute_stride_dwords;
@@ -3232,11 +3183,10 @@ static void AppendChangedVertices(MeshView mesh, Allocator& heap_allocator, Arra
 	u32 output_vertex_index = vertices.count / vertex_stride_dwords;
 	vertices.count = new_array_size;
 	
-	for (AttributesID attributes_id = { 0 }; attributes_id.index < changed_attribute_vertex_ids.count; attributes_id.index += 1) {
-		auto vertex_id = changed_attribute_vertex_ids[attributes_id.index];
+	for (AttributesID attributes_id = { 0 }; attributes_id.index < mesh.attribute_count; attributes_id.index += 1) {
+		auto vertex_id = attributes_id_to_vertex_id[attributes_id.index];
 		if (vertex_id.index == u32_max) continue;
 		
-		changed_attribute_vertex_ids[attributes_id.index].index = u32_max;
 		attributes_id_to_vertex_index[attributes_id.index] = output_vertex_index;
 		
 		auto* vertex = &vertices[output_vertex_index * vertex_stride_dwords];
@@ -3244,6 +3194,8 @@ static void AppendChangedVertices(MeshView mesh, Allocator& heap_allocator, Arra
 		memcpy(vertex + 3, mesh[attributes_id], attribute_stride_dwords * sizeof(u32));
 		output_vertex_index += 1;
 	}
+
+	VGT_ASSERT(vertices.count == output_vertex_index * vertex_stride_dwords);
 }
 
 } // namespace VirtualGeometryTools
@@ -3255,12 +3207,6 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 	VGT_ASSERT(inputs);
 	VGT_ASSERT(result);
 	
-	//
-	// Virtual Geometry TODO:
-	//
-	// - Rework allocation patterns. Minimize size, number, and duration of allocations.
-	//
-
 	Allocator allocator;
 	InitializeAllocator(allocator, callbacks ? &callbacks->temp_allocator : nullptr);
 
@@ -3293,27 +3239,11 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 	Array<u32> attributes_id_to_vertex_index;
 	ArrayResizeMemset(attributes_id_to_vertex_index, allocator, mesh.attribute_count, 0xFF);
 	
-	Array<VertexID> changed_attribute_vertex_ids;
-	ArrayResizeMemset(changed_attribute_vertex_ids, allocator, mesh.attribute_count, 0xFF);
+	Array<u8> changed_vertex_mask;
+	ArrayResizeMemset(changed_vertex_mask, allocator, mesh.attribute_count, 0xFF);
 	
 	Array<float> vertices;
-	
-	// TODO: Rework vertex indexing code.
-	{
-		for (VertexID vertex_id = { 0 }; vertex_id.index < mesh.vertex_count; vertex_id.index += 1) {
-			auto& vertex = mesh[vertex_id];
-			if (vertex.corner_list_base.index == u32_max) continue;
-			
-			IterateCornerList<ElementType::Vertex>(mesh, vertex.corner_list_base, [&](CornerID corner_id) {
-				auto attributes_ids = mesh[corner_id].attributes_id;
-				changed_attribute_vertex_ids[attributes_ids.index] = vertex_id;
-			});
-		}
-		
-		u32 vertex_stride_dwords = (mesh.attribute_stride_dwords + 3);
-		ArrayReserve(vertices, heap_allocator, (mesh.attribute_count * 2) * vertex_stride_dwords);
-		AppendChangedVertices(mesh, heap_allocator, changed_attribute_vertex_ids, attributes_id_to_vertex_index, vertices);
-	}
+	AppendChangedVertices(mesh, allocator, heap_allocator, changed_vertex_mask, attributes_id_to_vertex_index, vertices);
 	
 	Array<VgtVirtualGeometryLevel> levels;
 	ArrayReserve(levels, heap_allocator, virtual_geometry_max_levels_of_details);
@@ -3337,11 +3267,23 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 		last_level_meshlet_count = meshlet_build_result.meshlets.count;
 		
 		if (is_last_level == false) {
-			DecimateMeshFaceGroups(mesh, allocator, heap_allocator, inputs->mesh.normalize_vertex_attributes, inputs->mesh.attribute_weights, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, changed_attribute_vertex_ids);
-			AppendChangedVertices(mesh, heap_allocator, changed_attribute_vertex_ids, attributes_id_to_vertex_index, vertices);
+			DecimateMeshFaceGroups(
+				mesh,
+				allocator,
+				heap_allocator,
+				inputs->mesh.normalize_vertex_attributes,
+				inputs->mesh.attribute_weights,
+				meshlet_group_faces,
+				meshlet_group_face_prefix_sum,
+				meshlet_group_error_metrics,
+				changed_vertex_mask
+			);
+			
+			AppendChangedVertices(mesh, allocator, heap_allocator, changed_vertex_mask, attributes_id_to_vertex_index, vertices);
 			
 			// Compact the mesh after decimation to remove unused faces and edges.
-			CompactMesh(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum);
+			auto remap = CompactMesh(mesh, allocator);
+			CompactMeshletGroupFaces(remap, meshlet_group_faces, meshlet_group_face_prefix_sum);
 		} else {
 			// There is no coarser version of the mesh. Set meshlet group errors to FLT_MAX to make sure LOD
 			// culling test always succeeds for last level meshlets (i.e. coarser level is always too coarse).
@@ -3403,13 +3345,6 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 	VGT_ASSERT(inputs);
 	VGT_ASSERT(result);
 	
-	//
-	// Discrete LOD generation TODO:
-	//
-	// - Generate multiple levels of detail in a single call.
-	//
-	
-	
 	Allocator allocator;
 	InitializeAllocator(allocator, callbacks ? &callbacks->temp_allocator : nullptr);
 
@@ -3418,34 +3353,120 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 	
 	auto mesh = BuildEditableMesh(allocator, inputs->mesh.geometry_descs, inputs->mesh.geometry_desc_count, inputs->mesh.vertex_stride_bytes);
 	
-	MeshDecimationState state;
-	InitializeMeshDecimationState(mesh, inputs->mesh.attribute_weights, allocator, heap_allocator, state);
+	Array<VgtDecimatedTriangleGeometryDesc> geometry_descs;
+	ArrayResize(geometry_descs, heap_allocator, inputs->mesh.geometry_desc_count * inputs->level_of_detail_count);
 	
 	
-	EdgeCollapseHeap edge_collapse_heap;
-	ArrayResize(edge_collapse_heap.edge_collapse_errors,  allocator, mesh.edge_count);
-	ArrayResize(edge_collapse_heap.edge_id_to_heap_index, allocator, mesh.edge_count);
-	ArrayResize(edge_collapse_heap.heap_index_to_edge_id, allocator, mesh.edge_count);
+	Array<u32> attributes_id_to_vertex_index;
+	ArrayResizeMemset(attributes_id_to_vertex_index, allocator, mesh.attribute_count, 0xFF);
 	
-	for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
-		auto collapse_error = ComputeEdgeCollapseError(mesh, heap_allocator, state, edge_id);
+	Array<u8> changed_vertex_mask;
+	ArrayResizeMemset(changed_vertex_mask, allocator, mesh.attribute_count, 0xFF);
+	
+	Array<u32>   indices;
+	Array<float> vertices;
+	
+	for (u32 level_index = 0; level_index < inputs->level_of_detail_count; level_index += 1) {
+		auto& level_of_detail_target = inputs->level_of_detail_descs[level_index];
 		
-		edge_collapse_heap.edge_collapse_errors[edge_id.index]  = collapse_error.min_error;
-		edge_collapse_heap.edge_id_to_heap_index[edge_id.index] = edge_id.index;
-		edge_collapse_heap.heap_index_to_edge_id[edge_id.index] = edge_id;
+		u32 allocator_high_water = allocator.memory_block_count;
+		
+		float max_error = 0.f;
+		// Level of detail 0 commonly has the same number of faces as the source mesh.
+		if (level_of_detail_target.target_face_count < mesh.face_count) {
+			u32 heap_allocator_high_water = heap_allocator.memory_block_count;
+			
+			MeshDecimationState state;
+			InitializeMeshDecimationState(mesh, inputs->mesh.attribute_weights, allocator, heap_allocator, state);
+			
+			
+			EdgeCollapseHeap edge_collapse_heap;
+			ArrayResize(edge_collapse_heap.edge_collapse_errors,  allocator, mesh.edge_count);
+			ArrayResize(edge_collapse_heap.edge_id_to_heap_index, allocator, mesh.edge_count);
+			ArrayResize(edge_collapse_heap.heap_index_to_edge_id, allocator, mesh.edge_count);
+			
+			for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
+				auto collapse_error = ComputeEdgeCollapseError(mesh, heap_allocator, state, edge_id);
+				
+				edge_collapse_heap.edge_collapse_errors[edge_id.index]  = collapse_error.min_error;
+				edge_collapse_heap.edge_id_to_heap_index[edge_id.index] = edge_id.index;
+				edge_collapse_heap.heap_index_to_edge_id[edge_id.index] = edge_id;
+			}
+			
+			EdgeCollapseHeapInitialize(edge_collapse_heap);
+			
+			
+			max_error = DecimateMeshFaceGroup(
+				mesh,
+				heap_allocator,
+				state,
+				edge_collapse_heap,
+				inputs->mesh.normalize_vertex_attributes,
+				changed_vertex_mask.data,
+				level_of_detail_target.target_face_count,
+				mesh.face_count,
+				level_of_detail_target.target_error_limit
+			);
+			
+			AllocatorFreeMemoryBlocks(heap_allocator, heap_allocator_high_water);
+		}
+		
+		AppendChangedVertices(mesh, allocator, heap_allocator, changed_vertex_mask, attributes_id_to_vertex_index, vertices);
+		
+		CompactMesh(mesh, allocator);
+		
+		AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
+		
+		
+		if (indices.count + mesh.face_count * 3 > indices.capacity) {
+			ArrayGrow(indices, heap_allocator, ArrayComputeNewCapacity(indices.capacity, indices.count + mesh.face_count * 3));
+		}
+		
+		auto level_geometry_descs = CreateArrayView(geometry_descs, level_index * inputs->mesh.geometry_desc_count, (level_index + 1) * inputs->mesh.geometry_desc_count);
+		
+		u32 geometry_index = u32_max;
+		for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
+			auto& face = mesh[face_id];
+			
+			if (geometry_index != face.geometry_index) {
+				VGT_ASSERT(geometry_index == u32_max || geometry_index < face.geometry_index);
+				
+				if (geometry_index != u32_max) {
+					auto& geometry_desc = level_geometry_descs[geometry_index];
+					geometry_desc.end_indices_index = indices.count;
+				}
+				geometry_index = face.geometry_index;
+				
+				auto& geometry_desc = level_geometry_descs[geometry_index];
+				geometry_desc.level_of_detail_index = level_index;
+				geometry_desc.max_error             = max_error;
+				geometry_desc.begin_indices_index   = indices.count;
+				geometry_desc.end_indices_index     = indices.count;
+			}
+			
+			IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
+				auto attributes_id = mesh[corner_id].attributes_id;
+				
+				u32 vertex_index = attributes_id_to_vertex_index[attributes_id.index];
+				ArrayAppend(indices, vertex_index);
+			});
+		}
+		
+		if (geometry_index != u32_max) {
+			auto& geometry_desc = level_geometry_descs[geometry_index];
+			geometry_desc.end_indices_index = indices.count;
+		}
 	}
-	EdgeCollapseHeapInitialize(edge_collapse_heap);
-	
-	
-	u32 target_face_count = inputs->target_face_count;
-	u32 active_face_count = mesh.face_count;
-	float max_error = DecimateMeshFaceGroup(mesh, heap_allocator, state, edge_collapse_heap, inputs->mesh.normalize_vertex_attributes, nullptr, target_face_count, active_face_count, inputs->target_error_limit);
-	
-	AllocatorFreeMemoryBlocks(heap_allocator);
 
-	result->max_error = max_error;
-	EditableMeshToIndexedMesh(mesh, allocator, heap_allocator, inputs->mesh.geometry_desc_count, result);
 	VGT_ASSERT(heap_allocator.memory_block_count == 3);
+	
+	u32 vertex_stride_dwords    = (mesh.attribute_stride_dwords + 3);
+	result->geometry_descs      = geometry_descs.data;
+	result->indices             = indices.data;
+	result->vertices            = vertices.data;
+	result->index_count         = indices.count;
+	result->vertex_count        = vertices.count / vertex_stride_dwords;
+	result->geometry_desc_count = geometry_descs.count;
 	
 	AllocatorFreeMemoryBlocks(allocator);
 }

@@ -325,17 +325,17 @@ int main() {
 	attribute_weights[3] = normal_weight;
 	attribute_weights[4] = normal_weight;
 	
-	VgtTriangleMeshDesc mesh_desc;
+	VgtTriangleMeshDesc mesh_desc = {};
 	mesh_desc.geometry_descs      = geometry_descs;
 	mesh_desc.geometry_desc_count = geometry_desc_count;
 	mesh_desc.vertex_stride_bytes = sizeof(ObjVertex);
 	mesh_desc.attribute_weights   = attribute_weights;
 	mesh_desc.normalize_vertex_attributes = &NormalizeObjVertexAttributes;
 	
-	ValidatedAllocator temp_allocator;
-	ValidatedAllocator heap_allocator;
+	ValidatedAllocator temp_allocator = {};
+	ValidatedAllocator heap_allocator = {};
 	
-	VgtSystemCallbacks callbacks;
+	VgtSystemCallbacks callbacks = {};
 	callbacks.temp_allocator.realloc   = &ValidatedAllocatorRealloc;
 	callbacks.temp_allocator.user_data = &temp_allocator;
 	callbacks.heap_allocator.realloc   = &ValidatedAllocatorRealloc;
@@ -343,24 +343,48 @@ int main() {
 	
 #define BUILD_VIRTUAL_GEOMETRY 1
 #if BUILD_VIRTUAL_GEOMETRY
-	VgtVirtualGeometryBuildInputs inputs;
+	VgtVirtualGeometryBuildInputs inputs = {};
 	inputs.mesh                          = mesh_desc;
 	inputs.meshlet_target_vertex_count   = 128;
 	inputs.meshlet_target_triangle_count = 128;
 	
-	VgtVirtualGeometryBuildResult result;
+	VgtVirtualGeometryBuildResult result = {};
 	VgtBuildVirtualGeometry(&inputs, &result, &callbacks);
 
 #if ENABLE_ALLOCATOR_VALIDATION
 	VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 6); // 6 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 #else // !BUILD_VIRTUAL_GEOMETRY
-	VgtMeshDecimationInputs inputs;
-	inputs.mesh               = mesh_desc;
-	inputs.target_face_count  = ((u32)triangle_mesh.indices.size() / 3) / 138;
-	inputs.target_error_limit = FLT_MAX;
+#if 0
+	compile_const u32 level_of_detail_desc_count = 7;
+	VgtLevelOfDetailDesc level_of_detail_descs[level_of_detail_desc_count] = {};
+	level_of_detail_descs[0].target_face_count  = 65536;
+	level_of_detail_descs[0].target_error_limit = FLT_MAX;
+	level_of_detail_descs[1].target_face_count  = 32768;
+	level_of_detail_descs[1].target_error_limit = FLT_MAX;
+	level_of_detail_descs[2].target_face_count  = 16384;
+	level_of_detail_descs[2].target_error_limit = FLT_MAX;
+	level_of_detail_descs[3].target_face_count  = 8192;
+	level_of_detail_descs[3].target_error_limit = FLT_MAX;
+	level_of_detail_descs[4].target_face_count  = 4096;
+	level_of_detail_descs[4].target_error_limit = FLT_MAX;
+	level_of_detail_descs[5].target_face_count  = 2048;
+	level_of_detail_descs[5].target_error_limit = FLT_MAX;
+	level_of_detail_descs[6].target_face_count  = 1024;
+	level_of_detail_descs[6].target_error_limit = FLT_MAX;
+#else
+	compile_const u32 level_of_detail_desc_count = 1;
+	VgtLevelOfDetailDesc level_of_detail_descs[level_of_detail_desc_count] = {};
+	level_of_detail_descs[0].target_face_count  = ((u32)triangle_mesh.indices.size() / 3) / 138;
+	level_of_detail_descs[0].target_error_limit = FLT_MAX;
+#endif
 	
-	VgtMeshDecimationResult result;
+	VgtMeshDecimationInputs inputs = {};
+	inputs.mesh                  = mesh_desc;
+	inputs.level_of_detail_descs = level_of_detail_descs;
+	inputs.level_of_detail_count = level_of_detail_desc_count;
+	
+	VgtMeshDecimationResult result = {};
 	VgtDecimateMesh(&inputs, &result, &callbacks);
 	
 #if ENABLE_ALLOCATOR_VALIDATION

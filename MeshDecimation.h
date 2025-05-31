@@ -149,16 +149,24 @@ struct VgtVirtualGeometryBuildInputs {
 	uint32_t meshlet_target_vertex_count;
 };
 
-struct VgtMeshDecimationInputs {
-	// Source triangle mesh containing multiple geometries. See VgtTriangleMeshDesc definition for reference.
-	struct VgtTriangleMeshDesc mesh;
-	
+struct VgtLevelOfDetailDesc {
 	// Target face count for decimated mesh. Decimation algorithm will terminate once face count is
 	// below or equal to the target face count.
 	uint32_t target_face_count;
 	
 	// Target error limit for decimated mesh. Decimation algorithm will terminate before the limit is exceeded.
 	float target_error_limit;
+};
+
+struct VgtMeshDecimationInputs {
+	// Source triangle mesh containing multiple geometries. See VgtTriangleMeshDesc definition for reference.
+	struct VgtTriangleMeshDesc mesh;
+	
+	// Array of target limits for each level of detail.
+	VgtLevelOfDetailDesc* level_of_detail_descs;
+	
+	// Size of 'level_of_detail_descs' array.
+	uint32_t level_of_detail_count;
 };
 
 struct VgtMeshletTriangle {
@@ -334,6 +342,12 @@ struct VgtVirtualGeometryBuildResult {
 };
 
 struct VgtDecimatedTriangleGeometryDesc {
+	// TODO: Output geometry ranges per level of detail.
+	uint32_t level_of_detail_index;
+	
+	// Maximum edge collapse error encountered during simplification.
+	float max_error;
+	
 	// Range of vertex indices corresponding to a single geometry.
 	uint32_t begin_indices_index;
 	uint32_t end_indices_index;
@@ -356,9 +370,6 @@ struct VgtMeshDecimationResult {
 	uint32_t geometry_desc_count;
 	uint32_t index_count;
 	uint32_t vertex_count;
-	
-	// Maximum edge collapse error encountered during simplification.
-	float max_error;
 };
 
 void VgtBuildVirtualGeometry(const struct VgtVirtualGeometryBuildInputs* inputs, struct VgtVirtualGeometryBuildResult* result, const struct VgtSystemCallbacks* callbacks);
