@@ -149,7 +149,7 @@ struct VgtVirtualGeometryBuildInputs {
 	uint32_t meshlet_target_vertex_count;
 };
 
-struct VgtLevelOfDetailDesc {
+struct VgtLevelOfDetailTargetDesc {
 	// Target face count for decimated mesh. Decimation algorithm will terminate once face count is
 	// below or equal to the target face count.
 	uint32_t target_face_count;
@@ -163,7 +163,7 @@ struct VgtMeshDecimationInputs {
 	struct VgtTriangleMeshDesc mesh;
 	
 	// Array of target limits for each level of detail.
-	VgtLevelOfDetailDesc* level_of_detail_descs;
+	VgtLevelOfDetailTargetDesc* level_of_detail_descs;
 	
 	// Size of 'level_of_detail_descs' array.
 	uint32_t level_of_detail_count;
@@ -341,32 +341,48 @@ struct VgtVirtualGeometryBuildResult {
 	uint32_t level_count;
 };
 
-struct VgtDecimatedTriangleGeometryDesc {
-	// TODO: Output geometry ranges per level of detail.
-	uint32_t level_of_detail_index;
-	
+struct VgtLevelOfDetailResultDesc {
 	// Maximum edge collapse error encountered during simplification.
 	float max_error;
 	
+	// Range of decimated geometry descs for this level of detail.
+	uint32_t begin_geometry_index;
+	uint32_t end_geometry_index;
+};
+
+struct VgtDecimatedGeometryDesc {
 	// Range of vertex indices corresponding to a single geometry.
 	uint32_t begin_indices_index;
 	uint32_t end_indices_index;
 };
 
 struct VgtMeshDecimationResult {
-	// Array of per geometry ranges of vertex indices.
-	struct VgtDecimatedTriangleGeometryDesc* geometry_descs;
+	// Array of level of detail descriptions.
+	struct VgtLevelOfDetailResultDesc* level_of_detail_descs;
 	
-	// Array of vertex indices for all geometries.
+	//
+	// Array of per geometry ranges of vertex indices across all levels of detail.
+	// Use 'level_of_detail_descs' to iterate over geometries of a specific level of detail.
+	//
+	struct VgtDecimatedGeometryDesc* geometry_descs;
+	
+	//
+	// Array of vertex indices for all geometries across all levels of detail.
+	// Use 'geometry_descs' to iterate over index ranges for a specific geometries.
+	//
 	uint32_t* indices;
 	
-	// Array of vertices for all geometries. Vertex stride matches the stride passed in VgtTriangleMeshDesc.
+	//
+	// Array of vertices for all geometries across all levels of detail. Vertices that are not changed between levels of detail are not duplicated.
+	// Vertex stride matches the stride passed in VgtTriangleMeshDesc.
+	//
 	float* vertices;
 	
 	//
 	// Sizes for each corresponding array defined above.
 	// Vertex count is in vertices of size 'vertex_stride_bytes' (NOT in floats).
 	//
+	uint32_t level_of_detail_count;
 	uint32_t geometry_desc_count;
 	uint32_t index_count;
 	uint32_t vertex_count;

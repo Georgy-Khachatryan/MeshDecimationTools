@@ -357,7 +357,7 @@ int main() {
 #else // !BUILD_VIRTUAL_GEOMETRY
 #if 0
 	compile_const u32 level_of_detail_desc_count = 7;
-	VgtLevelOfDetailDesc level_of_detail_descs[level_of_detail_desc_count] = {};
+	VgtLevelOfDetailTargetDesc level_of_detail_descs[level_of_detail_desc_count] = {};
 	level_of_detail_descs[0].target_face_count  = 65536;
 	level_of_detail_descs[0].target_error_limit = FLT_MAX;
 	level_of_detail_descs[1].target_face_count  = 32768;
@@ -374,7 +374,7 @@ int main() {
 	level_of_detail_descs[6].target_error_limit = FLT_MAX;
 #else
 	compile_const u32 level_of_detail_desc_count = 1;
-	VgtLevelOfDetailDesc level_of_detail_descs[level_of_detail_desc_count] = {};
+	VgtLevelOfDetailTargetDesc level_of_detail_descs[level_of_detail_desc_count] = {};
 	level_of_detail_descs[0].target_face_count  = ((u32)triangle_mesh.indices.size() / 3) / 138;
 	level_of_detail_descs[0].target_error_limit = FLT_MAX;
 #endif
@@ -388,7 +388,7 @@ int main() {
 	VgtDecimateMesh(&inputs, &result, &callbacks);
 	
 #if ENABLE_ALLOCATOR_VALIDATION
-	VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 3); // 3 live heap allocations.
+	VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 4); // 4 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 #endif // !BUILD_VIRTUAL_GEOMETRY
 	

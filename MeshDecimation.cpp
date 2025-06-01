@@ -3353,9 +3353,11 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 	
 	auto mesh = BuildEditableMesh(allocator, inputs->mesh.geometry_descs, inputs->mesh.geometry_desc_count, inputs->mesh.vertex_stride_bytes);
 	
-	Array<VgtDecimatedTriangleGeometryDesc> geometry_descs;
+	Array<VgtDecimatedGeometryDesc> geometry_descs;
 	ArrayResize(geometry_descs, heap_allocator, inputs->mesh.geometry_desc_count * inputs->level_of_detail_count);
 	
+	Array<VgtLevelOfDetailResultDesc> level_of_detail_result_descs;
+	ArrayResize(level_of_detail_result_descs, heap_allocator, inputs->level_of_detail_count);
 	
 	Array<u32> attributes_id_to_vertex_index;
 	ArrayResizeMemset(attributes_id_to_vertex_index, allocator, mesh.attribute_count, 0xFF);
@@ -3422,7 +3424,12 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 			ArrayGrow(indices, heap_allocator, ArrayComputeNewCapacity(indices.capacity, indices.count + mesh.face_count * 3));
 		}
 		
-		auto level_geometry_descs = CreateArrayView(geometry_descs, level_index * inputs->mesh.geometry_desc_count, (level_index + 1) * inputs->mesh.geometry_desc_count);
+		auto& level_of_detail_result = level_of_detail_result_descs[level_index];
+		level_of_detail_result.max_error = max_error;
+		level_of_detail_result.begin_geometry_index = level_index * inputs->mesh.geometry_desc_count;
+		level_of_detail_result.end_geometry_index   = level_of_detail_result.begin_geometry_index + inputs->mesh.geometry_desc_count;
+		
+		auto level_geometry_descs = CreateArrayView(geometry_descs, level_of_detail_result.begin_geometry_index, level_of_detail_result.end_geometry_index);
 		
 		u32 geometry_index = u32_max;
 		for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
@@ -3438,8 +3445,6 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 				geometry_index = face.geometry_index;
 				
 				auto& geometry_desc = level_geometry_descs[geometry_index];
-				geometry_desc.level_of_detail_index = level_index;
-				geometry_desc.max_error             = max_error;
 				geometry_desc.begin_indices_index   = indices.count;
 				geometry_desc.end_indices_index     = indices.count;
 			}
@@ -3458,15 +3463,18 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 		}
 	}
 
-	VGT_ASSERT(heap_allocator.memory_block_count == 3);
+	VGT_ASSERT(heap_allocator.memory_block_count == 4);
 	
-	u32 vertex_stride_dwords    = (mesh.attribute_stride_dwords + 3);
-	result->geometry_descs      = geometry_descs.data;
-	result->indices             = indices.data;
-	result->vertices            = vertices.data;
-	result->index_count         = indices.count;
-	result->vertex_count        = vertices.count / vertex_stride_dwords;
-	result->geometry_desc_count = geometry_descs.count;
+	u32 vertex_stride_dwords = (mesh.attribute_stride_dwords + 3);
+	
+	result->level_of_detail_descs = level_of_detail_result_descs.data;
+	result->geometry_descs        = geometry_descs.data;
+	result->indices               = indices.data;
+	result->vertices              = vertices.data;
+	result->level_of_detail_count = level_of_detail_result_descs.count;
+	result->geometry_desc_count   = geometry_descs.count;
+	result->index_count           = indices.count;
+	result->vertex_count          = vertices.count / vertex_stride_dwords;
 	
 	AllocatorFreeMemoryBlocks(allocator);
 }
@@ -3477,6 +3485,7 @@ void VgtFreeMeshDecimationResult(const VgtMeshDecimationResult* result, const Vg
 	Allocator heap_allocator;
 	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
 	
+	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->level_of_detail_descs;
 	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->geometry_descs;
 	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->indices;
 	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->vertices;
