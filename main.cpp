@@ -72,12 +72,17 @@ static void NormalizeObjVertexAttributes(float* attributes) {
 	}
 }
 
+
+struct ObjMeshIndexRange {
+	u32 begin_indices_index = 0;
+	u32 end_indices_index   = 0;
+};
+
 struct ObjTriangleMesh {
 	std::vector<u32> indices;
 	std::vector<ObjVertex> vertices;
+	std::vector<ObjMeshIndexRange> index_ranges;
 };
-
-
 
 static ObjTriangleMesh ParseWavefrontObj(FILE* source_file) {
 	fseek(source_file, 0, SEEK_END);
@@ -88,9 +93,9 @@ static ObjTriangleMesh ParseWavefrontObj(FILE* source_file) {
 	file_data.resize(file_size + 1);
 	fread(file_data.data(), 1, file_size, source_file);
 	file_data[file_size] = 0;
-
+	
 	const char* string = file_data.data();
-
+	
 	std::vector<Vector3> positions;
 	std::vector<Vector3> normals;
 	std::vector<Vector2> texcoords;
@@ -98,14 +103,13 @@ static ObjTriangleMesh ParseWavefrontObj(FILE* source_file) {
 	ObjTriangleMesh mesh;
 	
 	std::unordered_map<u64, u32> index_map;
-
+	
 	while (*string) {
 		string = EatWhiteSpaceAndComments(string);
 		
 		switch (*string) {
 		case 'm': // "mtllib", not interested.
 		case 'u': // "usemtl", not interested.
-		case 'o': // "o" "ObjectName", not interested.
 		case 's': // "s" "%d" smoothing group, not interested.
 		{
 			string = EatSingleLineComment(string + 1);
@@ -140,17 +144,17 @@ static ObjTriangleMesh ParseWavefrontObj(FILE* source_file) {
 			for (u32 i = 0; i < 3; i += 1) {
 				u32 position_index = (u32)strtoull(string, (char**)&string, 10) - 1;
 				if (*string) string += 1;
-			
+				
 				u32 texcoord_index = (u32)strtoull(string, (char**)&string, 10) - 1;
 				if (*string) string += 1;
-
+				
 				u32 normal_index = (u32)strtoull(string, (char**)&string, 10) - 1;
 				if (*string) string += 1;
-
+				
 				u64 key = (u64)position_index | ((u64)texcoord_index << 21) | ((u64)normal_index << 42);
-
+				
 				auto [it, is_inserted] = index_map.emplace(key, 0u);
-
+				
 				if (is_inserted) {
 					ObjVertex vertex;
 					vertex.position = positions[position_index];
@@ -159,15 +163,28 @@ static ObjTriangleMesh ParseWavefrontObj(FILE* source_file) {
 					it->second = (u32)mesh.vertices.size();
 					mesh.vertices.push_back(vertex);
 				}
-
+				
 				mesh.indices.push_back(it->second);
 			}
+			break;
+		} case 'o': {
+			if (mesh.index_ranges.size()) {
+				mesh.index_ranges.back().end_indices_index = (u32)mesh.indices.size();
+			}
+			
+			mesh.index_ranges.emplace_back();
+			mesh.index_ranges.back().begin_indices_index = (u32)mesh.indices.size();
+			
+			string = EatSingleLineComment(string + 1);
 			break;
 		} default: {
 			return {};
 		}
 		}
 	}
+	
+	if (mesh.index_ranges.size() == 0) mesh.index_ranges.emplace_back();
+	mesh.index_ranges.back().end_indices_index = (u32)mesh.indices.size();
 	
 	return mesh;
 }
@@ -188,7 +205,7 @@ static bool ParseCommandLineOptions(u32 argument_count, char** arguments, Comman
 		
 		printf("\nTo build discrete LOD use this command. Output file will contain all levels of detail.\n");
 		printf("    MeshDecimationDemo -d SourceMeshPath.obj ResultMeshPath.obj\n");
-
+		
 		printf("\nTo build continuous LOD use this command. Output file will contain a slice of CLOD tree with 0.05 unit error.\n");
 		printf("    MeshDecimationDemo -c SourceMeshPath.obj ResultMeshPath.obj\n");
 		return false;
@@ -220,16 +237,20 @@ void WriteWavefrontObjFileDLOD(const VgtMeshDecimationResult& mesh, FILE* file) 
 		fprintf(file, "vt %f %f\n", v.texcoord.x, v.texcoord.y);
 	}
 	
-	for (u32 geometry_index = 0; geometry_index < mesh.geometry_desc_count; geometry_index += 1) {
-		auto& geometry_desc = mesh.geometry_descs[geometry_index];
+	for (u32 level_index = 0; level_index < mesh.level_of_detail_count; level_index += 1) {
+		auto& lod_desc = mesh.level_of_detail_descs[level_index];
 		
-		fprintf(file, "o Object%u\n", geometry_index);
-		
-		for (u32 corner = geometry_desc.begin_indices_index; corner < geometry_desc.end_indices_index; corner += 3) {
-			u32 i0 = mesh.indices[corner + 0] + 1;
-			u32 i1 = mesh.indices[corner + 1] + 1;
-			u32 i2 = mesh.indices[corner + 2] + 1;
-			fprintf(file, "f %u/%u/%u %u/%u/%u %u/%u/%u\n", i0, i0, i0, i1, i1, i1, i2, i2, i2);
+		for (u32 geometry_index = lod_desc.begin_geometry_index; geometry_index < lod_desc.end_geometry_index; geometry_index += 1) {
+			auto& geometry_desc = mesh.geometry_descs[geometry_index];
+			
+			fprintf(file, "o LOD%u-Geometry%u\n", level_index, geometry_index - lod_desc.begin_geometry_index);
+			
+			for (u32 corner = geometry_desc.begin_indices_index; corner < geometry_desc.end_indices_index; corner += 3) {
+				u32 i0 = mesh.indices[corner + 0] + 1;
+				u32 i1 = mesh.indices[corner + 1] + 1;
+				u32 i2 = mesh.indices[corner + 2] + 1;
+				fprintf(file, "f %u/%u/%u %u/%u/%u %u/%u/%u\n", i0, i0, i0, i1, i1, i1, i2, i2, i2);
+			}
 		}
 	}
 }
@@ -262,10 +283,10 @@ void WriteWavefrontObjFileCLOD(const VgtVirtualGeometryBuildResult& mesh, FILE* 
 #if 0
 		if (group_index != meshlet.coarser_level_meshlet_group_index) {
 			group_index = meshlet.coarser_level_meshlet_group_index;
-			fprintf(file, "o Group%u\n", group_index);
+			fprintf(file, "o Group%u\n", group_index); // Note that groups might span multiple geometries.
 		}
 #else
-		fprintf(file, "o Meshlet%u\n", meshlet_index);
+		fprintf(file, "o Meshlet%u-Geometry%u\n", meshlet_index, meshlet.geometry_index);
 #endif
 		
 		for (u32 i = meshlet.begin_meshlet_triangles_index; i < meshlet.end_meshlet_triangles_index; i += 1) {
@@ -336,29 +357,15 @@ int main(int argument_count, char** arguments) {
 	printf("Parse File Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 	
 	
-	
-#if 0
-	u32 split_index = (((u32)triangle_mesh.indices.size() / 3) / 2) * 3;
-	
-	compile_const u32 geometry_desc_count = 2;
-	VgtTriangleGeometryDesc geometry_descs[geometry_desc_count];
-	geometry_descs[0].indices      = triangle_mesh.indices.data() + split_index;
-	geometry_descs[0].index_count  = (u32)triangle_mesh.indices.size() - split_index;
-	geometry_descs[0].vertices     = (float*)triangle_mesh.vertices.data();
-	geometry_descs[0].vertex_count = (u32)triangle_mesh.vertices.size();
-	
-	geometry_descs[1].indices      = triangle_mesh.indices.data();
-	geometry_descs[1].index_count  = split_index;
-	geometry_descs[1].vertices     = (float*)triangle_mesh.vertices.data();
-	geometry_descs[1].vertex_count = (u32)triangle_mesh.vertices.size();
-#else
-	compile_const u32 geometry_desc_count = 1;
-	VgtTriangleGeometryDesc geometry_descs[geometry_desc_count];
-	geometry_descs[0].indices      = triangle_mesh.indices.data();
-	geometry_descs[0].index_count  = (u32)triangle_mesh.indices.size();
-	geometry_descs[0].vertices     = (float*)triangle_mesh.vertices.data();
-	geometry_descs[0].vertex_count = (u32)triangle_mesh.vertices.size();
-#endif
+	std::vector<VgtTriangleGeometryDesc> geometry_descs;
+	geometry_descs.reserve(triangle_mesh.index_ranges.size());
+	for (auto& range : triangle_mesh.index_ranges) {
+		auto& geometry_desc = geometry_descs.emplace_back();
+		geometry_desc.indices      = triangle_mesh.indices.data() + range.begin_indices_index;
+		geometry_desc.index_count  = range.end_indices_index - range.begin_indices_index;
+		geometry_desc.vertices     = (float*)triangle_mesh.vertices.data();
+		geometry_desc.vertex_count = (u32)triangle_mesh.vertices.size();
+	}
 	
 	compile_const float uv_weight     = 1.f;
 	compile_const float normal_weight = 1.f;
@@ -371,8 +378,8 @@ int main(int argument_count, char** arguments) {
 	attribute_weights[4] = normal_weight;
 	
 	VgtTriangleMeshDesc mesh_desc = {};
-	mesh_desc.geometry_descs      = geometry_descs;
-	mesh_desc.geometry_desc_count = geometry_desc_count;
+	mesh_desc.geometry_descs      = geometry_descs.data();
+	mesh_desc.geometry_desc_count = (u32)geometry_descs.size();
 	mesh_desc.vertex_stride_bytes = sizeof(ObjVertex);
 	mesh_desc.attribute_weights   = attribute_weights;
 	mesh_desc.normalize_vertex_attributes = &NormalizeObjVertexAttributes;
