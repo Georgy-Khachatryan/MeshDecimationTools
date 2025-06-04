@@ -6,6 +6,7 @@
 
 #include <unordered_map>
 #include <vector>
+#include <chrono>
 
 #pragma warning(disable: 4996)
 
@@ -76,7 +77,20 @@ struct ObjTriangleMesh {
 	std::vector<ObjVertex> vertices;
 };
 
-static ObjTriangleMesh ParseWavefrontObj(const char* string) {
+
+
+static ObjTriangleMesh ParseWavefrontObj(FILE* source_file) {
+	fseek(source_file, 0, SEEK_END);
+	u64 file_size = ftell(source_file);
+	fseek(source_file, 0, SEEK_SET);
+	
+	std::vector<char> file_data;
+	file_data.resize(file_size + 1);
+	fread(file_data.data(), 1, file_size, source_file);
+	file_data[file_size] = 0;
+
+	const char* string = file_data.data();
+
 	std::vector<Vector3> positions;
 	std::vector<Vector3> normals;
 	std::vector<Vector2> texcoords;
@@ -158,10 +172,44 @@ static ObjTriangleMesh ParseWavefrontObj(const char* string) {
 	return mesh;
 }
 
-void WriteWavefrontObjFile(const VgtMeshDecimationResult& mesh) {
-	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/Output/StanfordDragon.obj", "wb");
-	if (file == nullptr) return;
+
+
+struct CommandLineOptions {
+	const char* source_file_name = nullptr;
+	const char* result_file_name = nullptr;
 	
+	bool dlod = false;
+	bool clod = false;
+};
+
+static bool ParseCommandLineOptions(u32 argument_count, char** arguments, CommandLineOptions& options) {
+	if (argument_count != 4) {
+		printf("Error: Unexpected number of arguments: %u, expected: 3.\n", argument_count - 1);
+		
+		printf("\nTo build discrete LOD use this command. Output file will contain all levels of detail.\n");
+		printf("    MeshDecimationDemo -d SourceMeshPath.obj ResultMeshPath.obj\n");
+
+		printf("\nTo build continuous LOD use this command. Output file will contain a slice of CLOD tree with 0.05 unit error.\n");
+		printf("    MeshDecimationDemo -c SourceMeshPath.obj ResultMeshPath.obj\n");
+		return false;
+	}
+	
+	options.dlod = strcmp(arguments[1], "-d") == 0;
+	options.clod = strcmp(arguments[1], "-c") == 0;
+	
+	if (options.dlod == false && options.clod == false) {
+		printf("Error: Unexpected value of argument 2. Expected '-d' for Discrete LOD or '-c' for Continuous LOD. Given '%s'.", arguments[1]);
+		return false;
+	}
+	
+	options.source_file_name = arguments[2];
+	options.result_file_name = arguments[3];
+	
+	return true;
+}
+
+
+void WriteWavefrontObjFileDLOD(const VgtMeshDecimationResult& mesh, FILE* file) {
 	fprintf(file, "# MeshDecimation\n");
 	
 	auto* vertices = (ObjVertex*)mesh.vertices;
@@ -174,9 +222,9 @@ void WriteWavefrontObjFile(const VgtMeshDecimationResult& mesh) {
 	
 	for (u32 geometry_index = 0; geometry_index < mesh.geometry_desc_count; geometry_index += 1) {
 		auto& geometry_desc = mesh.geometry_descs[geometry_index];
-
+		
 		fprintf(file, "o Object%u\n", geometry_index);
-
+		
 		for (u32 corner = geometry_desc.begin_indices_index; corner < geometry_desc.end_indices_index; corner += 3) {
 			u32 i0 = mesh.indices[corner + 0] + 1;
 			u32 i1 = mesh.indices[corner + 1] + 1;
@@ -184,14 +232,9 @@ void WriteWavefrontObjFile(const VgtMeshDecimationResult& mesh) {
 			fprintf(file, "f %u/%u/%u %u/%u/%u %u/%u/%u\n", i0, i0, i0, i1, i1, i1, i2, i2, i2);
 		}
 	}
-	
-	fclose(file);
 }
 
-void WriteWavefrontObjFile(const VgtVirtualGeometryBuildResult& mesh) {
-	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/Output/StanfordDragon.obj", "wb");
-	if (file == nullptr) return;
-	
+void WriteWavefrontObjFileCLOD(const VgtVirtualGeometryBuildResult& mesh, FILE* file) {
 	fprintf(file, "# MeshDecimation\n");
 	fprintf(file, "o Object\n");
 	
@@ -234,9 +277,8 @@ void WriteWavefrontObjFile(const VgtVirtualGeometryBuildResult& mesh) {
 			fprintf(file, "f %u/%u/%u %u/%u/%u %u/%u/%u\n", i0, i0, i0, i1, i1, i1, i2, i2, i2);
 		}
 	}
-	
-	fclose(file);
 }
+
 
 #define ENABLE_ALLOCATOR_VALIDATION 1
 
@@ -265,32 +307,35 @@ static void* ValidatedAllocatorRealloc(void* old_memory_block, u64 size_bytes, v
 	return realloc(old_memory_block, size_bytes);
 }
 
-#include <chrono>
 
-int main() {
+int main(int argument_count, char** arguments) {
+	CommandLineOptions options = {};
+	if (ParseCommandLineOptions(argument_count, arguments, options) == false) return -1;
+	
+	auto* source_file = options.source_file_name ? fopen(options.source_file_name, "rb") : nullptr;
+	if (source_file == nullptr) {
+		printf("Error: Cannot open source file '%s' for read.\n", options.source_file_name);
+		return -1;
+	}
+	
+	auto* result_file = options.result_file_name ? fopen(options.result_file_name, "wb") : nullptr;
+	if (result_file == nullptr) {
+		printf("Error: Cannot open result file '%s' for write.\n", options.result_file_name);
+		return -1;
+	}
+	
+	printf("Building %s LOD:\n", options.dlod ? "Discrete" : "Continuous");
+	printf("    Source Mesh Path: '%s'\n", options.source_file_name);
+	printf("    Result Mesh Path: '%s'\n", options.result_file_name);
+	printf("\n");
+	
+	
 	auto t0 = std::chrono::high_resolution_clock::now();
-	
-	auto* file = fopen("D:/Dev/MeshDecimation/Meshes/StanfordDragon.obj", "rb");
-	if (file == nullptr) return -1;
-	
-	fseek(file, 0, SEEK_END);
-	u64 file_size = ftell(file);
-	fseek(file, 0, SEEK_SET);
-	
-	std::vector<char> file_data;
-	file_data.resize(file_size + 1);
-	fread(file_data.data(), 1, file_size, file);
-	file_data[file_size] = 0;
-	
+	auto triangle_mesh = ParseWavefrontObj(source_file);
 	auto t1 = std::chrono::high_resolution_clock::now();
-	printf("Read File Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
-	
-	t0 = std::chrono::high_resolution_clock::now();
-	auto triangle_mesh = ParseWavefrontObj(file_data.data());
-	t1 = std::chrono::high_resolution_clock::now();
 	printf("Parse File Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 	
-	t0 = std::chrono::high_resolution_clock::now();
+	
 	
 #if 0
 	u32 split_index = (((u32)triangle_mesh.indices.size() / 3) / 2) * 3;
@@ -341,79 +386,72 @@ int main() {
 	callbacks.heap_allocator.realloc   = &ValidatedAllocatorRealloc;
 	callbacks.heap_allocator.user_data = &heap_allocator;
 	
-#define BUILD_VIRTUAL_GEOMETRY 1
-#if BUILD_VIRTUAL_GEOMETRY
-	VgtVirtualGeometryBuildInputs inputs = {};
-	inputs.mesh                          = mesh_desc;
-	inputs.meshlet_target_vertex_count   = 128;
-	inputs.meshlet_target_triangle_count = 128;
-	
-	VgtVirtualGeometryBuildResult result = {};
-	VgtBuildVirtualGeometry(&inputs, &result, &callbacks);
-
+	if (options.clod) {
+		VgtVirtualGeometryBuildInputs inputs = {};
+		inputs.mesh                          = mesh_desc;
+		inputs.meshlet_target_vertex_count   = 128;
+		inputs.meshlet_target_triangle_count = 128;
+		
+		t0 = std::chrono::high_resolution_clock::now();
+		
+		VgtVirtualGeometryBuildResult result = {};
+		VgtBuildVirtualGeometry(&inputs, &result, &callbacks);
+		
+		t1 = std::chrono::high_resolution_clock::now();
+		printf("CLOD Build Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+		
 #if ENABLE_ALLOCATOR_VALIDATION
-	VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 6); // 6 live heap allocations.
+		VGT_ASSERT(temp_allocator.allocation_count == temp_allocator.deallocation_count); // No live temp allocations.
+		VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 6); // 6 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
-#else // !BUILD_VIRTUAL_GEOMETRY
-#if 0
-	compile_const u32 level_of_detail_desc_count = 7;
-	VgtLevelOfDetailTargetDesc level_of_detail_descs[level_of_detail_desc_count] = {};
-	level_of_detail_descs[0].target_face_count  = 65536;
-	level_of_detail_descs[0].target_error_limit = FLT_MAX;
-	level_of_detail_descs[1].target_face_count  = 32768;
-	level_of_detail_descs[1].target_error_limit = FLT_MAX;
-	level_of_detail_descs[2].target_face_count  = 16384;
-	level_of_detail_descs[2].target_error_limit = FLT_MAX;
-	level_of_detail_descs[3].target_face_count  = 8192;
-	level_of_detail_descs[3].target_error_limit = FLT_MAX;
-	level_of_detail_descs[4].target_face_count  = 4096;
-	level_of_detail_descs[4].target_error_limit = FLT_MAX;
-	level_of_detail_descs[5].target_face_count  = 2048;
-	level_of_detail_descs[5].target_error_limit = FLT_MAX;
-	level_of_detail_descs[6].target_face_count  = 1024;
-	level_of_detail_descs[6].target_error_limit = FLT_MAX;
-#else
-	compile_const u32 level_of_detail_desc_count = 1;
-	VgtLevelOfDetailTargetDesc level_of_detail_descs[level_of_detail_desc_count] = {};
-	level_of_detail_descs[0].target_face_count  = ((u32)triangle_mesh.indices.size() / 3) / 138;
-	level_of_detail_descs[0].target_error_limit = FLT_MAX;
-#endif
-	
-	VgtMeshDecimationInputs inputs = {};
-	inputs.mesh                  = mesh_desc;
-	inputs.level_of_detail_descs = level_of_detail_descs;
-	inputs.level_of_detail_count = level_of_detail_desc_count;
-	
-	VgtMeshDecimationResult result = {};
-	VgtDecimateMesh(&inputs, &result, &callbacks);
-	
+		
+		WriteWavefrontObjFileCLOD(result, result_file);
+		VgtFreeVirtualGeometryBuildResult(&result, &callbacks);
+	} else if (options.dlod) {
+		compile_const u32 max_level_of_detail_desc_count = 16;
+		VgtLevelOfDetailTargetDesc level_of_detail_descs[max_level_of_detail_desc_count] = {};
+		
+		u32 source_mesh_face_count = (u32)(triangle_mesh.indices.size() / 3);
+		u32 level_of_detail_count = 0;
+		
+		for (u32 level_index = 0; level_index < max_level_of_detail_desc_count; level_index += 1, level_of_detail_count = level_index) {
+			u32 target_face_count = (source_mesh_face_count >> (level_index + 1));
+			if (target_face_count <= 32) break;
+			
+			level_of_detail_descs[level_index].target_face_count  = target_face_count;
+			level_of_detail_descs[level_index].target_error_limit = FLT_MAX;
+		}
+		
+		VgtMeshDecimationInputs inputs = {};
+		inputs.mesh                  = mesh_desc;
+		inputs.level_of_detail_descs = level_of_detail_descs;
+		inputs.level_of_detail_count = level_of_detail_count;
+		
+		t0 = std::chrono::high_resolution_clock::now();
+		
+		VgtMeshDecimationResult result = {};
+		VgtDecimateMesh(&inputs, &result, &callbacks);
+		
+		t1 = std::chrono::high_resolution_clock::now();
+		printf("DLOD Build Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+		
 #if ENABLE_ALLOCATOR_VALIDATION
-	VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 4); // 4 live heap allocations.
+		VGT_ASSERT(temp_allocator.allocation_count == temp_allocator.deallocation_count); // No live temp allocations.
+		VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 4); // 4 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
-#endif // !BUILD_VIRTUAL_GEOMETRY
+		
+		WriteWavefrontObjFileDLOD(result, result_file);
+		VgtFreeMeshDecimationResult(&result, &callbacks);
+	}
 	
-	t1 = std::chrono::high_resolution_clock::now();
-	printf("Decimation Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
-	
-#if ENABLE_ALLOCATOR_VALIDATION
-	VGT_ASSERT(temp_allocator.allocation_count == temp_allocator.deallocation_count); // No live temp allocations.
-#endif // ENABLE_ALLOCATOR_VALIDATION
-	
-	WriteWavefrontObjFile(result);
-
-#if BUILD_VIRTUAL_GEOMETRY
-	VgtFreeVirtualGeometryBuildResult(&result, &callbacks);
-#else // !BUILD_VIRTUAL_GEOMETRY
-	VgtFreeMeshDecimationResult(&result, &callbacks);
-#endif // !BUILD_VIRTUAL_GEOMETRY
-
 #if ENABLE_ALLOCATOR_VALIDATION
 	printf("Temp Allocation Count: %u\n", temp_allocator.allocation_count);
 	printf("Heap Allocation Count: %u\n", heap_allocator.allocation_count);
 	VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count); // No live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 	
-	fclose(file);
+	fclose(result_file);
+	fclose(source_file);
 	
 	return 0;
 }
