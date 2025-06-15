@@ -1,6 +1,6 @@
 
-## Mesh Decimation and Virtual Geometry Construction
-This library provides functionality for generating discrete and continuous levels of detail for triangle meshes using a custom edge collapsing mesh decimation algorithm. Main features:
+## Mesh level of detail
+This library provides functionality for generating discrete and continuous levels of detail for triangle meshes using an edge collapsing mesh decimation algorithm. Main features:
 - Robust handling of non manifold meshes.
 - Vertex placement optimization post edge collapse.
 - Support for vertex attributes and attribute discontinuities.
@@ -9,7 +9,7 @@ This library provides functionality for generating discrete and continuous level
 
 
 ## How to use
-### Common level of detail build inputs
+### Common inputs
 Geometries are defined by a 32 bit index buffer and a variable stride vertex buffer. Vertices are represented by arrays of 32 bit floats where the first three floats are the vertex position and all remaning floats are vertex attributes. The maximum number of attributes per vertex is defined by `VGT_MAX_ATTRIBUTE_STRIDE_DWORDS`. See [compile time configuration](##compile-time-configuration) for more details.
 ```
 struct Vertex {
@@ -56,35 +56,90 @@ static void NormalizeVertexAttributes(float* attributes) { // Only attributes ar
 mesh_desc.normalize_vertex_attributes = &NormalizeVertexAttributes;
 ```
 
-### Memory allocation
-TODO
-
 ### Continuous level of detail
-Continuous levels of detail build requires you to specify the maximum number of triangles and vertices per meshlet. Meshlets are the unit of mesh rendering and LOD swapping. For decimation meshlets are combined into groups of 32.
+Continuous levels of detail build requires you to specify the maximum number of triangles and vertices per meshlet. Meshlets are the unit of mesh rendering and LOD swapping. For decimation meshlets are combined into groups of `VGT_MESHLET_GROUP_SIZE`.
 ```
-VgtVirtualGeometryBuildInputs inputs;
+VgtVirtualGeometryBuildInputs inputs = {};
 inputs.mesh                          = mesh_desc;
 inputs.meshlet_target_vertex_count   = 128;
 inputs.meshlet_target_triangle_count = 128;
 
-VgtVirtualGeometryBuildResult result;
+VgtVirtualGeometryBuildResult result = {};
 VgtBuildVirtualGeometry(&inputs, &result, &callbacks);
+
+...
+
+VgtFreeVirtualGeometryBuildResult(&result, &callbacks);
 ```
 
 ### Discrete level of detail
-Discrete levels of detail build requires you to specify target number of faces as well as maximum allowed decimation error.
+Discrete levels of detail build requires you to specify target number of faces as well as maximum allowed decimation error for each level of detail. Note that each level of detail is built from the previous one.
 ```
-VgtMeshDecimationInputs inputs;
-inputs.mesh               = mesh_desc;
-inputs.target_face_count  = (triangle_mesh.indices.size() / 3) / 2; // Decimate to half the number of faces.
-inputs.target_error_limit = FLT_MAX; // Allow any error.
+VgtLevelOfDetailTargetDesc level_of_detail_descs[1] = {};
+level_of_detail_descs[0].target_face_count  = (triangle_mesh.indices.size() / 3) / 2; // Decimate to half the number of faces.
+level_of_detail_descs[0].target_error_limit = FLT_MAX; // Allow any error.
 
-VgtMeshDecimationResult result;
+VgtMeshDecimationInputs inputs = {};
+inputs.mesh                  = mesh_desc;
+inputs.level_of_detail_descs = level_of_detail_descs;
+inputs.level_of_detail_count = 1;
+
+VgtMeshDecimationResult result = {};
 VgtDecimateMesh(&inputs, &result, &callbacks);
+
+...
+
+VgtFreeMeshDecimationResult(&result, &callbacks);
+```
+### Memory allocation
+By default all memory is allocated via C `realloc`. This behavior can be overriden by providing a custom `realloc` callbacks for temporary and/or heap allocations.
+```
+VgtSystemCallbacks callbacks = {};
+```
+Temporary allocator is used for most internal data structures. Library guarantees that allocations are freed in reverse order. This allows temporary allocator to be implemented as a stack.
+```
+callbacks.temp_allocator.realloc   = &CustomTempAllocatorCallback;
+callbacks.temp_allocator.user_data = &custom_temp_allocator;
+```
+Heap allocator is used for all output arrays as well as some internal data structures. Allocations might be freed in any order.
+```
+callbacks.heap_allocator.realloc   = &CustomHeapAllocatorCallback;
+callbacks.heap_allocator.user_data = &custom_heap_allocator;
 ```
 
-## How to render
-TODO
+## Continuous level of detail overview
+> This is a high level overview of most important concepts. For an in depth discussion about virtual geometry refer to [[Brian Karis, Rune Stubbe, Graham Wihlidal. 2021. Nanite A Deep Dive.]](https://advances.realtimerendering.com/s2021/Karis_Nanite_SIGGRAPH_Advances_2021_final.pdf).
+
+Continuous level of detail is represented by a hierarchy of meshlets and meshlet groups:
+
+![CLOD_DAG](CLOD_DAG.svg)
+
+### Meshlets
+Meshlets are small sets of adjacent triangles that serve as the unit of LOD swapping. Each meshlet has a current and coarser level of detail groups. For example meshlet 6 is built from triangles of meshlet group 0 (current level of detail) and is part of meshlet group 3 (coarser level of detail). For convenience meshlets store both corrent and coarser level of detail group indices as well as their error metrics. Meshlet LOD culling requires evaluation of both error metrics:
+```
+bool should_render_meshlet =
+    (EvaluateErrorMetric(meshlet.current_level_error_metric) <= target_error) && // Current LOD meshlet error is small enough.
+    (EvaluateErrorMetric(meshlet.coarser_level_error_metric) >  target_error).   // Coarser LOD meshlet error is too high.
+```
+
+### Meshlet groups
+Meshlet groups are sets of adjacent meshlets that server as the unit of mesh decimation. They are built from meshlets, decimated, and then split back into meshlets. For example meshlet group 1 is built from meshlets 2, 3, 4 and split into meshlets 7, 8. Meshlet groups store a union of source meshlet errors, as well as group's own decimation error. This makes the error function monotonically increasing as you get closer to the last LOD. For example error for meshlet group 4 is computed as:
+ ```
+ meshlet_group_4.error_metric = ErrorMetricUnion(
+    meshlet_group_4_decimation_error,
+    meshlet_8.current_level_error_metric,
+    meshlet_9.current_level_error_metric
+);
+ ```
+
+### How to render
+Assuming that you already have a working meshlet based geometry rendering pipeline in your engine, adding a basic support for continuous level of detail requires you to:
+- Use the vertex, index, and meshlet triangle buffers from `VgtMeshDecimationResult` to build your runtime mesh representation. Note that vertex buffer might contain new vertices. For more details refer to [`MeshDecimation.h`](MeshDecimation.h).
+- Store current and coarser level of detail error metrics per meshlet.
+- Evaluate error metrics and perform level of detail culling in your meshlet culling shader.
+
+A more advanced implementation might store and evaluate `coarser_level_error_metric` per meshlet group or hierarchically to reduce the number meshlets considered and rejected during culling. 
+
 
 ## Compile time configuration
 The library has a small set of configurations that are performance sensitive and have to be done using global definitions. There are two ways to set them:

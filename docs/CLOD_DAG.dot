@@ -1,0 +1,92 @@
+
+digraph CLOD_DAG {
+	MeshletGroup0->Meshlet0 [dir="back"]
+	MeshletGroup0->Meshlet1 [dir="back"]
+	
+	MeshletGroup1->Meshlet2 [dir="back"]
+	MeshletGroup1->Meshlet3 [dir="back"]
+	MeshletGroup1->Meshlet4 [dir="back"]
+	
+	MeshletGroup2->Meshlet5 [dir="back"]
+	
+	MeshletGroup0 [shape="box",color="blue"]
+	MeshletGroup1 [shape="box",color="blue"]
+	MeshletGroup2 [shape="box",color="blue"]
+	
+	subgraph cluster_0 {
+		MeshletGroup0
+		MeshletGroup1
+		MeshletGroup2
+		Meshlet0
+		Meshlet1
+		Meshlet2
+		Meshlet3
+		Meshlet4
+		Meshlet5
+		label="LOD0"
+	}
+	
+	
+	Meshlet6->MeshletGroup0 [dir="back"]
+	
+	Meshlet7->MeshletGroup1 [dir="back"]
+	Meshlet8->MeshletGroup1 [dir="back"]
+	
+	Meshlet9->MeshletGroup2 [dir="back"]
+	
+	MeshletGroup3->Meshlet6 [dir="back"]
+	MeshletGroup3->Meshlet7 [dir="back"]
+	
+	MeshletGroup4->Meshlet8 [dir="back"]
+	MeshletGroup4->Meshlet9 [arrowhead=""] [dir="back"]
+	
+	MeshletGroup3 [shape="box",color="blue"]
+	MeshletGroup4 [shape="box",color="blue"]
+	
+	subgraph cluster_1 {
+		MeshletGroup3
+		MeshletGroup4
+		Meshlet6
+		Meshlet7
+		Meshlet8
+		Meshlet9
+		label="LOD1"
+	}
+	
+	
+	Meshlet10->MeshletGroup3 [dir="back"]
+	Meshlet11->MeshletGroup4 [dir="back"]
+	
+	MeshletGroup5->Meshlet10 [dir="back"]
+	MeshletGroup5->Meshlet11 [dir="back"]
+	
+	MeshletGroup5 [shape="box",color="blue"]
+	
+	subgraph cluster_2 {
+		MeshletGroup5
+		Meshlet10
+		Meshlet11
+		label="LOD2"
+	}
+	
+	
+	Meshlet12->MeshletGroup5 [dir="back"]
+	MeshletGroup6->Meshlet12 [dir="back"]
+	
+	MeshletGroup6 [shape="box",color="blue"]
+	
+	subgraph cluster_3 {
+		MeshletGroup6
+		Meshlet12
+		label="LOD3"
+	}
+	
+	Meshlet0->SourceMesh [dir="back"]
+	Meshlet1->SourceMesh [dir="back"]
+	Meshlet2->SourceMesh [dir="back"]
+	Meshlet3->SourceMesh [dir="back"]
+	Meshlet4->SourceMesh [dir="back"]
+	Meshlet5->SourceMesh [dir="back"]
+	
+	SourceMesh [shape="box", color="deepskyblue"]
+}
