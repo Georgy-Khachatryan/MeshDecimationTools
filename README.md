@@ -10,7 +10,7 @@ This library provides functionality for generating discrete and continuous level
 
 ## How to use
 ### Common inputs
-Geometries are defined by a 32 bit index buffer and a variable stride vertex buffer. Vertices are represented by arrays of 32 bit floats where the first three floats are the vertex position and all remaning floats are vertex attributes. The maximum number of attributes per vertex is defined by `VGT_MAX_ATTRIBUTE_STRIDE_DWORDS`. See [compile time configuration](##compile-time-configuration) for more details.
+Geometries are defined by a 32 bit index buffer and a variable stride vertex buffer. Vertices are represented by arrays of 32 bit floats where the first three floats are the vertex position and all remaining floats are vertex attributes. The maximum number of attributes per vertex is defined by `VGT_MAX_ATTRIBUTE_STRIDE_DWORDS`. See [compile time configuration](##compile-time-configuration) for more details.
 ```
 struct Vertex {
     float position_x, position_y, position_z;
@@ -46,7 +46,7 @@ mesh_desc.attribute_weights = attribute_weights;
 ```
 
 
-Optional vertex normalization callback can be specified to normalize unit vectors, clamp uv coordinates or colors on newly computed sets of attributes.
+Optional vertex normalization callback can be specified to normalize unit vectors, clamp texture coordinates or colors on newly computed sets of attributes.
 ```
 static void NormalizeVertexAttributes(float* attributes) { // Only attributes are passed to the callback.
     auto& vertex_attributes = *(VertexAttributes*)attributes;
@@ -92,7 +92,7 @@ VgtDecimateMesh(&inputs, &result, &callbacks);
 VgtFreeMeshDecimationResult(&result, &callbacks);
 ```
 ### Memory allocation
-By default all memory is allocated via C `realloc`. This behavior can be overriden by providing a custom `realloc` callbacks for temporary and/or heap allocations.
+By default all memory is allocated via C `realloc`. This behavior can be overridden by providing a custom `realloc` callbacks for temporary and/or heap allocations.
 ```
 VgtSystemCallbacks callbacks = {};
 ```
@@ -112,10 +112,10 @@ callbacks.heap_allocator.user_data = &custom_heap_allocator;
 
 Continuous level of detail is represented by a hierarchy of meshlets and meshlet groups:
 
-![CLOD_DAG](CLOD_DAG.svg)
+![CLOD_DAG](docs/CLOD_DAG.svg)
 
 ### Meshlets
-Meshlets are small sets of adjacent triangles that serve as the unit of LOD swapping. Each meshlet has a current and coarser level of detail groups. For example meshlet 6 is built from triangles of meshlet group 0 (current level of detail) and is part of meshlet group 3 (coarser level of detail). For convenience meshlets store both corrent and coarser level of detail group indices as well as their error metrics. Meshlet LOD culling requires evaluation of both error metrics:
+Meshlets are small sets of adjacent triangles that serve as the unit of LOD swapping. Each meshlet has a current and coarser level of detail groups. For example meshlet 6 is built from triangles of meshlet group 0 (current level of detail) and is part of meshlet group 3 (coarser level of detail). For convenience meshlets store both current and coarser level of detail group indices as well as their error metrics. Meshlet LOD culling requires evaluation of both error metrics:
 ```
 bool should_render_meshlet =
     (EvaluateErrorMetric(meshlet.current_level_error_metric) <= target_error) && // Current LOD meshlet error is small enough.
@@ -153,13 +153,13 @@ Default vertex attribute count limit is set to 16. If you have more or less attr
 #define VGT_MAX_ATTRIBUTE_STRIDE_DWORDS 16
 ```
 ### Meshlet group size
-Meshlet groups size used for virtual geometry construction is defined by `VGT_MESHLET_GROUP_SIZE`. Larger group sizes result in higher quality decimation at the cost of less grannular LOD swapping at runtime.
+Meshlet groups size used for virtual geometry construction is defined by `VGT_MESHLET_GROUP_SIZE`. Larger group sizes result in higher quality decimation at the cost of less granular LOD swapping at runtime.
 ```
 #define VGT_MESHLET_GROUP_SIZE 32
 ```
 
 
 ## Third Party
-Uses [meshoptimizer](https://github.com/zeux/meshoptimizer). Copyright (c) 2016-2025, Arseny Kapoulkine. Avaliable under MIT license. See full license text in [THIRD_PARTY_LICENSES.md](https://github.com/Georgy-Khachatryan/MeshDecimation/blob/master/THIRD_PARTY_LICENSES.md)
+Uses [meshoptimizer](https://github.com/zeux/meshoptimizer). Copyright (c) 2016-2025, Arseny Kapoulkine. Available under MIT license. See full license text in [THIRD_PARTY_LICENSES.md](https://github.com/Georgy-Khachatryan/MeshDecimation/blob/master/THIRD_PARTY_LICENSES.md)
 - Meshlet generation algorithm is based on the implementation from meshoptimizer.
 - Some internal data structures and utility functions are based on meshoptimizer code. Check references to [Kapoulkine 2025] for more detail.

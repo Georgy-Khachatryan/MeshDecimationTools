@@ -12,22 +12,22 @@
 <g id="clust1" class="cluster">
 <title>cluster_0</title>
 <polygon fill="none" stroke="black" points="8,-64 8,-212.5 661,-212.5 661,-64 8,-64"/>
-<text xml:space="preserve" text-anchor="middle" x="334.5" y="-195.2" font-family="Times New Roman,serif" font-size="14.00">LOD0</text>
+<text xml:space="preserve" text-anchor="middle" x="33.25" y="-195.2" font-family="Times New Roman,serif" font-size="14.00">LOD0</text>
 </g>
 <g id="clust2" class="cluster">
 <title>cluster_1</title>
 <polygon fill="none" stroke="black" points="145,-220.5 145,-369 580,-369 580,-220.5 145,-220.5"/>
-<text xml:space="preserve" text-anchor="middle" x="362.5" y="-351.7" font-family="Times New Roman,serif" font-size="14.00">LOD1</text>
+<text xml:space="preserve" text-anchor="middle" x="170.25" y="-351.7" font-family="Times New Roman,serif" font-size="14.00">LOD1</text>
 </g>
 <g id="clust3" class="cluster">
 <title>cluster_2</title>
 <polygon fill="none" stroke="black" points="244,-377 244,-525.5 479,-525.5 479,-377 244,-377"/>
-<text xml:space="preserve" text-anchor="middle" x="361.5" y="-508.2" font-family="Times New Roman,serif" font-size="14.00">LOD2</text>
+<text xml:space="preserve" text-anchor="middle" x="269.25" y="-508.2" font-family="Times New Roman,serif" font-size="14.00">LOD2</text>
 </g>
 <g id="clust4" class="cluster">
 <title>cluster_3</title>
 <polygon fill="none" stroke="black" points="302,-533.5 302,-682 420,-682 420,-533.5 302,-533.5"/>
-<text xml:space="preserve" text-anchor="middle" x="361" y="-664.7" font-family="Times New Roman,serif" font-size="14.00">LOD3</text>
+<text xml:space="preserve" text-anchor="middle" x="327.25" y="-664.7" font-family="Times New Roman,serif" font-size="14.00">LOD3</text>
 </g>
 <!-- MeshletGroup0 -->
 <g id="node1" class="node">
