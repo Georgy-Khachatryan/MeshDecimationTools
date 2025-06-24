@@ -1,16 +1,27 @@
 
 ## Mesh level of detail
-This library provides functionality for generating discrete and continuous levels of detail for triangle meshes using an edge collapsing mesh decimation algorithm. Main features:
+Level of detail techniques are essential for managing geometric complexity of large scenes. The fundamental idea is based on how samples are distributed under perspective projection: the sampling frequency in screen space is constant, but the corresponding frequency in world space varies with distance to the camera. As a result, farther objects are sampled at a much lower spatial frequency. Level of detail techniques take advantage of this by reducing geometric complexity of distant objects. This results in both decreased rendering cost and memory savings.
+
+This library provides functionality for generating discrete and continuous levels of detail for triangle meshes.
+
+### Continuous level of detail
+Continuous levels of detail are based on a [precomputed hierarchy](#continuous-level-of-detail-overview) of meshlets and meshlet groups. At runtime the hierarchy is used to find a view dependent subset of meshlets that can potentially span multiple LODs. Fine grained LOD swapping opens a way to stream mesh data on per meshlet group basis.
+
+### Discrete level of detail
+Discrete level of detail build generates a set of independent meshes with decreasing number of triangles on each level. At rendering time appropriate level of detail can be selected using distance or projected error as a metric. Discrete nature of LOD swapping necessitates per LOD streaming.
+
+### Mesh decimation
+ A custom implementation of edge collapsing mesh decimation algorithm is used for LOD generation. Notable features:
 - Robust handling of non manifold meshes.
-- Vertex placement optimization post edge collapse.
 - Support for vertex attributes and attribute discontinuities.
+- Seamless decimation of meshes consisting of multiple geometries (or materials).
+- Vertex placement optimization post edge collapse.
 - Accurate estimation of introduced error using quadric error metric.
-- Seamless decimation of multiple geometries.
 
 
 ## How to use
 ### Common inputs
-Geometries are defined by a 32 bit index buffer and a variable stride vertex buffer. Vertices are represented by arrays of 32 bit floats where the first three floats are the vertex position and all remaining floats are vertex attributes. The maximum number of attributes per vertex is defined by `VGT_MAX_ATTRIBUTE_STRIDE_DWORDS`. See [compile time configuration](##compile-time-configuration) for more details.
+Geometries are defined by a 32 bit index buffer and a variable stride vertex buffer. Vertices are represented by arrays of 32 bit floats where the first three floats are the vertex position and all remaining floats are vertex attributes. The maximum number of attributes per vertex is defined by `VGT_MAX_ATTRIBUTE_STRIDE_DWORDS`. See [compile time configuration](#compile-time-configuration) for more details.
 ```
 struct Vertex {
     float position_x, position_y, position_z;
@@ -136,9 +147,9 @@ Meshlet groups are sets of adjacent meshlets that server as the unit of mesh dec
 Assuming that you already have a working meshlet based geometry rendering pipeline in your engine, adding a basic support for continuous level of detail requires you to:
 - Use the vertex, index, and meshlet triangle buffers from `VgtMeshDecimationResult` to build your runtime mesh representation. Note that vertex buffer might contain new vertices. For more details refer to [`MeshDecimation.h`](MeshDecimation.h).
 - Store current and coarser level of detail error metrics per meshlet.
-- Evaluate error metrics and perform level of detail culling in your meshlet culling shader.
+- Evaluate error metrics and perform level of detail culling in your meshlet culling shader. Example shader code for evaluation of error metric can be found in [`MeshDecimationErrorMetric.hlsl`](MeshDecimationErrorMetric.hlsl).
 
-A more advanced implementation might store and evaluate `coarser_level_error_metric` per meshlet group or hierarchically to reduce the number meshlets considered and rejected during culling. 
+A more advanced implementation might store and evaluate `coarser_level_error_metric` per meshlet group or hierarchically to reduce the number meshlets considered but rejected during culling. 
 
 
 ## Compile time configuration
@@ -158,8 +169,29 @@ Meshlet groups size used for virtual geometry construction is defined by `VGT_ME
 #define VGT_MESHLET_GROUP_SIZE 32
 ```
 
+## Limitations and further work
+- Performance. Mesh decimation algorithm is significantly slower than it could be. Most of the time is spent computing and recomputing edge collapse errors (on average around 50 edge collapse errors are recomputed after each edge collapse). This results in poor throughput of around 67k triangles/s for DLOD build and 87k triangles/s for CLOD build on Ryzen 9 9950x. Threading can significantly speed up CLOD build times, but there are opportunities for improving single threaded performance too.
+- Meshlet generation quality. Overall meshlet generation quality at lower LODs is relatively good, but at higher LODs meshlets might have enclaves of other meshlets. The same is true for meshlet group generation.
+- Mesh decimation quality improvements. Volume preservation quadrics. Higher quality quadric minimization. Virtual edge insertion.
+- Transient memory usage. There is a large amount of transient allocations which may not be necessary.
+
+
+## References
+This library is inspired by and based on 2021 Siggraph talk by Brian Karis about Nanite Virtual Geometry:
+- Brian Karis, Rune Stubbe, Graham Wihlidal. 2021. Nanite A Deep Dive.
+
+Mesh Decimation References:
+- Michael Garland, Paul S. Heckbert. 1997. Surface Simplification Using Quadric Error Metrics.
+- Hugues Hoppe. 1999. New Quadric Metric for Simplifying Meshes with Appearance Attributes.
+- Hugues Hoppe, Steve Marschner. 2000. Efficient Minimization of New Quadric Metric for Simplifying Meshes with Appearance Attributes.
+- HSUEH-TI DEREK LIU, XIAOTING ZHANG, CEM YUKSEL. 2024. Simplifying Triangle Meshes in the Wild.
+
+Other References:
+- Thomas Wang. 1997. Integer Hash Function.
+- Matthias Teschner, Bruno Heidelberger, Matthias Muller, Danat Pomeranets, Markus Gross. 2003. Optimized Spatial Hashing for Collision Detection of Deformable Objects.
+- Arseny Kapoulkine. 2025. Meshoptimizer library.
 
 ## Third Party
 Uses [meshoptimizer](https://github.com/zeux/meshoptimizer). Copyright (c) 2016-2025, Arseny Kapoulkine. Available under MIT license. See full license text in [THIRD_PARTY_LICENSES.md](https://github.com/Georgy-Khachatryan/MeshDecimation/blob/master/THIRD_PARTY_LICENSES.md)
 - Meshlet generation algorithm is based on the implementation from meshoptimizer.
-- Some internal data structures and utility functions are based on meshoptimizer code. Check references to [Kapoulkine 2025] for more detail.
+- Some internal data structures and utility functions are based on meshoptimizer code. Check references to [Kapoulkine 2025] for more details.
