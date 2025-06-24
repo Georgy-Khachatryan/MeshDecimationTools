@@ -6,6 +6,7 @@ This library provides functionality for generating discrete and continuous level
 
 ### Continuous level of detail
 Continuous levels of detail are based on a [precomputed hierarchy](#continuous-level-of-detail-overview) of meshlets and meshlet groups. At runtime the hierarchy is used to find a view dependent subset of meshlets that can potentially span multiple LODs. Fine grained LOD swapping opens a way to stream mesh data on per meshlet group basis.
+![Continuous level of detail](https://github.com/user-attachments/assets/d37b7ad9-5264-4f46-a442-10306ca309ef)
 
 ### Discrete level of detail
 Discrete level of detail build generates a set of independent meshes with decreasing number of triangles on each level. At rendering time appropriate level of detail can be selected using distance or projected error as a metric. Discrete nature of LOD swapping necessitates per LOD streaming.
