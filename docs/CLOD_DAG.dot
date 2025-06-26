@@ -1,5 +1,13 @@
 
 digraph CLOD_DAG {
+	ranksep=0.2;
+	
+	// Group labels.
+	LOD0 [shape="plaintext", width="0"]
+	LOD1 [shape="plaintext", width="0"]
+	LOD2 [shape="plaintext", width="0"]
+	LOD3 [shape="plaintext", width="0"]
+	
 	MeshletGroup0->Meshlet0 [dir="back"]
 	MeshletGroup0->Meshlet1 [dir="back"]
 	
@@ -14,6 +22,7 @@ digraph CLOD_DAG {
 	MeshletGroup2 [shape="box",color="blue"]
 	
 	subgraph cluster_0 {
+		LOD0
 		MeshletGroup0
 		MeshletGroup1
 		MeshletGroup2
@@ -23,8 +32,6 @@ digraph CLOD_DAG {
 		Meshlet3
 		Meshlet4
 		Meshlet5
-		labeljust="l"
-		label="LOD0"
 	}
 	
 	
@@ -45,14 +52,13 @@ digraph CLOD_DAG {
 	MeshletGroup4 [shape="box",color="blue"]
 	
 	subgraph cluster_1 {
+		LOD1
 		MeshletGroup3
 		MeshletGroup4
 		Meshlet6
 		Meshlet7
 		Meshlet8
 		Meshlet9
-		labeljust="l"
-		label="LOD1"
 	}
 	
 	
@@ -65,11 +71,10 @@ digraph CLOD_DAG {
 	MeshletGroup5 [shape="box",color="blue"]
 	
 	subgraph cluster_2 {
+		LOD2
 		MeshletGroup5
 		Meshlet10
 		Meshlet11
-		labeljust="l"
-		label="LOD2"
 	}
 	
 	
@@ -79,10 +84,9 @@ digraph CLOD_DAG {
 	MeshletGroup6 [shape="box",color="blue"]
 	
 	subgraph cluster_3 {
+		LOD3
 		MeshletGroup6
 		Meshlet12
-		labeljust="l"
-		label="LOD3"
 	}
 	
 	Meshlet0->SourceMesh [dir="back"]
