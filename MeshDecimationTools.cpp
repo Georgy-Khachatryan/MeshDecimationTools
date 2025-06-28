@@ -1,4 +1,4 @@
-#include "MeshDecimation.h"
+#include "MeshDecimationTools.h"
 
 //
 // References:
@@ -20,9 +20,9 @@
 #include <type_traits>
 
 
-#if !defined(VGT_CACHE_LINE_SIZE)
-#define VGT_CACHE_LINE_SIZE 64
-#endif // !defined(VGT_CACHE_LINE_SIZE)
+#if !defined(MDT_CACHE_LINE_SIZE)
+#define MDT_CACHE_LINE_SIZE 64
+#endif // !defined(MDT_CACHE_LINE_SIZE)
 
 
 #if defined(_MSC_VER)
@@ -36,7 +36,7 @@
 #define compile_const constexpr static const
 
 
-namespace VirtualGeometryTools
+namespace MeshDecimationTools
 {
 
 using u8  = uint8_t;
@@ -51,7 +51,7 @@ compile_const u8  u8_max  = (u8)0xFF;
 compile_const u32 u32_max = (u32)0xFFFF'FFFF;
 compile_const u64 u64_max = (u64)0xFFFF'FFFF'FFFF'FFFF;
 
-using Vector3 = VgtVector3;
+using Vector3 = MdtVector3;
 
 compile_const u32 meshlet_max_vertex_count = 254;
 compile_const u32 meshlet_max_face_degree  = 3;
@@ -60,11 +60,11 @@ compile_const u32 meshlet_max_face_count = 128;
 compile_const u32 meshlet_min_face_count = 32;
 compile_const float discontinuous_meshlet_max_expansion = 2.f; // Sqrt of the maximum AABB expansion when adding a discontinuous face to a meshlet.
 
-compile_const u32 meshlet_group_max_meshlet_count = VGT_MESHLET_GROUP_SIZE;
+compile_const u32 meshlet_group_max_meshlet_count = MDT_MESHLET_GROUP_SIZE;
 compile_const u32 meshlet_group_min_meshlet_count = meshlet_group_max_meshlet_count / 2;
 compile_const float discontinuous_meshlet_group_max_expansion = 4.f; // Sqrt of the maximum AABB expansion when adding a discontinuous meshlet to a group.
 
-compile_const u32 virtual_geometry_max_levels_of_details = 16;
+compile_const u32 continuous_lod_max_levels_of_details = 16;
 
 
 // Based on [Kapoulkine 2025] and [Teschner 2003].
@@ -175,7 +175,7 @@ struct alignas(16) Vertex {
 };
 
 
-struct alignas(VGT_CACHE_LINE_SIZE) MeshView {
+struct alignas(MDT_CACHE_LINE_SIZE) MeshView {
 	Face*   faces      = nullptr;
 	Edge*   edges      = nullptr;
 	Vertex* vertices   = nullptr;
@@ -309,7 +309,7 @@ static ElementID CornerListMerge(MeshView mesh, ElementID element_0, ElementID e
 					auto& edge = mesh[mesh[corner_id].edge_id];
 					if (edge.vertex_0.index == element_1.index) edge.vertex_0 = element_0;
 					if (edge.vertex_1.index == element_1.index) edge.vertex_1 = element_0;
-					VGT_ASSERT(edge.vertex_0.index != edge.vertex_1.index);
+					MDT_ASSERT(edge.vertex_0.index != edge.vertex_1.index);
 				});
 			} else if constexpr (element_type_t == ElementType::Edge) {
 				mesh[corner_id].edge_id = element_0;
@@ -342,16 +342,16 @@ static ElementID CornerListMerge(MeshView mesh, ElementID element_0, ElementID e
 struct Allocator {
 	compile_const u32 max_memory_block_count = 48;
 	
-	VgtAllocatorCallbacks callbacks;
+	MdtAllocatorCallbacks callbacks;
 	
 	u32 memory_block_count = 0;
 	void* memory_blocks[max_memory_block_count] = {};
 };
 
 static void* AllocateMemoryBlock(Allocator& allocator, void* old_memory_block, u64 size_bytes) {
-	VGT_ASSERT(old_memory_block != nullptr || allocator.memory_block_count < Allocator::max_memory_block_count);
-	VGT_ASSERT(old_memory_block == nullptr || allocator.memory_block_count > 0);
-	VGT_ASSERT(old_memory_block == nullptr || allocator.memory_blocks[allocator.memory_block_count - 1] == old_memory_block);
+	MDT_ASSERT(old_memory_block != nullptr || allocator.memory_block_count < Allocator::max_memory_block_count);
+	MDT_ASSERT(old_memory_block == nullptr || allocator.memory_block_count > 0);
+	MDT_ASSERT(old_memory_block == nullptr || allocator.memory_blocks[allocator.memory_block_count - 1] == old_memory_block);
 	
 	void* memory_block = allocator.callbacks.realloc(old_memory_block, size_bytes, allocator.callbacks.user_data);
 	u32 memory_block_index = old_memory_block ? allocator.memory_block_count - 1 : allocator.memory_block_count++;
@@ -361,7 +361,7 @@ static void* AllocateMemoryBlock(Allocator& allocator, void* old_memory_block, u
 	return memory_block;
 }
 
-static void InitializeAllocator(Allocator& allocator, const VgtAllocatorCallbacks* callbacks) {
+static void InitializeAllocator(Allocator& allocator, const MdtAllocatorCallbacks* callbacks) {
 	if (callbacks) {
 		allocator.callbacks = *callbacks;
 	} else {
@@ -385,8 +385,8 @@ static u32 AllocatorFindMemoryBlock(Allocator& allocator, void* old_memory_block
 
 
 #define DECLARE_ARRAY_OPERATORS() \
-	T& operator[] (u32 index) { VGT_ASSERT(index < count); return data[index]; } \
-	const T& operator[] (u32 index) const { VGT_ASSERT(index < count); return data[index]; } \
+	T& operator[] (u32 index) { MDT_ASSERT(index < count); return data[index]; } \
+	const T& operator[] (u32 index) const { MDT_ASSERT(index < count); return data[index]; } \
 	\
 	T* begin() { return data; } \
 	T* end() { return data + count; } \
@@ -459,7 +459,7 @@ static void ArrayResizeMemset(Array<T>& array, Allocator& allocator, u32 new_cou
 
 template<typename ArrayT>
 always_inline_function static void ArrayAppend(ArrayT& array, const typename ArrayT::ValueType& value) {
-	VGT_ASSERT(array.count < array.capacity);
+	MDT_ASSERT(array.count < array.capacity);
 	array.data[array.count++] = value;
 }
 
@@ -485,7 +485,7 @@ static void ArrayAppendMaybeGrow(Array<T>& array, Allocator& allocator, const T&
 
 template<typename ArrayT>
 static void ArrayEraseSwap(ArrayT& array, u32 index) {
-	VGT_ASSERT(index < array.count);
+	MDT_ASSERT(index < array.count);
 	
 	array.data[index] = array.data[array.count - 1];
 	array.count -= 1;
@@ -493,7 +493,7 @@ static void ArrayEraseSwap(ArrayT& array, u32 index) {
 
 template<typename ArrayT>
 static typename ArrayT::ValueType& ArrayLastElement(ArrayT& array) {
-	VGT_ASSERT(array.count != 0);
+	MDT_ASSERT(array.count != 0);
 	return array.data[array.count - 1];
 }
 
@@ -671,11 +671,11 @@ static u32 ComputeHashTableSize(u32 max_element_count) {
 }
 
 
-static MeshView BuildEditableMesh(Allocator& allocator, const VgtTriangleGeometryDesc* geometry_descs, u32 geometry_desc_count, u32 vertex_stride_bytes) {
+static MeshView BuildEditableMesh(Allocator& allocator, const MdtTriangleGeometryDesc* geometry_descs, u32 geometry_desc_count, u32 vertex_stride_bytes) {
 	u32 vertex_stride_dwords    = vertex_stride_bytes / sizeof(u32);
 	u32 attribute_stride_dwords = vertex_stride_dwords - 3;
 	
-	if (vertex_stride_dwords < 3 || attribute_stride_dwords > VGT_MAX_ATTRIBUTE_STRIDE_DWORDS) return {};
+	if (vertex_stride_dwords < 3 || attribute_stride_dwords > MDT_MAX_ATTRIBUTE_STRIDE_DWORDS) return {};
 	
 	
 	u32 vertices_count = 0;
@@ -815,14 +815,14 @@ struct EdgeCollapseResult {
 static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, Allocator& heap_allocator, EdgeDuplicateMap& edge_duplicate_map, Array<EdgeID>& removed_edge_array) {
 	auto& edge = mesh[edge_id];
 	
-	VGT_ASSERT(edge.vertex_0.index != edge.vertex_1.index);
+	MDT_ASSERT(edge.vertex_0.index != edge.vertex_1.index);
 	auto& vertex_0 = mesh[edge.vertex_0];
 	auto& vertex_1 = mesh[edge.vertex_1];
 
-	VGT_ASSERT(edge.corner_list_base.index != u32_max);
-	VGT_ASSERT(vertex_0.corner_list_base.index != u32_max);
-	VGT_ASSERT(vertex_1.corner_list_base.index != u32_max);
-	VGT_ASSERT(vertex_0.corner_list_base.index != vertex_1.corner_list_base.index);
+	MDT_ASSERT(edge.corner_list_base.index != u32_max);
+	MDT_ASSERT(vertex_0.corner_list_base.index != u32_max);
+	MDT_ASSERT(vertex_1.corner_list_base.index != u32_max);
+	MDT_ASSERT(vertex_0.corner_list_base.index != vertex_1.corner_list_base.index);
 	
 	removed_edge_array.count = 0;
 	u32 removed_face_count = 0;
@@ -919,15 +919,15 @@ struct QuadricAttributeGradient {
 };
 
 struct QuadricWithAttributes : Quadric {
-#if VGT_ENABLE_ATTRIBUTE_SUPPORT
-	QuadricAttributeGradient attributes[VGT_MAX_ATTRIBUTE_STRIDE_DWORDS]; // Note that this array is used as a 'flexible array'.
+#if MDT_ENABLE_ATTRIBUTE_SUPPORT
+	QuadricAttributeGradient attributes[MDT_MAX_ATTRIBUTE_STRIDE_DWORDS]; // Note that this array is used as a 'flexible array'.
 	
 	// Quadric with attributes cannot be copied by value as it's variable size (i.e. it might be missing trailing attributes).
 	QuadricWithAttributes& operator= (const QuadricWithAttributes&) = delete;
 	QuadricWithAttributes& operator= (QuadricWithAttributes&&) = delete;
-#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
+#endif // MDT_ENABLE_ATTRIBUTE_SUPPORT
 };
-static_assert(sizeof(QuadricWithAttributes) == sizeof(Quadric) + sizeof(QuadricAttributeGradient) * VGT_MAX_ATTRIBUTE_STRIDE_DWORDS);
+static_assert(sizeof(QuadricWithAttributes) == sizeof(Quadric) + sizeof(QuadricAttributeGradient) * MDT_MAX_ATTRIBUTE_STRIDE_DWORDS);
 
 
 //
@@ -993,7 +993,7 @@ static void AccumulateQuadric(Quadric& accumulator, const Quadric& quadric) {
 static void AccumulateQuadricWithAttributes(QuadricWithAttributes& accumulator, const QuadricWithAttributes& quadric, u32 attribute_stride_dwords) {
 	AccumulateQuadric(accumulator, quadric);
 	
-#if VGT_ENABLE_ATTRIBUTE_SUPPORT
+#if MDT_ENABLE_ATTRIBUTE_SUPPORT
 	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
 		auto& attribute_accumulator = accumulator.attributes[i];
 		auto& attribute_quadric     = quadric.attributes[i];
@@ -1003,7 +1003,7 @@ static void AccumulateQuadricWithAttributes(QuadricWithAttributes& accumulator, 
 		attribute_accumulator.g.z += attribute_quadric.g.z;
 		attribute_accumulator.d   += attribute_quadric.d;
 	}
-#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
+#endif // MDT_ENABLE_ATTRIBUTE_SUPPORT
 }
 
 static void ComputePlanarQuadric(Quadric& quadric, const Vector3& n, float d, float weight) {
@@ -1059,7 +1059,7 @@ static void ComputeFaceQuadricWithAttributes(QuadricWithAttributes& quadric, con
 	ComputePlanarQuadric(quadric, n, -DotProduct(n, p0), weight);
 	
 	
-#if VGT_ENABLE_ATTRIBUTE_SUPPORT
+#if MDT_ENABLE_ATTRIBUTE_SUPPORT
 	//
 	// For reference see [Hugues Hoppe 1999] Section 4 New Quadric Error Metric.
 	//
@@ -1131,7 +1131,7 @@ static void ComputeFaceQuadricWithAttributes(QuadricWithAttributes& quadric, con
 		quadric.attributes[i].g = g * weight;
 		quadric.attributes[i].d = d * weight;
 	}
-#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
+#endif // MDT_ENABLE_ATTRIBUTE_SUPPORT
 }
 
 static float ComputeQuadricError(const Quadric& q, const Vector3& p) {
@@ -1164,7 +1164,7 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 	// 
 	float weighted_error = ComputeQuadricError(q, p);
 	
-#if VGT_ENABLE_ATTRIBUTE_SUPPORT
+#if MDT_ENABLE_ATTRIBUTE_SUPPORT
 	if (q.weight < FLT_EPSILON) return weighted_error;
 	
 	float rcp_weight = 1.f / q.weight;
@@ -1188,12 +1188,12 @@ static float ComputeQuadricErrorWithAttributes(const QuadricWithAttributes& q, c
 		
 		weighted_error += weighted_attribute_error;
 	}
-#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
+#endif // MDT_ENABLE_ATTRIBUTE_SUPPORT
 	
 	return fabsf(weighted_error);
 }
 
-#if VGT_ENABLE_ATTRIBUTE_SUPPORT
+#if MDT_ENABLE_ATTRIBUTE_SUPPORT
 // Attribute computation for zero weight quadrics should be handled by the caller.
 static bool ComputeWedgeAttributes(const QuadricWithAttributes& q, const Vector3& p, float* attributes, float* rcp_attribute_weights, u32 attribute_stride_dwords) {
 	if (q.weight < FLT_EPSILON) return false;
@@ -1210,7 +1210,7 @@ static bool ComputeWedgeAttributes(const QuadricWithAttributes& q, const Vector3
 	
 	return true;
 }
-#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
+#endif // MDT_ENABLE_ATTRIBUTE_SUPPORT
 
 static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, Vector3& optimal_position, u32 attribute_stride_dwords) {
 	//
@@ -1235,7 +1235,7 @@ static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, V
 	float h1 = 0.f;
 	float h2 = 0.f;
 	
-#if VGT_ENABLE_ATTRIBUTE_SUPPORT
+#if MDT_ENABLE_ATTRIBUTE_SUPPORT
 	for (u32 i = 0; i < attribute_stride_dwords; i += 1) {
 		auto g = quadric.attributes[i].g;
 		auto d = quadric.attributes[i].d;
@@ -1253,7 +1253,7 @@ static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, V
 		h1 += (g.y * d);
 		h2 += (g.z * d);
 	}
-#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
+#endif // MDT_ENABLE_ATTRIBUTE_SUPPORT
 	
 	// M = C - B * B^T * (1.0 / alpha)
 	float rcp_weight = 1.f / quadric.weight;
@@ -1380,7 +1380,7 @@ struct QuadricWithAttributesArray {
 	u32 capacity = 0;
 	u32 data_stride_bytes = 0;
 	
-	QuadricWithAttributes& operator[] (u32 index) { VGT_ASSERT(index < count); return *(QuadricWithAttributes*)((u8*)data + index * data_stride_bytes); }
+	QuadricWithAttributes& operator[] (u32 index) { MDT_ASSERT(index < count); return *(QuadricWithAttributes*)((u8*)data + index * data_stride_bytes); }
 };
 
 // TODO: Reuse existing array functions.
@@ -1418,7 +1418,7 @@ static void ArrayResizeMemset(QuadricWithAttributesArray& array, Allocator& allo
 }
 
 
-struct alignas(VGT_CACHE_LINE_SIZE) MeshDecimationState {
+struct alignas(MDT_CACHE_LINE_SIZE) MeshDecimationState {
 	// Edge quadrics accumulated on vertices.
 	Array<Quadric> vertex_edge_quadrics;
 	
@@ -1432,8 +1432,8 @@ struct alignas(VGT_CACHE_LINE_SIZE) MeshDecimationState {
 	Array<AttributesID> wedge_attributes_ids;
 	AttributeWedgeMap wedge_attribute_set;
 	
-	alignas(16) float attribute_weights[VGT_MAX_ATTRIBUTE_STRIDE_DWORDS];
-	alignas(16) float rcp_attribute_weights[VGT_MAX_ATTRIBUTE_STRIDE_DWORDS];
+	alignas(16) float attribute_weights[MDT_MAX_ATTRIBUTE_STRIDE_DWORDS];
+	alignas(16) float rcp_attribute_weights[MDT_MAX_ATTRIBUTE_STRIDE_DWORDS];
 	
 	float position_weight;
 	float rcp_position_weight;
@@ -1600,7 +1600,7 @@ static void EdgeCollapseHeapSiftDown(EdgeCollapseHeap& heap, u32 node_index) {
 }
 
 static EdgeID EdgeCollapseHeapPop(EdgeCollapseHeap& heap) {
-	VGT_ASSERT(heap.edge_collapse_errors.count != 0);
+	MDT_ASSERT(heap.edge_collapse_errors.count != 0);
 	
 	auto edge_id = heap.heap_index_to_edge_id[0];
 
@@ -1678,7 +1678,7 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 	HashTableGrow(state.edge_duplicate_map,  heap_allocator, ComputeHashTableSize(128u));
 	
 	
-	for (u32 i = 0; i < VGT_MAX_ATTRIBUTE_STRIDE_DWORDS; i += 1) {
+	for (u32 i = 0; i < MDT_MAX_ATTRIBUTE_STRIDE_DWORDS; i += 1) {
 		float attribute_weight = attribute_weights && i < mesh.attribute_stride_dwords ? attribute_weights[i] : 0.f;
 		
 		if (attribute_weight > FLT_EPSILON) {
@@ -1695,7 +1695,7 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 		float twice_mesh_surface_area = 0.f;
 		for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
 			auto& face = mesh[face_id];
-			VGT_ASSERT(face.corner_list_base.index != u32_max);
+			MDT_ASSERT(face.corner_list_base.index != u32_max);
 			
 			auto& c1 = mesh[face.corner_list_base];
 			auto& c0 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev];
@@ -1726,7 +1726,7 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 		u32 attribute_stride_dwords = mesh.attribute_stride_dwords;
 		for (FaceID face_id = { 0 }; face_id.index < mesh.face_count; face_id.index += 1) {
 			auto& face = mesh[face_id];
-			VGT_ASSERT(face.corner_list_base.index != u32_max);
+			MDT_ASSERT(face.corner_list_base.index != u32_max);
 			
 			auto& c1 = mesh[face.corner_list_base];
 			auto& c0 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev];
@@ -1753,7 +1753,7 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 		float position_weight = state.position_weight;
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
-			VGT_ASSERT(edge.corner_list_base.index != u32_max);
+			MDT_ASSERT(edge.corner_list_base.index != u32_max);
 			
 			auto& c0 = mesh[edge.corner_list_base];
 			auto& c1 = mesh[c0.corner_list_around[(u32)ElementType::Face].next];
@@ -1803,7 +1803,7 @@ static float DecimateMeshFaceGroup(
 	Allocator& heap_allocator,
 	MeshDecimationState& state,
 	EdgeCollapseHeap& edge_collapse_heap,
-	VgtNormalizeVertexAttributes normalize_vertex_attributes,
+	MdtNormalizeVertexAttributes normalize_vertex_attributes,
 	u8* changed_vertex_mask,
 	u32 target_face_count,
 	u32 active_face_count,
@@ -1858,7 +1858,7 @@ static float DecimateMeshFaceGroup(
 			state.vertex_edge_quadrics[edge.vertex_1.index] = quadric;
 		}
 		
-#if VGT_ENABLE_ATTRIBUTE_SUPPORT
+#if MDT_ENABLE_ATTRIBUTE_SUPPORT
 		// Update attributes.
 		if (remaining_vertex_id.index != u32_max) {
 			u32 wedge_count = state.wedge_quadrics.count;
@@ -1885,7 +1885,7 @@ static float DecimateMeshFaceGroup(
 				if (index != u32_max) mesh[corner_id].attributes_id = state.wedge_attributes_ids[index];
 			});
 		}
-#endif // VGT_ENABLE_ATTRIBUTE_SUPPORT
+#endif // MDT_ENABLE_ATTRIBUTE_SUPPORT
 	}
 	
 	HashTableClear(state.edge_duplicate_map);
@@ -1898,11 +1898,11 @@ static void DecimateMeshFaceGroups(
 	MeshView mesh,
 	Allocator& allocator,
 	Allocator& heap_allocator,
-	VgtNormalizeVertexAttributes normalize_vertex_attributes,
+	MdtNormalizeVertexAttributes normalize_vertex_attributes,
 	float* attribute_weights,
 	Array<FaceID> meshlet_group_faces,
 	Array<u32> meshlet_group_face_prefix_sum,
-	Array<VgtErrorMetric> meshlet_group_error_metrics,
+	Array<MdtErrorMetric> meshlet_group_error_metrics,
 	Array<u8> changed_vertex_mask) {
 	
 	u32 allocator_high_water = allocator.memory_block_count;
@@ -1924,7 +1924,7 @@ static void DecimateMeshFaceGroups(
 			for (u32 face_index = begin_face_index; face_index < end_face_index; face_index += 1) {
 				auto face_id = meshlet_group_faces[face_index];
 				auto& face = mesh[face_id];
-				VGT_ASSERT(face.corner_list_base.index != u32_max);
+				MDT_ASSERT(face.corner_list_base.index != u32_max);
 				
 				IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
 					auto& corner = mesh[corner_id];
@@ -1950,14 +1950,14 @@ static void DecimateMeshFaceGroups(
 		
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
-			VGT_ASSERT(edge.corner_list_base.index != u32_max);
+			MDT_ASSERT(edge.corner_list_base.index != u32_max);
 			
 			u32 group_index_0 = vertex_group_indices[edge.vertex_0.index];
 			u32 group_index_1 = vertex_group_indices[edge.vertex_1.index];
 			
 			// TODO: Allow edge collapses when only one vertex is locked.
 			bool edge_is_locked = (group_index_0 == vertex_group_index_locked) || (group_index_1 == vertex_group_index_locked);
-			VGT_ASSERT(edge_is_locked || group_index_0 == group_index_1);
+			MDT_ASSERT(edge_is_locked || group_index_0 == group_index_1);
 			
 			if (edge_is_locked == false) {
 				meshlet_group_edge_prefix_sum[group_index_0] += 1;
@@ -1976,14 +1976,14 @@ static void DecimateMeshFaceGroups(
 		ArrayResize(meshlet_group_edge_ids, allocator, prefix_sum);
 		for (EdgeID edge_id = { 0 }; edge_id.index < mesh.edge_count; edge_id.index += 1) {
 			auto& edge = mesh[edge_id];
-			VGT_ASSERT(edge.corner_list_base.index != u32_max);
+			MDT_ASSERT(edge.corner_list_base.index != u32_max);
 			
 			u32 group_index_0 = vertex_group_indices[edge.vertex_0.index];
 			u32 group_index_1 = vertex_group_indices[edge.vertex_1.index];
 			
 			// TODO: Allow edge collapses when only one vertex is locked.
 			bool edge_is_locked = (group_index_0 == vertex_group_index_locked) || (group_index_1 == vertex_group_index_locked);
-			VGT_ASSERT(edge_is_locked || group_index_0 == group_index_1);
+			MDT_ASSERT(edge_is_locked || group_index_0 == group_index_1);
 			
 			if (edge_is_locked == false) {
 				meshlet_group_edge_ids[meshlet_group_edge_prefix_sum[group_index_0]++] = edge_id;
@@ -2163,8 +2163,8 @@ static u32 KdTreeBuildNode(Array<KdTreeNode>& nodes, ArrayView<KdTreeElement> el
 	u32 node_index_0 = KdTreeBuildNode(nodes, elements, CreateArrayView(indices, 0, split_index));
 	u32 node_index_1 = KdTreeBuildNode(nodes, elements, CreateArrayView(indices, split_index, indices.count));
 	
-	VGT_ASSERT(node_index_0 == node_index + 1); // Left node is always the next node after the local root.
-	VGT_ASSERT(node_index_1 > node_index);      // Right node offset is non zero. Zero means branch is pruned.
+	MDT_ASSERT(node_index_0 == node_index + 1); // Left node is always the next node after the local root.
+	MDT_ASSERT(node_index_1 > node_index);      // Right node offset is non zero. Zero means branch is pruned.
 	
 	nodes[node_index].payload = node_index_1 - node_index;
 	
@@ -2256,7 +2256,7 @@ static void KdTreeBuildElementsForFaces(MeshView mesh, Allocator& allocator, Arr
 		auto& element = elements[face_id.index];
 		auto& face    = mesh[face_id];
 		
-		VGT_ASSERT(face.corner_list_base.index != u32_max);
+		MDT_ASSERT(face.corner_list_base.index != u32_max);
 		
 		Vector3 position = { 0.f, 0.f, 0.f };
 		float face_degree = 0.f;
@@ -2271,7 +2271,7 @@ static void KdTreeBuildElementsForFaces(MeshView mesh, Allocator& allocator, Arr
 	}
 }
 
-static void KdTreeBuildElementsForMeshlets(ArrayView<VgtMeshlet> meshlets, Allocator& allocator, Array<KdTreeElement>& elements) {
+static void KdTreeBuildElementsForMeshlets(ArrayView<MdtMeshlet> meshlets, Allocator& allocator, Array<KdTreeElement>& elements) {
 	ArrayResize(elements, allocator, meshlets.count);
 	
 	for (u32 meshlet_index = 0; meshlet_index < meshlets.count; meshlet_index += 1) {
@@ -2284,8 +2284,8 @@ static void KdTreeBuildElementsForMeshlets(ArrayView<VgtMeshlet> meshlets, Alloc
 	}
 }
 
-static VgtSphereBounds ComputeSphereBoundsUnion(ArrayView<VgtSphereBounds> source_sphere_bounds) {
-	return VgtComputeSphereBoundsUnion(source_sphere_bounds.data, source_sphere_bounds.count);
+static MdtSphereBounds ComputeSphereBoundsUnion(ArrayView<MdtSphereBounds> source_sphere_bounds) {
+	return MdtComputeSphereBoundsUnion(source_sphere_bounds.data, source_sphere_bounds.count);
 }
 
 struct MeshletAdjacencyInfo {
@@ -2301,7 +2301,7 @@ struct MeshletAdjacency {
 struct MeshletBuildResult {
 	ArrayView<FaceID>  meshlet_faces;
 	ArrayView<u32>     meshlet_face_prefix_sum;
-	ArrayView<VgtMeshlet> meshlets;
+	ArrayView<MdtMeshlet> meshlets;
 	
 	ArrayView<u8>       meshlet_triangles;
 	ArrayView<CornerID> meshlet_corners;
@@ -2427,8 +2427,8 @@ static void BuildMeshletsForFaceGroup(
 		}
 		
 		if (restart_meshlet || best_face_id.index == u32_max || (meshlet_vertex_count + new_vertex_count > meshlet_target_vertex_count) || (meshlet_face_count + 1 > meshlet_target_face_count)) {
-			VGT_ASSERT(meshlet_face_count   <= meshlet_target_face_count);
-			VGT_ASSERT(meshlet_vertex_count <= meshlet_target_vertex_count);
+			MDT_ASSERT(meshlet_face_count   <= meshlet_target_face_count);
+			MDT_ASSERT(meshlet_vertex_count <= meshlet_target_vertex_count);
 			
 			for (auto attributes_id : meshlet_vertices) {
 				vertex_usage_map[attributes_id.index] = 0xFF;
@@ -2451,7 +2451,7 @@ static void BuildMeshletsForFaceGroup(
 		if (best_face_id.index == u32_max) continue;
 		
 		u32 best_face_geometry_index = mesh[best_face_id].geometry_index;
-		VGT_ASSERT(meshlet_face_count == 0 || meshlet_geometry_index == best_face_geometry_index);
+		MDT_ASSERT(meshlet_face_count == 0 || meshlet_geometry_index == best_face_geometry_index);
 		
 		new_vertex_count = 0;
 		IterateCornerList<ElementType::Face>(mesh, mesh[best_face_id].corner_list_base, [&](CornerID corner_id) {
@@ -2497,8 +2497,8 @@ static void BuildMeshletsForFaceGroup(
 	}
 	
 	if (meshlet_face_count) {
-		VGT_ASSERT(meshlet_face_count   <= meshlet_target_face_count);
-		VGT_ASSERT(meshlet_vertex_count <= meshlet_target_vertex_count);
+		MDT_ASSERT(meshlet_face_count   <= meshlet_target_face_count);
+		MDT_ASSERT(meshlet_vertex_count <= meshlet_target_vertex_count);
 		
 		for (auto attributes_id : meshlet_vertices) {
 			vertex_usage_map[attributes_id.index] = 0xFF;
@@ -2524,7 +2524,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 	Allocator& allocator,
 	Array<FaceID> meshlet_group_faces,
 	Array<u32> meshlet_group_face_prefix_sum,
-	Array<VgtErrorMetric> meshlet_group_error_metrics,
+	Array<MdtErrorMetric> meshlet_group_error_metrics,
 	u32 meshlet_target_face_count,
 	u32 meshlet_target_vertex_count,
 	u32 meshlet_group_base_index) {
@@ -2539,7 +2539,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 	kd_tree.element_indices.count    = meshlet_group_faces.count;
 	kd_tree.element_indices.capacity = meshlet_group_faces.capacity;
 	static_assert(sizeof(FaceID) == sizeof(u32));
-	VGT_ASSERT(kd_tree.elements.count == meshlet_group_faces.count);
+	MDT_ASSERT(kd_tree.elements.count == meshlet_group_faces.count);
 	
 	
 	Array<u8> vertex_usage_map;
@@ -2589,15 +2589,15 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 		
 		ArrayAppend(meshlet_group_meshlet_prefix_sum, meshlet_face_prefix_sum.count);
 		
-		VGT_ASSERT(meshlet_faces.count == end_element_index);
+		MDT_ASSERT(meshlet_faces.count == end_element_index);
 		
 		begin_element_index = end_element_index;
 	}
 	
-	VGT_ASSERT(meshlet_faces.count == mesh.face_count);
+	MDT_ASSERT(meshlet_faces.count == mesh.face_count);
 	
 	
-	Array<VgtMeshlet> meshlets;
+	Array<MdtMeshlet> meshlets;
 	ArrayResize(meshlets, allocator, meshlet_corner_prefix_sum.count);
 	
 	u32 begin_corner_index = 0;
@@ -2607,8 +2607,8 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 		auto meshlet_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
 		auto meshlet_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 		
-		FixedSizeArray<VgtSphereBounds, meshlet_max_vertex_count> vertex_sphere_bounds;
-		VGT_ASSERT(end_corner_index - begin_corner_index <= meshlet_max_vertex_count);
+		FixedSizeArray<MdtSphereBounds, meshlet_max_vertex_count> vertex_sphere_bounds;
+		MDT_ASSERT(end_corner_index - begin_corner_index <= meshlet_max_vertex_count);
 		
 		for (u32 corner_index = begin_corner_index; corner_index < end_corner_index; corner_index += 1) {
 			auto corner_id = meshlet_corners[corner_index];
@@ -2618,7 +2618,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 			meshlet_aabb_min = VectorMin(meshlet_aabb_min, position);
 			meshlet_aabb_max = VectorMax(meshlet_aabb_max, position);
 			
-			VgtSphereBounds bounds;
+			MdtSphereBounds bounds;
 			bounds.center = position;
 			bounds.radius = 0.f;
 			ArrayAppend(vertex_sphere_bounds, bounds);
@@ -2700,7 +2700,7 @@ static MeshletAdjacency BuildMeshletAdjacency(MeshView mesh, Allocator& allocato
 					u32 other_meshlet_index = kd_tree_elements[other_face_id.index].partition_index;
 					if (other_meshlet_index == meshlet_index) return;
 					
-					VGT_ASSERT(kd_tree_elements[other_face_id.index].is_active_element == 0); // Face isn't a part of any meshlet.
+					MDT_ASSERT(kd_tree_elements[other_face_id.index].is_active_element == 0); // Face isn't a part of any meshlet.
 					
 					u32 adjacency_info_index = meshlet_adjacency_info_indices[other_meshlet_index];
 					if (adjacency_info_index == u32_max) {
@@ -2766,7 +2766,7 @@ struct MeshletGroupBuildResult {
 	ArrayView<u32> prefix_sum;
 };
 
-static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allocator, ArrayView<VgtMeshlet> meshlets, MeshletAdjacency meshlet_adjacency, ArrayView<u32> meshlet_face_prefix_sum) {
+static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allocator, ArrayView<MdtMeshlet> meshlets, MeshletAdjacency meshlet_adjacency, ArrayView<u32> meshlet_face_prefix_sum) {
 	KdTree kd_tree;
 	KdTreeBuildElementsForMeshlets(meshlets, allocator, kd_tree.elements);
 	KdTreeBuild(kd_tree, allocator);
@@ -2873,7 +2873,7 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 		ArrayAppend(meshlet_group_prefix_sum, meshlet_group_meshlet_indices.count);
 	}
 	
-	VGT_ASSERT(meshlet_group_meshlet_indices.count == meshlets.count);
+	MDT_ASSERT(meshlet_group_meshlet_indices.count == meshlets.count);
 	
 	MeshletGroupBuildResult result;
 	result.meshlet_indices = CreateArrayView(meshlet_group_meshlet_indices);
@@ -2897,11 +2897,11 @@ static void ConvertMeshletGroupsToFaceGroups(
 	MeshletGroupBuildResult meshlet_group_build_result,
 	Array<FaceID>& meshlet_group_faces,
 	Array<u32>& meshlet_group_face_prefix_sum,
-	Array<VgtErrorMetric>& meshlet_group_error_metrics) {
+	Array<MdtErrorMetric>& meshlet_group_error_metrics) {
 	
-	VGT_ASSERT(meshlet_group_faces.capacity           >= mesh.face_count);
-	VGT_ASSERT(meshlet_group_face_prefix_sum.capacity >= mesh.face_count);
-	VGT_ASSERT(meshlet_group_error_metrics.capacity   >= mesh.face_count);
+	MDT_ASSERT(meshlet_group_faces.capacity           >= mesh.face_count);
+	MDT_ASSERT(meshlet_group_face_prefix_sum.capacity >= mesh.face_count);
+	MDT_ASSERT(meshlet_group_error_metrics.capacity   >= mesh.face_count);
 	
 	meshlet_group_faces.count           = 0;
 	meshlet_group_face_prefix_sum.count = 0;
@@ -2911,7 +2911,7 @@ static void ConvertMeshletGroupsToFaceGroups(
 	for (u32 group_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
 		u32 group_meshlet_end_index = meshlet_group_build_result.prefix_sum[group_index];
 		
-		FixedSizeArray<VgtSphereBounds, meshlet_group_max_meshlet_count> meshlet_error_sphere_bounds;
+		FixedSizeArray<MdtSphereBounds, meshlet_group_max_meshlet_count> meshlet_error_sphere_bounds;
 		float max_error = 0.f;
 		
 		for (u32 group_meshlet_index = group_meshlet_begin_index; group_meshlet_index < group_meshlet_end_index; group_meshlet_index += 1) {
@@ -2935,7 +2935,7 @@ static void ConvertMeshletGroupsToFaceGroups(
 		//
 		// See [Karis 2021] for reference on monotonic error metric.
 		//
-		VgtErrorMetric meshlet_group_minimum_error_metric;
+		MdtErrorMetric meshlet_group_minimum_error_metric;
 		meshlet_group_minimum_error_metric.bounds = ComputeSphereBoundsUnion(CreateArrayView(meshlet_error_sphere_bounds));
 		meshlet_group_minimum_error_metric.error  = max_error;
 		ArrayAppend(meshlet_group_error_metrics, meshlet_group_minimum_error_metric);
@@ -2944,7 +2944,7 @@ static void ConvertMeshletGroupsToFaceGroups(
 	}
 }
 
-static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<VgtErrorMetric> meshlet_group_error_metrics, Array<VgtMeshletGroup>& meshlet_groups, Array<VgtMeshlet>& meshlets, u32 level_index) {
+static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<MdtErrorMetric> meshlet_group_error_metrics, Array<MdtMeshletGroup>& meshlet_groups, Array<MdtMeshlet>& meshlets, u32 level_index) {
 	if (meshlet_groups.capacity == 0) {
 		ArrayReserve(meshlet_groups, heap_allocator, meshlet_group_build_result.prefix_sum.count * 4);
 	}
@@ -2962,7 +2962,7 @@ static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuil
 		auto meshlet_group_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
 		auto meshlet_group_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 		
-		FixedSizeArray<VgtSphereBounds, meshlet_group_max_meshlet_count> meshlet_sphere_bounds;
+		FixedSizeArray<MdtSphereBounds, meshlet_group_max_meshlet_count> meshlet_sphere_bounds;
 		auto meshlet_group_error_metric = meshlet_group_error_metrics[group_index];
 		
 		u32 begin_meshlet_index = meshlets.count;
@@ -2982,7 +2982,7 @@ static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuil
 		}
 		u32 end_meshlet_index = meshlets.count;
 		
-		VgtMeshletGroup meshlet_group;
+		MdtMeshletGroup meshlet_group;
 		meshlet_group.aabb_min = meshlet_group_aabb_min;
 		meshlet_group.aabb_max = meshlet_group_aabb_max;
 		
@@ -3084,7 +3084,7 @@ static void BuildMeshletVertexAndIndexBuffers(
 	MeshletBuildResult meshlet_build_result,
 	Array<u32> attributes_id_to_vertex_index,
 	Array<u32>& meshlet_vertex_indices,
-	Array<VgtMeshletTriangle>& meshlet_triangles) {
+	Array<MdtMeshletTriangle>& meshlet_triangles) {
 	
 	auto meshlet_corner_prefix_sum = meshlet_build_result.meshlet_corner_prefix_sum;
 	
@@ -3126,7 +3126,7 @@ static void BuildMeshletVertexAndIndexBuffers(
 		
 		u32 begin_meshlet_triangles_index = meshlet_triangles.count;
 		for (u32 face_index = begin_face_index; face_index < end_face_index; face_index += 1) {
-			VgtMeshletTriangle triangle;
+			MdtMeshletTriangle triangle;
 			triangle.i0 = meshlet_build_result.meshlet_triangles[face_index * 3 + 0];
 			triangle.i1 = meshlet_build_result.meshlet_triangles[face_index * 3 + 1];
 			triangle.i2 = meshlet_build_result.meshlet_triangles[face_index * 3 + 2];
@@ -3195,17 +3195,17 @@ static void AppendChangedVertices(
 		output_vertex_index += 1;
 	}
 
-	VGT_ASSERT(vertices.count == output_vertex_index * vertex_stride_dwords);
+	MDT_ASSERT(vertices.count == output_vertex_index * vertex_stride_dwords);
 }
 
-} // namespace VirtualGeometryTools
+} // namespace MeshDecimationTools
 
 
-void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVirtualGeometryBuildResult* result, const VgtSystemCallbacks* callbacks) {
-	using namespace VirtualGeometryTools;
+void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinuousLodBuildResult* result, const MdtSystemCallbacks* callbacks) {
+	using namespace MeshDecimationTools;
 	
-	VGT_ASSERT(inputs);
-	VGT_ASSERT(result);
+	MDT_ASSERT(inputs);
+	MDT_ASSERT(result);
 	
 	Allocator allocator;
 	InitializeAllocator(allocator, callbacks ? &callbacks->temp_allocator : nullptr);
@@ -3220,7 +3220,7 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 	
 	Array<FaceID> meshlet_group_faces;
 	Array<u32> meshlet_group_face_prefix_sum;
-	Array<VgtErrorMetric> meshlet_group_error_metrics;
+	Array<MdtErrorMetric> meshlet_group_error_metrics;
 	ArrayResize(meshlet_group_faces, allocator, mesh.face_count);
 	ArrayReserve(meshlet_group_face_prefix_sum, allocator, mesh.face_count);
 	ArrayReserve(meshlet_group_error_metrics, allocator, mesh.face_count);
@@ -3245,16 +3245,16 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 	Array<float> vertices;
 	AppendChangedVertices(mesh, allocator, heap_allocator, changed_vertex_mask, attributes_id_to_vertex_index, vertices);
 	
-	Array<VgtVirtualGeometryLevel> levels;
-	ArrayReserve(levels, heap_allocator, virtual_geometry_max_levels_of_details);
+	Array<MdtContinuousLodLevel> levels;
+	ArrayReserve(levels, heap_allocator, continuous_lod_max_levels_of_details);
 	
-	Array<VgtMeshletGroup> meshlet_groups;
-	Array<VgtMeshlet>      meshlets;
+	Array<MdtMeshletGroup> meshlet_groups;
+	Array<MdtMeshlet>      meshlets;
 	
 	Array<u32> meshlet_vertex_indices;
-	Array<VgtMeshletTriangle> meshlet_triangles;
+	Array<MdtMeshletTriangle> meshlet_triangles;
 	
-	for (u32 level_index = 0; level_index < virtual_geometry_max_levels_of_details; level_index += 1) {
+	for (u32 level_index = 0; level_index < continuous_lod_max_levels_of_details; level_index += 1) {
 		u32 allocator_high_water = allocator.memory_block_count;
 		
 		auto meshlet_build_result = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, meshlet_target_face_count, meshlet_target_vertex_count, meshlet_group_base_index);
@@ -3263,7 +3263,7 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, meshlet_build_result.meshlets, meshlet_build_result.meshlet_adjacency, meshlet_build_result.meshlet_face_prefix_sum);
 		ConvertMeshletGroupsToFaceGroups(mesh, allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics);
 		
-		bool is_last_level = (level_index + 1 == virtual_geometry_max_levels_of_details) || (mesh.face_count <= meshlet_target_face_count) || (last_level_meshlet_count == meshlet_build_result.meshlets.count);
+		bool is_last_level = (level_index + 1 == continuous_lod_max_levels_of_details) || (mesh.face_count <= meshlet_target_face_count) || (last_level_meshlet_count == meshlet_build_result.meshlets.count);
 		last_level_meshlet_count = meshlet_build_result.meshlets.count;
 		
 		if (is_last_level == false) {
@@ -3290,7 +3290,7 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 			for (auto& error_metric : meshlet_group_error_metrics) error_metric.error = FLT_MAX;
 		}
 		
-		VgtVirtualGeometryLevel level;
+		MdtContinuousLodLevel level;
 		level.begin_meshlet_groups_index = meshlet_groups.count;
 		level.begin_meshlets_index       = meshlets.count;
 		
@@ -3318,13 +3318,13 @@ void VgtBuildVirtualGeometry(const VgtVirtualGeometryBuildInputs* inputs, VgtVir
 	result->meshlet_triangle_count = meshlet_triangles.count;
 	result->vertex_count           = vertices.count / (inputs->mesh.vertex_stride_bytes / sizeof(u32));
 	result->level_count            = levels.count;
-	VGT_ASSERT(heap_allocator.memory_block_count == 6);
+	MDT_ASSERT(heap_allocator.memory_block_count == 6);
 	
 	AllocatorFreeMemoryBlocks(allocator);
 }
 
-void VgtFreeVirtualGeometryBuildResult(const VgtVirtualGeometryBuildResult* result, const VgtSystemCallbacks* callbacks) {
-	using namespace VirtualGeometryTools;
+void MdtFreeContinuousLodBuildResult(const MdtContinuousLodBuildResult* result, const MdtSystemCallbacks* callbacks) {
+	using namespace MeshDecimationTools;
 	
 	Allocator heap_allocator;
 	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
@@ -3339,11 +3339,11 @@ void VgtFreeVirtualGeometryBuildResult(const VgtVirtualGeometryBuildResult* resu
 }
 
 
-void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationResult* result, const VgtSystemCallbacks* callbacks) {
-	using namespace VirtualGeometryTools;
+void MdtBuildDiscreteLod(const MdtDiscreteLodBuildInputs* inputs, MdtDiscreteLodBuildResult* result, const MdtSystemCallbacks* callbacks) {
+	using namespace MeshDecimationTools;
 	
-	VGT_ASSERT(inputs);
-	VGT_ASSERT(result);
+	MDT_ASSERT(inputs);
+	MDT_ASSERT(result);
 	
 	Allocator allocator;
 	InitializeAllocator(allocator, callbacks ? &callbacks->temp_allocator : nullptr);
@@ -3353,10 +3353,10 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 	
 	auto mesh = BuildEditableMesh(allocator, inputs->mesh.geometry_descs, inputs->mesh.geometry_desc_count, inputs->mesh.vertex_stride_bytes);
 	
-	Array<VgtDecimatedGeometryDesc> geometry_descs;
+	Array<MdtDecimatedGeometryDesc> geometry_descs;
 	ArrayResize(geometry_descs, heap_allocator, inputs->mesh.geometry_desc_count * inputs->level_of_detail_count);
 	
-	Array<VgtLevelOfDetailResultDesc> level_of_detail_result_descs;
+	Array<MdtDiscreteLodLevel> level_of_detail_result_descs;
 	ArrayResize(level_of_detail_result_descs, heap_allocator, inputs->level_of_detail_count);
 	
 	Array<u32> attributes_id_to_vertex_index;
@@ -3436,7 +3436,7 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 			auto& face = mesh[face_id];
 			
 			if (geometry_index != face.geometry_index) {
-				VGT_ASSERT(geometry_index == u32_max || geometry_index < face.geometry_index);
+				MDT_ASSERT(geometry_index == u32_max || geometry_index < face.geometry_index);
 				
 				if (geometry_index != u32_max) {
 					auto& geometry_desc = level_geometry_descs[geometry_index];
@@ -3463,7 +3463,7 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 		}
 	}
 
-	VGT_ASSERT(heap_allocator.memory_block_count == 4);
+	MDT_ASSERT(heap_allocator.memory_block_count == 4);
 	
 	u32 vertex_stride_dwords = (mesh.attribute_stride_dwords + 3);
 	
@@ -3479,8 +3479,8 @@ void VgtDecimateMesh(const VgtMeshDecimationInputs* inputs, VgtMeshDecimationRes
 	AllocatorFreeMemoryBlocks(allocator);
 }
 
-void VgtFreeMeshDecimationResult(const VgtMeshDecimationResult* result, const VgtSystemCallbacks* callbacks) {
-	using namespace VirtualGeometryTools;
+void MdtFreeDiscreteLodBuildResult(const MdtDiscreteLodBuildResult* result, const MdtSystemCallbacks* callbacks) {
+	using namespace MeshDecimationTools;
 	
 	Allocator heap_allocator;
 	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
@@ -3496,8 +3496,8 @@ void VgtFreeMeshDecimationResult(const VgtMeshDecimationResult* result, const Vg
 //
 // Based on [Kapoulkine 2025].
 //
-VgtSphereBounds VgtComputeSphereBoundsUnion(const VgtSphereBounds* source_sphere_bounds, uint32_t source_sphere_bounds_count) {
-	using namespace VirtualGeometryTools;
+MdtSphereBounds MdtComputeSphereBoundsUnion(const MdtSphereBounds* source_sphere_bounds, uint32_t source_sphere_bounds_count) {
+	using namespace MeshDecimationTools;
 	
 	u32 aabb_min_index[3] = { 0, 0, 0 };
 	u32 aabb_max_index[3] = { 0, 0, 0 };
@@ -3538,7 +3538,7 @@ VgtSphereBounds VgtComputeSphereBoundsUnion(const VgtSphereBounds* source_sphere
 		}
 	}
 	
-	VgtSphereBounds result_bounds;
+	MdtSphereBounds result_bounds;
 	result_bounds.center = (source_sphere_bounds[aabb_min_index[max_axis_length_index]].center + source_sphere_bounds[aabb_max_index[max_axis_length_index]].center) * 0.5f;
 	result_bounds.radius = max_axis_length * 0.5f;
 	

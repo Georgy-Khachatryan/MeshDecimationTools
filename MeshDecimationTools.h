@@ -1,56 +1,56 @@
 #pragma once
 
-#ifndef MESHDECIMATION_H
-#define MESHDECIMATION_H
+#ifndef MESHDECIMATIONTOOLS_H
+#define MESHDECIMATIONTOOLS_H
 
 #include <stdint.h>
 
 
-#if defined(VGT_CONFIGURATION_FILE)
-#include VGT_CONFIGURATION_FILE
-#endif // defined(VGT_CONFIGURATION_FILE)
+#if defined(MDT_CONFIGURATION_FILE)
+#include MDT_CONFIGURATION_FILE
+#endif // defined(MDT_CONFIGURATION_FILE)
 
-#if !defined(VGT_ASSERT)
+#if !defined(MDT_ASSERT)
 #include <assert.h>
-#define VGT_ASSERT(condition) assert(condition)
-#endif // !defined(VGT_ASSERT) 
+#define MDT_ASSERT(condition) assert(condition)
+#endif // !defined(MDT_ASSERT) 
 
-#if !defined(VGT_MAX_ATTRIBUTE_STRIDE_DWORDS)
-#define VGT_MAX_ATTRIBUTE_STRIDE_DWORDS 16
-#endif // !defined(VGT_MAX_ATTRIBUTE_STRIDE_DWORDS)
+#if !defined(MDT_MAX_ATTRIBUTE_STRIDE_DWORDS)
+#define MDT_MAX_ATTRIBUTE_STRIDE_DWORDS 16
+#endif // !defined(MDT_MAX_ATTRIBUTE_STRIDE_DWORDS)
 
-#if !defined(VGT_MESHLET_GROUP_SIZE)
-#define VGT_MESHLET_GROUP_SIZE 32
-#endif // !defined(VGT_MESHLET_GROUP_SIZE)
+#if !defined(MDT_MESHLET_GROUP_SIZE)
+#define MDT_MESHLET_GROUP_SIZE 32
+#endif // !defined(MDT_MESHLET_GROUP_SIZE)
 
-#if !defined(VGT_ENABLE_ATTRIBUTE_SUPPORT)
-#define VGT_ENABLE_ATTRIBUTE_SUPPORT 1
-#endif // !defined(VGT_ENABLE_ATTRIBUTE_SUPPORT)
+#if !defined(MDT_ENABLE_ATTRIBUTE_SUPPORT)
+#define MDT_ENABLE_ATTRIBUTE_SUPPORT 1
+#endif // !defined(MDT_ENABLE_ATTRIBUTE_SUPPORT)
 
 
 #if defined(__cplusplus)
 extern "C" {
 #endif // defined(__cplusplus)
 
-struct VgtVector3 {
+struct MdtVector3 {
 	float x;
 	float y;
 	float z;
 
 #if defined(__cplusplus)	
-	friend bool operator== (const VgtVector3& lh, const VgtVector3& rh) { return lh.x == rh.x && lh.y == rh.y && lh.z == rh.z; }
+	friend bool operator== (const MdtVector3& lh, const MdtVector3& rh) { return lh.x == rh.x && lh.y == rh.y && lh.z == rh.z; }
 	float& operator[] (uint32_t index) { return (&x)[index]; }
 	float operator[] (uint32_t index) const { return (&x)[index]; }
 #endif // defined(__cplusplus)	
 };
 
-struct VgtSphereBounds {
-	struct VgtVector3 center;
+struct MdtSphereBounds {
+	struct MdtVector3 center;
 	float             radius;
 };
 
-struct VgtErrorMetric {
-	struct VgtSphereBounds bounds;
+struct MdtErrorMetric {
+	struct MdtSphereBounds bounds;
 	float                  error;
 };
 
@@ -61,40 +61,40 @@ struct VgtErrorMetric {
 // - Free the old memory block if (old_memory_block != NULL && size_bytes == 0).
 // - Extend the old memory block or allocate a new memory block and memcpy the old contents to it if (old_memory_block != NULL && size_bytes != 0).
 //
-typedef void* (*VgtReallocCallback)(void* old_memory_block, uint64_t size_bytes, void* user_data);
+typedef void* (*MdtReallocCallback)(void* old_memory_block, uint64_t size_bytes, void* user_data);
 
-struct VgtAllocatorCallbacks {
-	// Reallocation callback, see definition of VgtReallocCallback for reference.
-	VgtReallocCallback realloc;
+struct MdtAllocatorCallbacks {
+	// Reallocation callback, see definition of MdtReallocCallback for reference.
+	MdtReallocCallback realloc;
 	
-	// User defined allocator state, passed to VgtReallocCallback as user_data argument.
+	// User defined allocator state, passed to MdtReallocCallback as user_data argument.
 	void* user_data;
 };
 
 // Optional memory allocation callbacks. If they're not provided the system falls back to C realloc().
-struct VgtSystemCallbacks {
+struct MdtSystemCallbacks {
 	//
 	// Temporary allocator that is used as a stack. Falls back to C realloc() if not provided.
 	// Memory blocks are allocated and freed from the end.
 	//
-	struct VgtAllocatorCallbacks temp_allocator;
+	struct MdtAllocatorCallbacks temp_allocator;
 	
 	//
 	// Heap allocator used for small number of growable arrays and all output allocations. Falls back to C realloc() if not provided.
 	// Memory blocks are allocated and freed in arbitrary order.
 	//
-	struct VgtAllocatorCallbacks heap_allocator;
+	struct MdtAllocatorCallbacks heap_allocator;
 };
 
 
-// See normalize_vertex_attributes in VgtTriangleMeshDesc for reference.
-typedef void (*VgtNormalizeVertexAttributes)(float* attributes);
+// See normalize_vertex_attributes in MdtTriangleMeshDesc for reference.
+typedef void (*MdtNormalizeVertexAttributes)(float* attributes);
 
-struct VgtTriangleGeometryDesc {
+struct MdtTriangleGeometryDesc {
 	// Array of vertex indices. 3 consecutive indices form a triangle.
 	const uint32_t* indices;
 	
-	// Array of vertices. Stride is equal to 'vertex_stride_bytes' and provided via VgtTriangleMeshDesc.
+	// Array of vertices. Stride is equal to 'vertex_stride_bytes' and provided via MdtTriangleMeshDesc.
 	const float* vertices;
 	
 	// Size of the 'indices' array. Must be a multiple of 3.
@@ -104,7 +104,7 @@ struct VgtTriangleGeometryDesc {
 	uint32_t vertex_count;
 };
 
-struct VgtTriangleMeshDesc {
+struct MdtTriangleMeshDesc {
 	//
 	// Array of geometry descriptions. One mesh may contain multiple geometries that get simplified
 	// without forming cracks in between. This is useful when different geometries use different
@@ -112,7 +112,7 @@ struct VgtTriangleMeshDesc {
 	// glass as one geometry and opaque wood frame as another geometry. This also matches the way
 	// raytracing acceleration structure build APIs work.
 	//
-	const struct VgtTriangleGeometryDesc* geometry_descs;
+	const struct MdtTriangleGeometryDesc* geometry_descs;
 	
 	// Size of the 'geometry_descs' array.
 	uint32_t geometry_desc_count;
@@ -121,7 +121,7 @@ struct VgtTriangleMeshDesc {
 	uint32_t vertex_stride_bytes;
 	
 	//
-	// Relative error weights of vertex attributes. Size must be equal to VGT_MAX_ATTRIBUTE_STRIDE_DWORDS
+	// Relative error weights of vertex attributes. Size must be equal to MDT_MAX_ATTRIBUTE_STRIDE_DWORDS
 	// or set to NULL for default weights==1.0.
 	// Vertex positions are internally scaled such that the average face area is equal to one square unit.
 	// Default weights==1.0 work well in most cases (unit vectors, quaternions, UV coordinates, colors, etc).
@@ -133,12 +133,12 @@ struct VgtTriangleMeshDesc {
 	// This callback is called when a new set of attributes is computed and can be used to normalize unit
 	// vectors and quaternions, or clamp coordinates or colors.
 	//
-	VgtNormalizeVertexAttributes normalize_vertex_attributes;
+	MdtNormalizeVertexAttributes normalize_vertex_attributes;
 };
 
-struct VgtVirtualGeometryBuildInputs {
-	// Source triangle mesh containing multiple geometries. See VgtTriangleMeshDesc definition for reference.
-	struct VgtTriangleMeshDesc mesh;
+struct MdtContinuousLodBuildInputs {
+	// Source triangle mesh containing multiple geometries. See MdtTriangleMeshDesc definition for reference.
+	struct MdtTriangleMeshDesc mesh;
 	
 	// Target triangle count for meshlet builder. It will try to get as close to this value,
 	// but never go above it. Internally clamped between 1 and 128 triangles.
@@ -149,7 +149,7 @@ struct VgtVirtualGeometryBuildInputs {
 	uint32_t meshlet_target_vertex_count;
 };
 
-struct VgtLevelOfDetailTargetDesc {
+struct MdtLevelOfDetailTargetDesc {
 	// Target face count for decimated mesh. Decimation algorithm will terminate once face count is
 	// below or equal to the target face count.
 	uint32_t target_face_count;
@@ -158,38 +158,38 @@ struct VgtLevelOfDetailTargetDesc {
 	float target_error_limit;
 };
 
-struct VgtMeshDecimationInputs {
-	// Source triangle mesh containing multiple geometries. See VgtTriangleMeshDesc definition for reference.
-	struct VgtTriangleMeshDesc mesh;
+struct MdtDiscreteLodBuildInputs {
+	// Source triangle mesh containing multiple geometries. See MdtTriangleMeshDesc definition for reference.
+	struct MdtTriangleMeshDesc mesh;
 	
 	// Array of target limits for each level of detail.
-	VgtLevelOfDetailTargetDesc* level_of_detail_descs;
+	struct MdtLevelOfDetailTargetDesc* level_of_detail_descs;
 	
 	// Size of 'level_of_detail_descs' array.
 	uint32_t level_of_detail_count;
 };
 
-struct VgtMeshletTriangle {
-	// Three indices into meshlet_vertex_indices array. See VgtMeshlet and VgtVirtualGeometryBuildResult definitions for reference.
+struct MdtMeshletTriangle {
+	// Three indices into meshlet_vertex_indices array. See MdtMeshlet and MdtContinuousLodBuildResult definitions for reference.
 	uint8_t i0;
 	uint8_t i1;
 	uint8_t i2;
 };
 
-struct VgtMeshlet {
+struct MdtMeshlet {
 	// Bounding box over meshlet vertex positions.
-	struct VgtVector3 aabb_min;
-	struct VgtVector3 aabb_max;
+	struct MdtVector3 aabb_min;
+	struct MdtVector3 aabb_max;
 	
 	// Bounding sphere over meshlet vertex positions.
-	struct VgtSphereBounds geometric_sphere_bounds;
+	struct MdtSphereBounds geometric_sphere_bounds;
 	
 	//
 	// Error metric of this meshlet. Transferred from the group this meshlet was built from.
 	// For the first level meshlets the error is set to 0.
 	// Meshlet should be drawn if (EvaluateErrorMetric(meshlet.current_level_error_metric) <= target_error).
 	//
-	struct VgtErrorMetric current_level_error_metric;
+	struct MdtErrorMetric current_level_error_metric;
 	//
 	// Index of a meshlet group from which this meshlet was built. Set to UINT32_MAX for the first level meshlets.
 	// current_level_error_metric is extracted from this meshlet group.
@@ -202,7 +202,7 @@ struct VgtMeshlet {
 	// For the last level meshlet groups the error is set to FLT_MAX.
 	// Meshlet should be drawn if (EvaluateErrorMetric(meshlet.coarser_level_error_metric) > target_error).
 	//
-	struct VgtErrorMetric coarser_level_error_metric;
+	struct MdtErrorMetric coarser_level_error_metric;
 	//
 	// Index of a meshlet group that was built from and contains this meshlet. This index is always valid, even for the last level meshlets.
 	// coarser_level_error_metric is extracted from this meshlet group.
@@ -224,7 +224,7 @@ struct VgtMeshlet {
 	// Range of meshlet_triangles for this meshlet.
 	// To iterate over all meshlet triangles use this loop:
 	// for (u32 i = meshlet.begin_meshlet_triangles_index; i < meshlet.end_meshlet_triangles_index; i += 1) {
-	//     VgtMeshletTriangle triangle = result.meshlet_triangles[i];
+	//     MdtMeshletTriangle triangle = result.meshlet_triangles[i];
 	//     u32 vertex_index0 = result.meshlet_vertex_indices[triangle.i0 + meshlet.begin_vertex_indices_index];
 	//     u32 vertex_index1 = result.meshlet_vertex_indices[triangle.i1 + meshlet.begin_vertex_indices_index];
 	//     u32 vertex_index2 = result.meshlet_vertex_indices[triangle.i2 + meshlet.begin_vertex_indices_index];
@@ -239,18 +239,18 @@ struct VgtMeshlet {
 	//
 	// Index of the source geometry. Each meshlet is built from faces and vertices of only one geometry.
 	// Note that meshlet groups may contain meshlets from different geometries. See definition of
-	// VgtTriangleMeshDesc for more information.
+	// MdtTriangleMeshDesc for more information.
 	//
 	uint32_t geometry_index;
 };
 
-struct VgtMeshletGroup {
+struct MdtMeshletGroup {
 	// Bounding box over source meshlet bounding boxes.
-	struct VgtVector3 aabb_min;
-	struct VgtVector3 aabb_max;
+	struct MdtVector3 aabb_min;
+	struct MdtVector3 aabb_max;
 	
 	// Bounding sphere over source meshlet bounding spheres.
-	struct VgtSphereBounds geometric_sphere_bounds;
+	struct MdtSphereBounds geometric_sphere_bounds;
 	
 	//
 	// Union of source meshlet current_level_error_metrics and decimation error for this meshlet group.
@@ -268,7 +268,7 @@ struct VgtMeshletGroup {
 	//     }
 	// }
 	//
-	struct VgtErrorMetric error_metric;
+	struct MdtErrorMetric error_metric;
 	
 	// Range of source meshlets for this meshlet group. Groups can contain up to 32 meshlets.
 	uint32_t begin_meshlet_index;
@@ -281,7 +281,7 @@ struct VgtMeshletGroup {
 	uint32_t level_of_detail_index;
 };
 
-struct VgtVirtualGeometryLevel {
+struct MdtContinuousLodLevel {
 	// Range of meshlet groups for this level of detail.
 	uint32_t begin_meshlet_groups_index;
 	uint32_t end_meshlet_groups_index;
@@ -291,42 +291,42 @@ struct VgtVirtualGeometryLevel {
 	uint32_t end_meshlets_index;
 };
 
-struct VgtVirtualGeometryBuildResult {
+struct MdtContinuousLodBuildResult {
 	//
 	// Array of meshlet groups.
 	// Meshlet groups are the unit of mesh decimation.
-	// See definition of VgtMeshletGroup for more details.
+	// See definition of MdtMeshletGroup for more details.
 	//
-	struct VgtMeshletGroup* meshlet_groups;
+	struct MdtMeshletGroup* meshlet_groups;
 	
 	//
 	// Array of meshlets.
 	// Meshlets are spatially and topologically small regions of a mesh. They have a limited
-	// number of faces and vertices. See definition of VgtMeshlet for more details.
+	// number of faces and vertices. See definition of MdtMeshlet for more details.
 	//
-	struct VgtMeshlet* meshlets;
+	struct MdtMeshlet* meshlets;
 	
 	//
 	// Flattened arrays of vertex indices for each meshlet. Use [begin_vertex_indices_index, end_vertex_indices_index)
-	// range to extract vertex indices of a given meshlet. See definition of VgtMeshlet for more details.
+	// range to extract vertex indices of a given meshlet. See definition of MdtMeshlet for more details.
 	//
 	uint32_t* meshlet_vertex_indices;
 	
 	//
 	// Flattened arrays of triangles for each meshlet. Each triangle contains indices into meshlet_vertex_indices array.
 	// Use [begin_meshlet_triangles_index, end_meshlet_triangles_index) range to extract triangles of a given meshlet.
-	// See definition of VgtMeshlet for more details.
+	// See definition of MdtMeshlet for more details.
 	//
-	struct VgtMeshletTriangle* meshlet_triangles;
+	struct MdtMeshletTriangle* meshlet_triangles;
 	
 	//
 	// Array of vertices shared by all meshlets across all levels. Indexed using elements from
-	// meshlet_vertex_indices array. Vertex stride matches the stride passed in VgtTriangleMeshDesc.
+	// meshlet_vertex_indices array. Vertex stride matches the stride passed in MdtTriangleMeshDesc.
 	//
 	float* vertices;
 	
 	// Meshlet and meshlet group ranges for each level of detail.
-	struct VgtVirtualGeometryLevel* levels;
+	struct MdtContinuousLodLevel* levels;
 	
 	
 	//
@@ -341,7 +341,7 @@ struct VgtVirtualGeometryBuildResult {
 	uint32_t level_count;
 };
 
-struct VgtLevelOfDetailResultDesc {
+struct MdtDiscreteLodLevel {
 	// Maximum edge collapse error encountered during simplification.
 	float max_error;
 	
@@ -350,21 +350,21 @@ struct VgtLevelOfDetailResultDesc {
 	uint32_t end_geometry_index;
 };
 
-struct VgtDecimatedGeometryDesc {
+struct MdtDecimatedGeometryDesc {
 	// Range of vertex indices corresponding to a single geometry.
 	uint32_t begin_indices_index;
 	uint32_t end_indices_index;
 };
 
-struct VgtMeshDecimationResult {
+struct MdtDiscreteLodBuildResult {
 	// Array of level of detail descriptions.
-	struct VgtLevelOfDetailResultDesc* level_of_detail_descs;
+	struct MdtDiscreteLodLevel* level_of_detail_descs;
 	
 	//
 	// Array of per geometry ranges of vertex indices across all levels of detail.
 	// Use 'level_of_detail_descs' to iterate over geometries of a specific level of detail.
 	//
-	struct VgtDecimatedGeometryDesc* geometry_descs;
+	struct MdtDecimatedGeometryDesc* geometry_descs;
 	
 	//
 	// Array of vertex indices for all geometries across all levels of detail.
@@ -374,7 +374,7 @@ struct VgtMeshDecimationResult {
 	
 	//
 	// Array of vertices for all geometries across all levels of detail. Vertices that are not changed between levels of detail are not duplicated.
-	// Vertex stride matches the stride passed in VgtTriangleMeshDesc.
+	// Vertex stride matches the stride passed in MdtTriangleMeshDesc.
 	//
 	float* vertices;
 	
@@ -388,16 +388,16 @@ struct VgtMeshDecimationResult {
 	uint32_t vertex_count;
 };
 
-void VgtBuildVirtualGeometry(const struct VgtVirtualGeometryBuildInputs* inputs, struct VgtVirtualGeometryBuildResult* result, const struct VgtSystemCallbacks* callbacks);
-void VgtDecimateMesh(const struct VgtMeshDecimationInputs* inputs, struct VgtMeshDecimationResult* result, const struct VgtSystemCallbacks* callbacks);
+void MdtBuildContinuousLod(const struct MdtContinuousLodBuildInputs* inputs, struct MdtContinuousLodBuildResult* result, const struct MdtSystemCallbacks* callbacks);
+void MdtBuildDiscreteLod(const struct MdtDiscreteLodBuildInputs* inputs, struct MdtDiscreteLodBuildResult* result, const struct MdtSystemCallbacks* callbacks);
 
-void VgtFreeVirtualGeometryBuildResult(const struct VgtVirtualGeometryBuildResult* result, const struct VgtSystemCallbacks* callbacks);
-void VgtFreeMeshDecimationResult(const struct VgtMeshDecimationResult* result, const struct VgtSystemCallbacks* callbacks);
+void MdtFreeContinuousLodBuildResult(const struct MdtContinuousLodBuildResult* result, const struct MdtSystemCallbacks* callbacks);
+void MdtFreeDiscreteLodBuildResult(const struct MdtDiscreteLodBuildResult* result, const struct MdtSystemCallbacks* callbacks);
 
-struct VgtSphereBounds VgtComputeSphereBoundsUnion(const struct VgtSphereBounds* source_sphere_bounds, uint32_t source_sphere_bounds_count);
+struct MdtSphereBounds MdtComputeSphereBoundsUnion(const struct MdtSphereBounds* source_sphere_bounds, uint32_t source_sphere_bounds_count);
 
 #if defined(__cplusplus)
 } // extern "C"
 #endif // defined(__cplusplus)
 
-#endif // MESHDECIMATION_H
+#endif // MESHDECIMATIONTOOLS_H

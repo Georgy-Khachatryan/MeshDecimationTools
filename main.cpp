@@ -1,4 +1,4 @@
-#include "MeshDecimation.h"
+#include "MeshDecimationTools.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,7 +50,7 @@ struct Vector2 {
 	float y = 0.f;
 };
 
-using Vector3 = VgtVector3;
+using Vector3 = MdtVector3;
 
 struct ObjVertex {
 	Vector3 position;
@@ -226,8 +226,8 @@ static bool ParseCommandLineOptions(u32 argument_count, char** arguments, Comman
 }
 
 
-void WriteWavefrontObjFileDLOD(const VgtMeshDecimationResult& mesh, FILE* file) {
-	fprintf(file, "# MeshDecimation\n");
+void WriteWavefrontObjFileDLOD(const MdtDiscreteLodBuildResult& mesh, FILE* file) {
+	fprintf(file, "# MeshDecimationTools\n");
 	
 	auto* vertices = (ObjVertex*)mesh.vertices;
 	for (u32 index = 0; index < mesh.vertex_count; index += 1) {
@@ -255,8 +255,8 @@ void WriteWavefrontObjFileDLOD(const VgtMeshDecimationResult& mesh, FILE* file) 
 	}
 }
 
-void WriteWavefrontObjFileCLOD(const VgtVirtualGeometryBuildResult& mesh, FILE* file) {
-	fprintf(file, "# MeshDecimation\n");
+void WriteWavefrontObjFileCLOD(const MdtContinuousLodBuildResult& mesh, FILE* file) {
+	fprintf(file, "# MeshDecimationTools\n");
 	fprintf(file, "o Object\n");
 	
 	auto* vertices = (ObjVertex*)mesh.vertices;
@@ -321,7 +321,7 @@ static void* ValidatedAllocatorRealloc(void* old_memory_block, u64 size_bytes, v
 	} else if (old_memory_block == nullptr && size_bytes != 0) { // Allocate.
 		allocator->allocation_count += 1;
 	} else {
-		VGT_ASSERT(old_memory_block == nullptr && size_bytes == 0); // No op.
+		MDT_ASSERT(old_memory_block == nullptr && size_bytes == 0); // No op.
 	}
 #endif // ENABLE_ALLOCATOR_VALIDATION
 	
@@ -357,7 +357,7 @@ int main(int argument_count, char** arguments) {
 	printf("Parse File Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 	
 	
-	std::vector<VgtTriangleGeometryDesc> geometry_descs;
+	std::vector<MdtTriangleGeometryDesc> geometry_descs;
 	geometry_descs.reserve(triangle_mesh.index_ranges.size());
 	for (auto& range : triangle_mesh.index_ranges) {
 		auto& geometry_desc = geometry_descs.emplace_back();
@@ -370,14 +370,14 @@ int main(int argument_count, char** arguments) {
 	compile_const float uv_weight     = 1.f;
 	compile_const float normal_weight = 1.f;
 	
-	float attribute_weights[VGT_MAX_ATTRIBUTE_STRIDE_DWORDS] = {};
+	float attribute_weights[MDT_MAX_ATTRIBUTE_STRIDE_DWORDS] = {};
 	attribute_weights[0] = uv_weight;
 	attribute_weights[1] = uv_weight;
 	attribute_weights[2] = normal_weight;
 	attribute_weights[3] = normal_weight;
 	attribute_weights[4] = normal_weight;
 	
-	VgtTriangleMeshDesc mesh_desc = {};
+	MdtTriangleMeshDesc mesh_desc = {};
 	mesh_desc.geometry_descs      = geometry_descs.data();
 	mesh_desc.geometry_desc_count = (u32)geometry_descs.size();
 	mesh_desc.vertex_stride_bytes = sizeof(ObjVertex);
@@ -387,36 +387,36 @@ int main(int argument_count, char** arguments) {
 	ValidatedAllocator temp_allocator = {};
 	ValidatedAllocator heap_allocator = {};
 	
-	VgtSystemCallbacks callbacks = {};
+	MdtSystemCallbacks callbacks = {};
 	callbacks.temp_allocator.realloc   = &ValidatedAllocatorRealloc;
 	callbacks.temp_allocator.user_data = &temp_allocator;
 	callbacks.heap_allocator.realloc   = &ValidatedAllocatorRealloc;
 	callbacks.heap_allocator.user_data = &heap_allocator;
 	
 	if (options.clod) {
-		VgtVirtualGeometryBuildInputs inputs = {};
+		MdtContinuousLodBuildInputs inputs = {};
 		inputs.mesh                          = mesh_desc;
 		inputs.meshlet_target_vertex_count   = 128;
 		inputs.meshlet_target_triangle_count = 128;
 		
 		t0 = std::chrono::high_resolution_clock::now();
 		
-		VgtVirtualGeometryBuildResult result = {};
-		VgtBuildVirtualGeometry(&inputs, &result, &callbacks);
+		MdtContinuousLodBuildResult result = {};
+		MdtBuildContinuousLod(&inputs, &result, &callbacks);
 		
 		t1 = std::chrono::high_resolution_clock::now();
 		printf("CLOD Build Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 		
 #if ENABLE_ALLOCATOR_VALIDATION
-		VGT_ASSERT(temp_allocator.allocation_count == temp_allocator.deallocation_count); // No live temp allocations.
-		VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 6); // 6 live heap allocations.
+		MDT_ASSERT(temp_allocator.allocation_count == temp_allocator.deallocation_count); // No live temp allocations.
+		MDT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 6); // 6 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 		
 		WriteWavefrontObjFileCLOD(result, result_file);
-		VgtFreeVirtualGeometryBuildResult(&result, &callbacks);
+		MdtFreeContinuousLodBuildResult(&result, &callbacks);
 	} else if (options.dlod) {
 		compile_const u32 max_level_of_detail_desc_count = 16;
-		VgtLevelOfDetailTargetDesc level_of_detail_descs[max_level_of_detail_desc_count] = {};
+		MdtLevelOfDetailTargetDesc level_of_detail_descs[max_level_of_detail_desc_count] = {};
 		
 		u32 source_mesh_face_count = (u32)(triangle_mesh.indices.size() / 3);
 		u32 level_of_detail_count = 0;
@@ -429,32 +429,32 @@ int main(int argument_count, char** arguments) {
 			level_of_detail_descs[level_index].target_error_limit = FLT_MAX;
 		}
 		
-		VgtMeshDecimationInputs inputs = {};
+		MdtDiscreteLodBuildInputs inputs = {};
 		inputs.mesh                  = mesh_desc;
 		inputs.level_of_detail_descs = level_of_detail_descs;
 		inputs.level_of_detail_count = level_of_detail_count;
 		
 		t0 = std::chrono::high_resolution_clock::now();
 		
-		VgtMeshDecimationResult result = {};
-		VgtDecimateMesh(&inputs, &result, &callbacks);
+		MdtDiscreteLodBuildResult result = {};
+		MdtBuildDiscreteLod(&inputs, &result, &callbacks);
 		
 		t1 = std::chrono::high_resolution_clock::now();
 		printf("DLOD Build Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 		
 #if ENABLE_ALLOCATOR_VALIDATION
-		VGT_ASSERT(temp_allocator.allocation_count == temp_allocator.deallocation_count); // No live temp allocations.
-		VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 4); // 4 live heap allocations.
+		MDT_ASSERT(temp_allocator.allocation_count == temp_allocator.deallocation_count); // No live temp allocations.
+		MDT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 4); // 4 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 		
 		WriteWavefrontObjFileDLOD(result, result_file);
-		VgtFreeMeshDecimationResult(&result, &callbacks);
+		MdtFreeDiscreteLodBuildResult(&result, &callbacks);
 	}
 	
 #if ENABLE_ALLOCATOR_VALIDATION
 	printf("Temp Allocation Count: %u\n", temp_allocator.allocation_count);
 	printf("Heap Allocation Count: %u\n", heap_allocator.allocation_count);
-	VGT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count); // No live heap allocations.
+	MDT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count); // No live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 	
 	fclose(result_file);
