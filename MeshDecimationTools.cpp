@@ -43,9 +43,9 @@ using u8  = uint8_t;
 using u32 = uint32_t;
 using u64 = uint64_t;
 
-static_assert(sizeof(u8)  == 1);
-static_assert(sizeof(u32) == 4);
-static_assert(sizeof(u64) == 8);
+static_assert(sizeof(u8)  == 1, "Invalid u8 size.");
+static_assert(sizeof(u32) == 4, "Invalid u32 size.");
+static_assert(sizeof(u64) == 8, "Invalid u64 size.");
 
 compile_const u8  u8_max  = (u8)0xFF;
 compile_const u32 u32_max = (u32)0xFFFF'FFFF;
@@ -195,7 +195,7 @@ struct alignas(MDT_CACHE_LINE_SIZE) MeshView {
 	Corner& operator[] (CornerID corner_id)         { return corners[corner_id.index]; }
 	float*  operator[] (AttributesID attributes_id) { return attributes + attributes_id.index * attribute_stride_dwords; }
 };
-static_assert(sizeof(MeshView) == 64);
+static_assert(sizeof(MeshView) == 64, "Invalid MeshView size.");
 
 
 static u64 PackEdgeKey(VertexID vertex_id_0, VertexID vertex_id_1) {
@@ -205,17 +205,10 @@ static u64 PackEdgeKey(VertexID vertex_id_0, VertexID vertex_id_1) {
 		((u64)vertex_id_0.index << 32) | (u64)vertex_id_1.index;
 }
 
-template<ElementType element_type_t> auto GetElementID(const Corner& corner) {
-	if constexpr (element_type_t == ElementType::Vertex) {
-		return corner.vertex_id;
-	} else if constexpr (element_type_t == ElementType::Edge) {
-		return corner.edge_id;
-	} else if constexpr (element_type_t == ElementType::Face) {
-		return corner.face_id;
-	} else {
-		static_assert(false, "Unknown element_type_t.");
-	}
-}
+template<typename ElementID> ElementID GetElementID(const Corner& corner);
+template<> VertexID GetElementID<VertexID>(const Corner& corner) { return corner.vertex_id; }
+template<> EdgeID GetElementID<EdgeID>(const Corner& corner) { return corner.edge_id; }
+template<> FaceID GetElementID<FaceID>(const Corner& corner) { return corner.face_id; }
 
 template<typename ElementID>
 static void CornerListInsert(MeshView mesh, ElementID element_id, CornerID new_corner_id) {
@@ -237,9 +230,9 @@ static void CornerListInsert(MeshView mesh, ElementID element_id, CornerID new_c
 	}
 }
 
-template<ElementType element_type_t>
+template<typename ElementID>
 static bool CornerListRemove(MeshView mesh, CornerID corner_id) {
-	compile_const u32 element_type = (u32)element_type_t;
+	compile_const u32 element_type = (u32)ElementID::element_type;
 	
 	auto& corner = mesh[corner_id];
 	auto prev_corner_id = corner.corner_list_around[element_type].prev;
@@ -252,7 +245,7 @@ static bool CornerListRemove(MeshView mesh, CornerID corner_id) {
 	bool is_last_reference = (prev_corner_id.index == corner_id.index);
 	auto new_corner_list_base = is_last_reference ? CornerID{ u32_max } : prev_corner_id;
 	
-	mesh[GetElementID<element_type_t>(corner)].corner_list_base = new_corner_list_base;
+	mesh[GetElementID<ElementID>(corner)].corner_list_base = new_corner_list_base;
 	
 	corner.corner_list_around[element_type].prev.index = u32_max;
 	corner.corner_list_around[element_type].next.index = u32_max;
@@ -260,32 +253,36 @@ static bool CornerListRemove(MeshView mesh, CornerID corner_id) {
 	return is_last_reference;
 }
 
-enum struct IterationControl : u32 {
-	Continue = 0,
-	Break    = 1,
-};
-
 // Iterate linked list around a given element type starting with the base corner id. 
 // Removal while iterating is allowed.
-template<ElementType element_type_t, typename Lambda>
+template<typename ElementID, typename Lambda>
 static void IterateCornerList(MeshView mesh, CornerID corner_list_base, Lambda&& lambda) {
-	auto& element = mesh[GetElementID<element_type_t>(mesh[corner_list_base])];
+	auto& element = mesh[GetElementID<ElementID>(mesh[corner_list_base])];
 	
 	auto current_corner_id = corner_list_base;
-	IterationControl control = IterationControl::Continue;
 	do {
-		auto next_corner_id = mesh[current_corner_id].corner_list_around[(u32)element_type_t].next;
+		auto next_corner_id = mesh[current_corner_id].corner_list_around[(u32)ElementID::element_type].next;
 		
-		if constexpr (std::is_invocable_r<IterationControl, Lambda&, CornerID>::value) {
-			control = lambda(current_corner_id);
-		} else if constexpr (std::is_invocable_r<void, Lambda&, CornerID>::value) {
-			lambda(current_corner_id);
-		} else {
-			static_assert(false, "Lambda passed to IterateCornerList should have signature (CornerID) -> void or (CornerID) -> IterationControl.");
-		}
+		lambda(current_corner_id);
 		
 		current_corner_id = next_corner_id;
-	} while (current_corner_id.index != corner_list_base.index && element.corner_list_base.index != u32_max && control == IterationControl::Continue);
+	} while (current_corner_id.index != corner_list_base.index && element.corner_list_base.index != u32_max);
+}
+
+always_inline_function static void PatchReferencesToElement(MeshView mesh, VertexID element_0, VertexID element_1, CornerID corner_id) {
+	mesh[corner_id].vertex_id = element_0;
+	
+	// TODO: This can be iteration over just incoming and outgoing edges of a corner.
+	IterateCornerList<FaceID>(mesh, corner_id, [&](CornerID corner_id) {
+		auto& edge = mesh[mesh[corner_id].edge_id];
+		if (edge.vertex_0.index == element_1.index) edge.vertex_0 = element_0;
+		if (edge.vertex_1.index == element_1.index) edge.vertex_1 = element_0;
+		MDT_ASSERT(edge.vertex_0.index != edge.vertex_1.index);
+	});
+}
+
+always_inline_function static void PatchReferencesToElement(MeshView mesh, EdgeID element_0, EdgeID element_1, CornerID corner_id) {
+	mesh[corner_id].edge_id = element_0;
 }
 
 // Merge linked lists around element_0 and element_1 and remove element_1.
@@ -300,22 +297,8 @@ static ElementID CornerListMerge(MeshView mesh, ElementID element_0, ElementID e
 	
 	auto remaining_element_id = ElementID{ u32_max };
 	if (base_id_0.index != u32_max && base_id_1.index != u32_max) {
-		IterateCornerList<element_type_t>(mesh, base_id_1, [&](CornerID corner_id) {
-			if constexpr (element_type_t == ElementType::Vertex) {
-				mesh[corner_id].vertex_id = element_0;
-			
-				// TODO: This can be iteration over just incoming and outgoing edges of a corner.
-				IterateCornerList<ElementType::Face>(mesh, corner_id, [&](CornerID corner_id) {
-					auto& edge = mesh[mesh[corner_id].edge_id];
-					if (edge.vertex_0.index == element_1.index) edge.vertex_0 = element_0;
-					if (edge.vertex_1.index == element_1.index) edge.vertex_1 = element_0;
-					MDT_ASSERT(edge.vertex_0.index != edge.vertex_1.index);
-				});
-			} else if constexpr (element_type_t == ElementType::Edge) {
-				mesh[corner_id].edge_id = element_0;
-			} else {
-				static_assert(false, "Unknown element_type_t.");
-			}
+		IterateCornerList<ElementID>(mesh, base_id_1, [&](CornerID corner_id) {
+			PatchReferencesToElement(mesh, element_0, element_1, corner_id);
 		});
 		
 		auto base_id_0_prev = mesh[base_id_0].corner_list_around[element_type].prev;
@@ -405,7 +388,7 @@ struct Array {
 	
 	DECLARE_ARRAY_OPERATORS()
 };
-static_assert(sizeof(Array<u32>) == 16);
+static_assert(sizeof(Array<u32>) == 16, "Invalid Array<T> size.");
 
 template<typename T, u32 compile_time_capacity>
 struct FixedSizeArray {
@@ -417,7 +400,7 @@ struct FixedSizeArray {
 
 	DECLARE_ARRAY_OPERATORS()
 };
-static_assert(sizeof(FixedSizeArray<u32, 1>) == 8);
+static_assert(sizeof(FixedSizeArray<u32, 1>) == 8, "Invalid FixedSizeArray<T, c> size.");
 
 template<typename T>
 struct ArrayView {
@@ -428,7 +411,7 @@ struct ArrayView {
 	
 	DECLARE_ARRAY_OPERATORS()
 };
-static_assert(sizeof(ArrayView<u32>) == 16);
+static_assert(sizeof(ArrayView<u32>) == 16, "Invalid ArrayView<T> size.");
 
 #undef DECLARE_ARRAY_OPERATORS
 
@@ -620,8 +603,8 @@ never_inline_function static void HashTableGrow(EdgeDuplicateMap& table, Allocat
 	
 	HashTableClear(table);
 	
-	for (auto [key, value] : ArrayView<EdgeDuplicateMap::KeyValue>{ old_keys_values, old_capacity }) {
-		if (key != u64_max) HashTableAddOrFind(table, heap_allocator, key, value);
+	for (auto key_value: ArrayView<EdgeDuplicateMap::KeyValue>{ old_keys_values, old_capacity }) {
+		if (key_value.edge_key != u64_max) HashTableAddOrFind(table, heap_allocator, key_value.edge_key, key_value.edge_id);
 	}
 	
 	heap_allocator.callbacks.realloc(old_keys_values, 0, heap_allocator.callbacks.user_data);
@@ -826,14 +809,14 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, All
 	
 	removed_edge_array.count = 0;
 	u32 removed_face_count = 0;
-	IterateCornerList<ElementType::Edge>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
+	IterateCornerList<EdgeID>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
 		auto& corner = mesh[corner_id];
 		auto& face   = mesh[corner.face_id];
 		
-		IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
-			CornerListRemove<ElementType::Vertex>(mesh, corner_id);
-			bool edge_removed = CornerListRemove<ElementType::Edge>(mesh, corner_id);
-			bool face_removed = CornerListRemove<ElementType::Face>(mesh, corner_id);
+		IterateCornerList<FaceID>(mesh, face.corner_list_base, [&](CornerID corner_id) {
+			CornerListRemove<VertexID>(mesh, corner_id);
+			bool edge_removed = CornerListRemove<EdgeID>(mesh, corner_id);
+			bool face_removed = CornerListRemove<FaceID>(mesh, corner_id);
 			
 			if (edge_removed) ArrayAppendMaybeGrow(removed_edge_array, heap_allocator, mesh[corner_id].edge_id);
 			removed_face_count += (u32)face_removed;
@@ -845,9 +828,9 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, All
 	if (remaining_vertex_id.index != u32_max) {
 		auto remaining_base_id = mesh[remaining_vertex_id].corner_list_base;
 		
-		IterateCornerList<ElementType::Vertex>(mesh, remaining_base_id, [&](CornerID corner_id) {
+		IterateCornerList<VertexID>(mesh, remaining_base_id, [&](CornerID corner_id) {
 			// TODO: This can be iteration over just incoming and outgoing edges of a corner.
-			IterateCornerList<ElementType::Face>(mesh, corner_id, [&](CornerID corner_id) {
+			IterateCornerList<FaceID>(mesh, corner_id, [&](CornerID corner_id) {
 				auto edge_id_1 = mesh[corner_id].edge_id;
 				auto& edge_1 = mesh[edge_id_1];
 				
@@ -859,14 +842,14 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, All
 			});
 		});
 		
-		IterateCornerList<ElementType::Vertex>(mesh, remaining_base_id, [&](CornerID corner_id_0) {
-			IterateCornerList<ElementType::Face>(mesh, corner_id_0, [&](CornerID corner_id_1) {
+		IterateCornerList<VertexID>(mesh, remaining_base_id, [&](CornerID corner_id_0) {
+			IterateCornerList<FaceID>(mesh, corner_id_0, [&](CornerID corner_id_1) {
 				if (remaining_base_id.index == corner_id_1.index) return;
 				
-				IterateCornerList<ElementType::Vertex>(mesh, corner_id_1, [&](CornerID corner_id_2) {
+				IterateCornerList<VertexID>(mesh, corner_id_1, [&](CornerID corner_id_2) {
 					if (corner_id_1.index == corner_id_2.index) return;
 					
-					IterateCornerList<ElementType::Face>(mesh, corner_id_2, [&](CornerID corner_id) {
+					IterateCornerList<FaceID>(mesh, corner_id_2, [&](CornerID corner_id) {
 						auto edge_id = mesh[corner_id].edge_id;
 						auto& edge = mesh[edge_id];
 						
@@ -911,7 +894,7 @@ struct Quadric {
 	
 	float weight = 0.f;
 };
-static_assert(sizeof(Quadric) == sizeof(float) * 11);
+static_assert(sizeof(Quadric) == sizeof(float) * 11, "Invalid Quadric size.");
 
 struct QuadricAttributeGradient {
 	Vector3 g = { 0.f, 0.f, 0.f };
@@ -927,7 +910,7 @@ struct QuadricWithAttributes : Quadric {
 	QuadricWithAttributes& operator= (QuadricWithAttributes&&) = delete;
 #endif // MDT_ENABLE_ATTRIBUTE_SUPPORT
 };
-static_assert(sizeof(QuadricWithAttributes) == sizeof(Quadric) + sizeof(QuadricAttributeGradient) * MDT_MAX_ATTRIBUTE_STRIDE_DWORDS);
+static_assert(sizeof(QuadricWithAttributes) == sizeof(Quadric) + sizeof(QuadricAttributeGradient) * MDT_MAX_ATTRIBUTE_STRIDE_DWORDS, "Invalid QuadricWithAttributes size.");
 
 
 //
@@ -1304,7 +1287,7 @@ static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, V
 static u32 ValidateEdgeCollapsePositions(MeshView mesh, Edge edge, Vector3* candidate_positions, u32 candidate_position_count) {
 	u32 valid_position_mask = (1u << candidate_position_count) - 1u;
 	
-	auto check_triangle_flip_for_vertex = [&](CornerID corner_id)-> IterationControl {
+	auto check_triangle_flip_for_vertex = [&](CornerID corner_id) {
 		auto& c1 = mesh[corner_id];
 		
 		auto v0 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev].vertex_id;
@@ -1341,12 +1324,10 @@ static u32 ValidateEdgeCollapsePositions(MeshView mesh, Edge edge, Vector3* cand
 				}
 			}
 		}
-		
-		return valid_position_mask ? IterationControl::Continue : IterationControl::Break;
 	};
 	
-	if (valid_position_mask) IterateCornerList<ElementType::Vertex>(mesh, mesh[edge.vertex_0].corner_list_base, check_triangle_flip_for_vertex);
-	if (valid_position_mask) IterateCornerList<ElementType::Vertex>(mesh, mesh[edge.vertex_1].corner_list_base, check_triangle_flip_for_vertex);
+	if (valid_position_mask) IterateCornerList<VertexID>(mesh, mesh[edge.vertex_0].corner_list_base, check_triangle_flip_for_vertex);
+	if (valid_position_mask) IterateCornerList<VertexID>(mesh, mesh[edge.vertex_1].corner_list_base, check_triangle_flip_for_vertex);
 	
 	return valid_position_mask;
 }
@@ -1454,7 +1435,7 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 	
 	// Wedges spanning collapsed edge must be unified. Manually set their wedge index to the same value and accumulate quadrics.
 	// For reference see [Hugues Hoppe 1999] Section 5 Attribute Discontinuities, Figure 5.
-	IterateCornerList<ElementType::Edge>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
+	IterateCornerList<EdgeID>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
 		auto& corner_0 = mesh[corner_id];
 		auto& corner_1 = mesh[corner_0.corner_list_around[(u32)ElementType::Face].next];
 		
@@ -1492,8 +1473,8 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 	auto& v0 = mesh[edge.vertex_0];
 	auto& v1 = mesh[edge.vertex_1];
 	
-	IterateCornerList<ElementType::Vertex>(mesh, v0.corner_list_base, accumulate_quadrics);
-	IterateCornerList<ElementType::Vertex>(mesh, v1.corner_list_base, accumulate_quadrics);
+	IterateCornerList<VertexID>(mesh, v0.corner_list_base, accumulate_quadrics);
+	IterateCornerList<VertexID>(mesh, v1.corner_list_base, accumulate_quadrics);
 	
 	EdgeCollapseError collapse_error;
 	collapse_error.min_error = FLT_MAX;
@@ -1522,7 +1503,9 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 			candidate_positions[2] = optimal_position * state.rcp_position_weight;
 		}
 		
+		// ~30% of the execution time.
 		u32 valid_position_mask = ValidateEdgeCollapsePositions(mesh, edge, candidate_positions, candidate_position_count);
+		
 		for (u32 i = 0; i < candidate_position_count; i += 1) {
 			float error = valid_position_mask & (1u << i) ? 0.f : total_quadric.weight;
 			if (error > collapse_error.min_error) continue;
@@ -1766,7 +1749,7 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 			
 			u32 edge_degree = 0;
 			bool attribute_edge = false;
-			IterateCornerList<ElementType::Edge>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
+			IterateCornerList<EdgeID>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
 				auto& corner = mesh[corner_id];
 				
 				auto attributes_id = corner.attributes_id;
@@ -1815,13 +1798,13 @@ static float DecimateMeshFaceGroup(
 	float max_error = 0.f;
 	while (active_face_count > target_face_count && edge_collapse_heap.edge_collapse_errors.count) {
 		// ~80% of the execution time.
-		for (auto& [edge_key, edge_id] : state.edge_duplicate_map) {
-			if (edge_key == u64_max) continue;
+		for (auto& key_value : state.edge_duplicate_map) {
+			if (key_value.edge_key == u64_max) continue;
 			
-			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[edge_id.index];
+			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[key_value.edge_id.index];
 			if (heap_index == u32_max) continue;
 			
-			auto collapse_error = ComputeEdgeCollapseError(mesh, heap_allocator, state, edge_id);
+			auto collapse_error = ComputeEdgeCollapseError(mesh, heap_allocator, state, key_value.edge_id);
 			
 			EdgeCollapseHeapUpdate(edge_collapse_heap, heap_index, collapse_error.min_error);
 		}
@@ -1837,8 +1820,8 @@ static float DecimateMeshFaceGroup(
 		max_error = max_error < collapse_error.min_error ? collapse_error.min_error : max_error;
 		
 		// 15% of the execution time
-		auto [remaining_vertex_id, removed_face_count] = PerformEdgeCollapse(mesh, edge_id, heap_allocator, state.edge_duplicate_map, state.removed_edge_array);
-		active_face_count -= removed_face_count;
+		auto collapse_result = PerformEdgeCollapse(mesh, edge_id, heap_allocator, state.edge_duplicate_map, state.removed_edge_array);
+		active_face_count -= collapse_result.removed_face_count;
 		
 		for (auto edge_id : state.removed_edge_array) {
 			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[edge_id.index];
@@ -1860,7 +1843,7 @@ static float DecimateMeshFaceGroup(
 		
 #if MDT_ENABLE_ATTRIBUTE_SUPPORT
 		// Update attributes.
-		if (remaining_vertex_id.index != u32_max) {
+		if (collapse_result.remaining_vertex_id.index != u32_max) {
 			u32 wedge_count = state.wedge_quadrics.count;
 			u32 attribute_stride_dwords = mesh.attribute_stride_dwords;
 			auto weighted_new_position = collapse_error.new_position * state.position_weight;
@@ -1877,10 +1860,10 @@ static float DecimateMeshFaceGroup(
 			}
 				
 			if (changed_vertex_mask) {
-				changed_vertex_mask[remaining_vertex_id.index] = 0xFF;
+				changed_vertex_mask[collapse_result.remaining_vertex_id.index] = 0xFF;
 			}
 			
-			IterateCornerList<ElementType::Vertex>(mesh, mesh[remaining_vertex_id].corner_list_base, [&](CornerID corner_id) {
+			IterateCornerList<VertexID>(mesh, mesh[collapse_result.remaining_vertex_id].corner_list_base, [&](CornerID corner_id) {
 				u32 index = AttributeWedgeMapFind(state.wedge_attribute_set, mesh[corner_id].attributes_id);
 				if (index != u32_max) mesh[corner_id].attributes_id = state.wedge_attributes_ids[index];
 			});
@@ -1926,7 +1909,7 @@ static void DecimateMeshFaceGroups(
 				auto& face = mesh[face_id];
 				MDT_ASSERT(face.corner_list_base.index != u32_max);
 				
-				IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
+				IterateCornerList<FaceID>(mesh, face.corner_list_base, [&](CornerID corner_id) {
 					auto& corner = mesh[corner_id];
 					u32& index = vertex_group_indices[corner.vertex_id.index];
 					
@@ -2062,7 +2045,7 @@ struct alignas(16) KdTreeElement {
 	u32 is_active_element : 1;
 	u32 partition_index   : 31;
 };
-static_assert(sizeof(KdTreeElement) == 16);
+static_assert(sizeof(KdTreeElement) == 16, "Invalid KdTreeElement size.");
 
 struct KdTreeNode {
 	union {
@@ -2260,7 +2243,7 @@ static void KdTreeBuildElementsForFaces(MeshView mesh, Allocator& allocator, Arr
 		
 		Vector3 position = { 0.f, 0.f, 0.f };
 		float face_degree = 0.f;
-		IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
+		IterateCornerList<FaceID>(mesh, face.corner_list_base, [&](CornerID corner_id) {
 			position = position + mesh[mesh[corner_id].vertex_id].position;
 			face_degree += 1.f;
 		});
@@ -2365,7 +2348,7 @@ static void BuildMeshletsForFaceGroup(
 			}
 			
 			u32 new_vertex_count = 0;
-			IterateCornerList<ElementType::Face>(mesh, mesh[face_id].corner_list_base, [&](CornerID corner_id) {
+			IterateCornerList<FaceID>(mesh, mesh[face_id].corner_list_base, [&](CornerID corner_id) {
 				auto& corner = mesh[corner_id];
 				u8 vertex_index = vertex_usage_map[corner.attributes_id.index];
 				if (vertex_index == 0xFF) new_vertex_count += 1;
@@ -2419,7 +2402,7 @@ static void BuildMeshletsForFaceGroup(
 		
 		u32 new_vertex_count = 0;
 		if (best_face_id.index != u32_max) {
-			IterateCornerList<ElementType::Face>(mesh, mesh[best_face_id].corner_list_base, [&](CornerID corner_id) {
+			IterateCornerList<FaceID>(mesh, mesh[best_face_id].corner_list_base, [&](CornerID corner_id) {
 				auto& corner = mesh[corner_id];
 				u8 vertex_index = vertex_usage_map[corner.attributes_id.index];
 				if (vertex_index == 0xFF) new_vertex_count += 1;
@@ -2454,7 +2437,7 @@ static void BuildMeshletsForFaceGroup(
 		MDT_ASSERT(meshlet_face_count == 0 || meshlet_geometry_index == best_face_geometry_index);
 		
 		new_vertex_count = 0;
-		IterateCornerList<ElementType::Face>(mesh, mesh[best_face_id].corner_list_base, [&](CornerID corner_id) {
+		IterateCornerList<FaceID>(mesh, mesh[best_face_id].corner_list_base, [&](CornerID corner_id) {
 			auto& corner = mesh[corner_id];
 			u8 vertex_index = vertex_usage_map[corner.attributes_id.index];
 			if (vertex_index == 0xFF) {
@@ -2469,7 +2452,7 @@ static void BuildMeshletsForFaceGroup(
 			
 			ArrayAppend(meshlet_triangles, vertex_index);
 			
-			IterateCornerList<ElementType::Vertex>(mesh, corner_id, [&](CornerID corner_id) {
+			IterateCornerList<VertexID>(mesh, corner_id, [&](CornerID corner_id) {
 				auto face_id = mesh[corner_id].face_id;
 				auto& element = kd_tree.elements[face_id.index];
 				
@@ -2538,7 +2521,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 	kd_tree.element_indices.data     = (u32*)meshlet_group_faces.data;
 	kd_tree.element_indices.count    = meshlet_group_faces.count;
 	kd_tree.element_indices.capacity = meshlet_group_faces.capacity;
-	static_assert(sizeof(FaceID) == sizeof(u32));
+	static_assert(sizeof(FaceID) == sizeof(u32), "Invalid FaceID size.");
 	MDT_ASSERT(kd_tree.elements.count == meshlet_group_faces.count);
 	
 	
@@ -2694,8 +2677,8 @@ static MeshletAdjacency BuildMeshletAdjacency(MeshView mesh, Allocator& allocato
 		for (u32 face_index = begin_face_index; face_index < end_face_index; face_index += 1) {
 			auto face_id = meshlet_faces[face_index];
 			
-			IterateCornerList<ElementType::Face>(mesh, mesh[face_id].corner_list_base, [&](CornerID corner_id) {
-				IterateCornerList<ElementType::Edge>(mesh, corner_id, [&](CornerID corner_id) {
+			IterateCornerList<FaceID>(mesh, mesh[face_id].corner_list_base, [&](CornerID corner_id) {
+				IterateCornerList<EdgeID>(mesh, corner_id, [&](CornerID corner_id) {
 					auto other_face_id = mesh[corner_id].face_id;
 					u32 other_meshlet_index = kd_tree_elements[other_face_id.index].partition_index;
 					if (other_meshlet_index == meshlet_index) return;
@@ -3159,7 +3142,7 @@ static void AppendChangedVertices(
 		if (vertex.corner_list_base.index == u32_max)  continue;
 		if (changed_vertex_mask[vertex_id.index] == 0) continue;
 		
-		IterateCornerList<ElementType::Vertex>(mesh, vertex.corner_list_base, [&](CornerID corner_id) {
+		IterateCornerList<VertexID>(mesh, vertex.corner_list_base, [&](CornerID corner_id) {
 			auto attributes_ids = mesh[corner_id].attributes_id;
 			attributes_id_to_vertex_id[attributes_ids.index] = vertex_id;
 		});
@@ -3449,7 +3432,7 @@ void MdtBuildDiscreteLod(const MdtDiscreteLodBuildInputs* inputs, MdtDiscreteLod
 				geometry_desc.end_indices_index     = indices.count;
 			}
 			
-			IterateCornerList<ElementType::Face>(mesh, face.corner_list_base, [&](CornerID corner_id) {
+			IterateCornerList<FaceID>(mesh, face.corner_list_base, [&](CornerID corner_id) {
 				auto attributes_id = mesh[corner_id].attributes_id;
 				
 				u32 vertex_index = attributes_id_to_vertex_index[attributes_id.index];

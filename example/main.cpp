@@ -1,4 +1,4 @@
-#include "MeshDecimationTools.h"
+#include "../MeshDecimationTools.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -153,18 +153,18 @@ static ObjTriangleMesh ParseWavefrontObj(FILE* source_file) {
 				
 				u64 key = (u64)position_index | ((u64)texcoord_index << 21) | ((u64)normal_index << 42);
 				
-				auto [it, is_inserted] = index_map.emplace(key, 0u);
+				auto hash_slot = index_map.emplace(key, 0u);
 				
-				if (is_inserted) {
+				if (hash_slot.second) {
 					ObjVertex vertex;
 					vertex.position = positions[position_index];
 					vertex.texcoord = texcoords[texcoord_index];
 					vertex.normal   = normals[normal_index];
-					it->second = (u32)mesh.vertices.size();
+					hash_slot.first->second = (u32)mesh.vertices.size();
 					mesh.vertices.push_back(vertex);
 				}
 				
-				mesh.indices.push_back(it->second);
+				mesh.indices.push_back(hash_slot.first->second);
 			}
 			break;
 		} case 'o': {
@@ -360,11 +360,12 @@ int main(int argument_count, char** arguments) {
 	std::vector<MdtTriangleGeometryDesc> geometry_descs;
 	geometry_descs.reserve(triangle_mesh.index_ranges.size());
 	for (auto& range : triangle_mesh.index_ranges) {
-		auto& geometry_desc = geometry_descs.emplace_back();
+		MdtTriangleGeometryDesc geometry_desc = {};
 		geometry_desc.indices      = triangle_mesh.indices.data() + range.begin_indices_index;
 		geometry_desc.index_count  = range.end_indices_index - range.begin_indices_index;
 		geometry_desc.vertices     = (float*)triangle_mesh.vertices.data();
 		geometry_desc.vertex_count = (u32)triangle_mesh.vertices.size();
+		geometry_descs.push_back(geometry_desc);
 	}
 	
 	compile_const float uv_weight     = 1.f;

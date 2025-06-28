@@ -127,7 +127,7 @@ callbacks.heap_allocator.user_data = &custom_heap_allocator;
 
 Continuous level of detail is represented by a hierarchy of meshlets and meshlet groups:
 
-![CLOD_DAG](docs/CLOD_DAG.svg)
+![CLOD_DAG](example/CLOD_DAG.svg)
 
 ### Meshlets
 Meshlets are small sets of adjacent triangles that serve as the unit of LOD swapping. Each meshlet has a current and coarser level of detail groups. For example meshlet 6 is built from triangles of meshlet group 0 (current level of detail 0) and is part of meshlet group 3 (coarser level of detail 1). For convenience meshlets store both current and coarser level of detail group indices as well as their error metrics. Meshlet LOD culling requires evaluation of both error metrics:
