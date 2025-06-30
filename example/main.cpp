@@ -368,8 +368,9 @@ int main(int argument_count, char** arguments) {
 		geometry_descs.push_back(geometry_desc);
 	}
 	
-	compile_const float uv_weight     = 1.f;
-	compile_const float normal_weight = 1.f;
+	compile_const float uv_weight        = 1.f;
+	compile_const float normal_weight    = 1.f;
+	compile_const float geometric_weight = 0.5f;
 	
 	float attribute_weights[MDT_MAX_ATTRIBUTE_STRIDE_DWORDS] = {};
 	attribute_weights[0] = uv_weight;
@@ -382,6 +383,7 @@ int main(int argument_count, char** arguments) {
 	mesh_desc.geometry_descs      = geometry_descs.data();
 	mesh_desc.geometry_desc_count = (u32)geometry_descs.size();
 	mesh_desc.vertex_stride_bytes = sizeof(ObjVertex);
+	mesh_desc.geometric_weight    = geometric_weight;
 	mesh_desc.attribute_weights   = attribute_weights;
 	mesh_desc.normalize_vertex_attributes = &NormalizeObjVertexAttributes;
 	

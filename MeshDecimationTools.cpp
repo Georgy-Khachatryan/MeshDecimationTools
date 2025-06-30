@@ -17,7 +17,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <type_traits>
 
 
 #if !defined(MDT_CACHE_LINE_SIZE)
@@ -66,6 +65,8 @@ compile_const float discontinuous_meshlet_group_max_expansion = 4.f; // Sqrt of 
 
 compile_const u32 continuous_lod_max_levels_of_details = 16;
 
+compile_const float default_geometric_error_weight = 0.5f;
+compile_const float default_attribute_error_weight = 1.f;
 
 // Based on [Kapoulkine 2025] and [Teschner 2003].
 static u32 ComputePositionHash(const Vector3& v) {
@@ -1651,7 +1652,7 @@ static void EdgeCollapseHeapInitialize(EdgeCollapseHeap& heap) {
 	EdgeCollapseHeapSiftDown(heap, 0);
 }
 
-static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weights, Allocator& allocator, Allocator& heap_allocator, MeshDecimationState& state) {
+static void InitializeMeshDecimationState(MeshView mesh, const MdtTriangleMeshDesc& mesh_desc, Allocator& allocator, Allocator& heap_allocator, MeshDecimationState& state) {
 	ArrayResizeMemset(state.vertex_edge_quadrics, allocator, mesh.vertex_count, 0);
 	ArrayResizeMemset(state.attribute_face_quadrics, allocator, mesh.attribute_count, mesh.attribute_stride_dwords, 0);
 	
@@ -1661,16 +1662,12 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 	HashTableGrow(state.edge_duplicate_map,  heap_allocator, ComputeHashTableSize(128u));
 	
 	
+	auto* attribute_weights = mesh_desc.attribute_weights;
 	for (u32 i = 0; i < MDT_MAX_ATTRIBUTE_STRIDE_DWORDS; i += 1) {
-		float attribute_weight = attribute_weights && i < mesh.attribute_stride_dwords ? attribute_weights[i] : 0.f;
+		float attribute_weight = attribute_weights && i < mesh.attribute_stride_dwords ? attribute_weights[i] : default_attribute_error_weight;
 		
-		if (attribute_weight > FLT_EPSILON) {
-			state.attribute_weights[i]     = attribute_weight;
-			state.rcp_attribute_weights[i] = 1.f / attribute_weight;
-		} else {
-			state.attribute_weights[i]     = 1.f;
-			state.rcp_attribute_weights[i] = 1.f;
-		}
+		state.attribute_weights[i]     = attribute_weight;
+		state.rcp_attribute_weights[i] = 1.f / attribute_weight;
 	}
 	
 	
@@ -1692,11 +1689,12 @@ static void InitializeMeshDecimationState(MeshView mesh, float* attribute_weight
 		}
 		
 		//
-		// Scale the mesh such that average face surface area is equal to 1.0.
+		// Scale the mesh such that average face surface area is equal to mesh_desc.geometric_weight^2.
 		// See [Karis 2021] for reference.
 		//
 		float face_surface_area       = mesh.face_count ? twice_mesh_surface_area * 0.5f / (float)mesh.face_count : 1.f;
-		float rcp_mesh_position_scale = sqrtf(face_surface_area);
+		float rcp_target_face_size    = 1.f / (mesh_desc.geometric_weight > FLT_EPSILON ? mesh_desc.geometric_weight : default_geometric_error_weight);
+		float rcp_mesh_position_scale = sqrtf(face_surface_area) * rcp_target_face_size;
 		float mesh_position_scale     = 1.f / rcp_mesh_position_scale;
 		
 		bool is_valid_position_scale = (rcp_mesh_position_scale > FLT_EPSILON);
@@ -1881,8 +1879,7 @@ static void DecimateMeshFaceGroups(
 	MeshView mesh,
 	Allocator& allocator,
 	Allocator& heap_allocator,
-	MdtNormalizeVertexAttributes normalize_vertex_attributes,
-	float* attribute_weights,
+	const MdtTriangleMeshDesc& mesh_desc,
 	Array<FaceID> meshlet_group_faces,
 	Array<u32> meshlet_group_face_prefix_sum,
 	Array<MdtErrorMetric> meshlet_group_error_metrics,
@@ -1892,7 +1889,7 @@ static void DecimateMeshFaceGroups(
 	u32 heap_allocator_high_water = heap_allocator.memory_block_count;
 	
 	MeshDecimationState state;
-	InitializeMeshDecimationState(mesh, attribute_weights, allocator, heap_allocator, state);
+	InitializeMeshDecimationState(mesh, mesh_desc, allocator, heap_allocator, state);
 	
 	compile_const u32 vertex_group_index_locked = u32_max - 1;
 
@@ -2017,7 +2014,7 @@ static void DecimateMeshFaceGroups(
 			heap_allocator,
 			state,
 			edge_collapse_heap,
-			normalize_vertex_attributes,
+			mesh_desc.normalize_vertex_attributes,
 			changed_vertex_mask.data,
 			target_face_count,
 			active_face_count
@@ -3254,8 +3251,7 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 				mesh,
 				allocator,
 				heap_allocator,
-				inputs->mesh.normalize_vertex_attributes,
-				inputs->mesh.attribute_weights,
+				inputs->mesh,
 				meshlet_group_faces,
 				meshlet_group_face_prefix_sum,
 				meshlet_group_error_metrics,
@@ -3362,7 +3358,7 @@ void MdtBuildDiscreteLod(const MdtDiscreteLodBuildInputs* inputs, MdtDiscreteLod
 			u32 heap_allocator_high_water = heap_allocator.memory_block_count;
 			
 			MeshDecimationState state;
-			InitializeMeshDecimationState(mesh, inputs->mesh.attribute_weights, allocator, heap_allocator, state);
+			InitializeMeshDecimationState(mesh, inputs->mesh, allocator, heap_allocator, state);
 			
 			
 			EdgeCollapseHeap edge_collapse_heap;

@@ -42,14 +42,12 @@ geometry_descs[0].vertex_count = triangle_mesh.vertices.size();
 ```
 Multiple geometries can be passed to the LOD build algorithms. All geometries of a single mesh are decimated together which results in no seams at higher LODs.
 ```
-MdtTriangleMeshDesc mesh_desc = {};
+MdtTriangleMeshDesc mesh_desc = {}; // Default initialize to zero (zero is a safe default for all optional settings).
 mesh_desc.geometry_descs      = geometry_descs;
 mesh_desc.geometry_desc_count = 1;
 mesh_desc.vertex_stride_bytes = sizeof(Vertex); // Vertices in all geometries must have the same layout.
-mesh_desc.attribute_weights   = NULL;
-mesh_desc.normalize_vertex_attributes = NULL;
 ```
-Optional attribute weights can be specified to control attribute error importance relative to geometric error. Default weights==1.0 work well for vertex normals, UV coordinates, colors, etc.
+Optional position and attribute weights can be specified on the mesh to control the balance between geometric and attribute errors, as well as overall error magnitude. Recommended position weight range is [0.25, 1.0], default value of geometric_weight==0.5 gives a good balance between quality and reported decimation error. Default attribute weights==1.0 work well for vertex normals, UV coordinates, colors, etc.
 ```
 float attribute_weights[MDT_MAX_ATTRIBUTE_STRIDE_DWORDS] = {};
 attribute_weights[0] = uv_weight;
@@ -58,6 +56,7 @@ attribute_weights[2] = normal_weight;
 attribute_weights[3] = normal_weight;
 attribute_weights[4] = normal_weight;
 
+mesh_desc.geometric_weight  = 0.5f;
 mesh_desc.attribute_weights = attribute_weights;
 ```
 Optional vertex normalization callback can be specified to normalize unit vectors, clamp texture coordinates or colors on newly computed sets of attributes.
@@ -186,7 +185,7 @@ By default asserts are handled via C `assert`. You can set a custom assertion ha
 ## Limitations and further work
 - Performance. Mesh decimation algorithm is significantly slower than it could be. Most of the time is spent computing and recomputing edge collapse errors (on average around 50 edge collapse errors are recomputed after each performed edge collapse). This results in poor throughput of around 67k triangles/s for DLOD build and 87k triangles/s for CLOD build on Ryzen 9 9950x. Threading can significantly speed up CLOD build times, but there are opportunities for improving single threaded performance too.
 - Meshlet generation quality. Overall meshlet generation quality at lower LODs is relatively good, but at higher LODs meshlets might have enclaves of other meshlets. The same is true for meshlet group generation. As a workaround you can set `meshlet_min_face_count` and `meshlet_group_min_meshlet_count` to 1.
-- Mesh decimation quality improvements. Volume preservation quadrics. Higher quality quadric minimization. Virtual edge insertion.
+- Mesh decimation quality improvements. Volume preservation quadrics. Higher quality quadric minimization. Virtual edge insertion. Per meshlet group error scaling.
 - Transient memory usage. There is a large amount of transient allocations which may not be necessary.
 - Lack of mesh skinning support.
 

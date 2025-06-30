@@ -39,8 +39,8 @@ struct MdtVector3 {
 
 #if defined(__cplusplus)	
 	friend bool operator== (const MdtVector3& lh, const MdtVector3& rh) { return lh.x == rh.x && lh.y == rh.y && lh.z == rh.z; }
-	float& operator[] (uint32_t index) { return (&x)[index]; }
-	float operator[] (uint32_t index) const { return (&x)[index]; }
+	float& operator[] (uint32_t index) { MDT_ASSERT(index < 3); return (&x)[index]; }
+	float operator[] (uint32_t index) const { MDT_ASSERT(index < 3); return (&x)[index]; }
 #endif // defined(__cplusplus)	
 };
 
@@ -121,9 +121,14 @@ struct MdtTriangleMeshDesc {
 	uint32_t vertex_stride_bytes;
 	
 	//
+	// Vertex position error weight. Vertex positions are internally scaled such that the average face area is equal to geometric_weight^2.
+	// Values in range [0.25, 1.0] work well in most cases. Use 0.5 as the default for a good balance between quality and reported error.
+	//
+	float geometric_weight;
+	
+	//
 	// Relative error weights of vertex attributes. Size must be equal to MDT_MAX_ATTRIBUTE_STRIDE_DWORDS
 	// or set to NULL for default weights==1.0.
-	// Vertex positions are internally scaled such that the average face area is equal to one square unit.
 	// Default weights==1.0 work well in most cases (unit vectors, quaternions, UV coordinates, colors, etc).
 	// 
 	float* attribute_weights;
