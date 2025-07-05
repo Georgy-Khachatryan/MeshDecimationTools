@@ -52,18 +52,18 @@ compile_const u64 u64_max = (u64)0xFFFF'FFFF'FFFF'FFFF;
 
 using Vector3 = MdtVector3;
 
-compile_const u32 meshlet_max_vertex_count = 254;
+compile_const u32 meshlet_max_vertex_count = MDT_MAX_MESHLET_VERTEX_COUNT;
 compile_const u32 meshlet_max_face_degree  = 3;
 
-compile_const u32 meshlet_max_face_count = 128;
-compile_const u32 meshlet_min_face_count = 32;
+compile_const u32 meshlet_max_face_count = MDT_MAX_MESHLET_FACE_COUNT;
+compile_const u32 meshlet_min_face_count = meshlet_max_face_count / 4;
 compile_const float discontinuous_meshlet_max_expansion = 2.f; // Sqrt of the maximum AABB expansion when adding a discontinuous face to a meshlet.
 
 compile_const u32 meshlet_group_max_meshlet_count = MDT_MESHLET_GROUP_SIZE;
 compile_const u32 meshlet_group_min_meshlet_count = meshlet_group_max_meshlet_count / 2;
 compile_const float discontinuous_meshlet_group_max_expansion = 4.f; // Sqrt of the maximum AABB expansion when adding a discontinuous meshlet to a group.
 
-compile_const u32 continuous_lod_max_levels_of_details = 16;
+compile_const u32 continuous_lod_max_levels_of_details = MDT_MAX_CLOD_LEVEL_COUNT;
 
 compile_const float default_geometric_error_weight = 0.5f;
 compile_const float default_attribute_error_weight = 1.f;
@@ -2924,7 +2924,7 @@ static void ConvertMeshletGroupsToFaceGroups(
 	}
 }
 
-static void BuildMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<MdtErrorMetric> meshlet_group_error_metrics, Array<MdtMeshletGroup>& meshlet_groups, Array<MdtMeshlet>& meshlets, u32 level_index) {
+static void AppendNewMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<MdtErrorMetric> meshlet_group_error_metrics, Array<MdtMeshletGroup>& meshlet_groups, Array<MdtMeshlet>& meshlets, u32 level_index) {
 	if (meshlet_groups.capacity == 0) {
 		ArrayReserve(meshlet_groups, heap_allocator, meshlet_group_build_result.prefix_sum.count * 4);
 	}
@@ -3237,11 +3237,45 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 	for (u32 level_index = 0; level_index < continuous_lod_max_levels_of_details; level_index += 1) {
 		u32 allocator_high_water = allocator.memory_block_count;
 		
-		auto meshlet_build_result = BuildMeshletsForFaceGroups(mesh, allocator, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics, meshlet_target_face_count, meshlet_target_vertex_count, meshlet_group_base_index);
-		BuildMeshletVertexAndIndexBuffers(mesh, heap_allocator, meshlet_build_result, attributes_id_to_vertex_index, meshlet_vertex_indices, meshlet_triangles);
+		auto meshlet_build_result = BuildMeshletsForFaceGroups(
+			mesh,
+			allocator,
+			meshlet_group_faces,
+			meshlet_group_face_prefix_sum,
+			meshlet_group_error_metrics,
+			meshlet_target_face_count,
+			meshlet_target_vertex_count,
+			meshlet_group_base_index
+		);
 		
-		auto meshlet_group_build_result = BuildMeshletGroups(mesh, allocator, meshlet_build_result.meshlets, meshlet_build_result.meshlet_adjacency, meshlet_build_result.meshlet_face_prefix_sum);
-		ConvertMeshletGroupsToFaceGroups(mesh, allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_faces, meshlet_group_face_prefix_sum, meshlet_group_error_metrics);
+		BuildMeshletVertexAndIndexBuffers(
+			mesh,
+			heap_allocator,
+			meshlet_build_result,
+			attributes_id_to_vertex_index,
+			meshlet_vertex_indices,
+			meshlet_triangles
+		);
+		
+		
+		auto meshlet_group_build_result = BuildMeshletGroups(
+			mesh,
+			allocator,
+			meshlet_build_result.meshlets,
+			meshlet_build_result.meshlet_adjacency,
+			meshlet_build_result.meshlet_face_prefix_sum
+		);
+		
+		ConvertMeshletGroupsToFaceGroups(
+			mesh,
+			allocator,
+			meshlet_build_result,
+			meshlet_group_build_result,
+			meshlet_group_faces,
+			meshlet_group_face_prefix_sum,
+			meshlet_group_error_metrics
+		);
+		
 		
 		bool is_last_level = (level_index + 1 == continuous_lod_max_levels_of_details) || (mesh.face_count <= meshlet_target_face_count) || (last_level_meshlet_count == meshlet_build_result.meshlets.count);
 		last_level_meshlet_count = meshlet_build_result.meshlets.count;
@@ -3274,7 +3308,15 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 		level.begin_meshlets_index       = meshlets.count;
 		
 		meshlet_group_base_index = meshlet_groups.count;
-		BuildMeshletsAndMeshletGroups(heap_allocator, meshlet_build_result, meshlet_group_build_result, meshlet_group_error_metrics, meshlet_groups, meshlets, level_index);
+		AppendNewMeshletsAndMeshletGroups(
+			heap_allocator,
+			meshlet_build_result,
+			meshlet_group_build_result,
+			meshlet_group_error_metrics,
+			meshlet_groups,
+			meshlets,
+			level_index
+		);
 		
 		level.end_meshlet_groups_index = meshlet_groups.count;
 		level.end_meshlets_index  = meshlets.count;

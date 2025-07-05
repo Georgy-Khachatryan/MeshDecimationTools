@@ -26,15 +26,15 @@ struct MdtPixelSpaceErrorMetric {
 // Example usage:
 // 
 // float target_error_pixels = 1.0;
-// float world_to_pixel_space_scale = MdtComputeWorldToPixelSpaceScale(camera.view_to_clip_space[0][0], camera.render_target_size.x, target_error_pixels);
+// float world_to_pixel_space_scale = MdtComputeWorldToPixelSpaceScale(camera.view_to_clip[0][0], camera.render_target_size.x, target_error_pixels);
 // 
 // MdtModelToWorldTransform model_to_world;
 // model_to_world.position           = instance.model_to_world.position;
 // model_to_world.rotation_and_scale = mul(QuaternionToFloat3x3(instance.model_to_world.rotation), ScaleVectorToFloat3x3(instance.model_to_world.scale));
 // model_to_world.max_scale          = Max3(instance.model_to_world.scale.x, instance.model_to_world.scale.y, instance.model_to_world.scale.z);
 // 
-// MdtPixelSpaceErrorMetric coarser_error = MdtEvaluateErrorMetric(Mdt_model_to_world, meshlet.coarser_level_error_metric, camera_position_world_space, world_to_pixel_space_scale);
-// MdtPixelSpaceErrorMetric current_error = MdtEvaluateErrorMetric(Mdt_model_to_world, meshlet.current_level_error_metric, camera_position_world_space, world_to_pixel_space_scale);
+// MdtPixelSpaceErrorMetric coarser_error = MdtEvaluateErrorMetric(model_to_world, meshlet.coarser_level_error_metric, camera_position_world_space, world_to_pixel_space_scale);
+// MdtPixelSpaceErrorMetric current_error = MdtEvaluateErrorMetric(model_to_world, meshlet.current_level_error_metric, camera_position_world_space, world_to_pixel_space_scale);
 // 
 // bool is_visible = MdtLevelOfDetailCullCoarserLevelError(coarser_error) && MdtLevelOfDetailCullCurrentLevelError(current_error);
 // 

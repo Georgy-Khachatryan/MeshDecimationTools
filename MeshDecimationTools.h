@@ -27,6 +27,9 @@
 #define MDT_ENABLE_ATTRIBUTE_SUPPORT 1
 #endif // !defined(MDT_ENABLE_ATTRIBUTE_SUPPORT)
 
+#define MDT_MAX_MESHLET_VERTEX_COUNT 254
+#define MDT_MAX_MESHLET_FACE_COUNT 128
+#define MDT_MAX_CLOD_LEVEL_COUNT 16
 
 #if defined(__cplusplus)
 extern "C" {
@@ -146,11 +149,11 @@ struct MdtContinuousLodBuildInputs {
 	struct MdtTriangleMeshDesc mesh;
 	
 	// Target triangle count for meshlet builder. It will try to get as close to this value,
-	// but never go above it. Internally clamped between 1 and 128 triangles.
+	// but never go above it. Internally clamped between 1 and MDT_MAX_MESHLET_FACE_COUNT=128 triangles.
 	uint32_t meshlet_target_triangle_count;
 	
 	// Target vertex count for meshlet builder. It will try to get as close to this value,
-	// but never go above it. Internally clamped between 3 and 254 vertices.
+	// but never go above it. Internally clamped between 3 and MDT_MAX_MESHLET_VERTEX_COUNT=254 vertices.
 	uint32_t meshlet_target_vertex_count;
 };
 
