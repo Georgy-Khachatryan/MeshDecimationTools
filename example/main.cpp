@@ -86,8 +86,11 @@ struct ObjTriangleMesh {
 
 static ObjTriangleMesh ParseWavefrontObj(FILE* source_file) {
 	fseek(source_file, 0, SEEK_END);
-	u64 file_size = ftell(source_file);
+	auto ftell_result = ftell(source_file);
+	if (ftell_result <= 0) return {};
 	fseek(source_file, 0, SEEK_SET);
+	
+	u64 file_size = (u64)ftell_result;
 	
 	std::vector<char> file_data;
 	file_data.resize(file_size + 1);
@@ -269,8 +272,13 @@ void WriteWavefrontObjFileCLOD(const MdtContinuousLodBuildResult& mesh, FILE* fi
 	
 	// Output an LOD with a given target error.
 	float target_error = 0.05f;
-	
+
+#define OUTPUT_GROUP_INDICES 0
+
+#if OUTPUT_GROUP_INDICES
 	u32 group_index = ~0u;
+#endif // OUTPUT_GROUP_INDICES
+	
 	for (u32 meshlet_index = 0; meshlet_index < mesh.meshlet_count; meshlet_index += 1) {
 		auto& meshlet = mesh.meshlets[meshlet_index];
 		
@@ -280,14 +288,14 @@ void WriteWavefrontObjFileCLOD(const MdtContinuousLodBuildResult& mesh, FILE* fi
 		
 		if (draw_meshlet == false) continue;
 		
-#if 0
+#if OUTPUT_GROUP_INDICES
 		if (group_index != meshlet.coarser_level_meshlet_group_index) {
 			group_index = meshlet.coarser_level_meshlet_group_index;
 			fprintf(file, "o Group%u\n", group_index); // Note that groups might span multiple geometries.
 		}
-#else
+#else // !OUTPUT_GROUP_INDICES
 		fprintf(file, "o Meshlet%u-Geometry%u\n", meshlet_index, meshlet.geometry_index);
-#endif
+#endif // !OUTPUT_GROUP_INDICES
 		
 		for (u32 i = meshlet.begin_meshlet_triangles_index; i < meshlet.end_meshlet_triangles_index; i += 1) {
 			auto triangle = mesh.meshlet_triangles[i];
@@ -325,13 +333,19 @@ static void* ValidatedAllocatorRealloc(void* old_memory_block, u64 size_bytes, v
 	}
 #endif // ENABLE_ALLOCATOR_VALIDATION
 	
-	return realloc(old_memory_block, size_bytes);
+	void* result = nullptr;
+	if (size_bytes == 0) {
+		free(old_memory_block);
+	} else {
+		result = realloc(old_memory_block, size_bytes);
+	}
+	return result;
 }
 
 
 int main(int argument_count, char** arguments) {
 	CommandLineOptions options = {};
-	if (ParseCommandLineOptions(argument_count, arguments, options) == false) return -1;
+	if (ParseCommandLineOptions((u32)argument_count, arguments, options) == false) return -1;
 	
 	auto* source_file = options.source_file_name ? fopen(options.source_file_name, "rb") : nullptr;
 	if (source_file == nullptr) {
@@ -391,10 +405,10 @@ int main(int argument_count, char** arguments) {
 	ValidatedAllocator heap_allocator = {};
 	
 	MdtSystemCallbacks callbacks = {};
-	callbacks.temp_allocator.realloc   = &ValidatedAllocatorRealloc;
-	callbacks.temp_allocator.user_data = &temp_allocator;
-	callbacks.heap_allocator.realloc   = &ValidatedAllocatorRealloc;
-	callbacks.heap_allocator.user_data = &heap_allocator;
+	callbacks.temp_allocator.reallocate = &ValidatedAllocatorRealloc;
+	callbacks.temp_allocator.user_data  = &temp_allocator;
+	callbacks.heap_allocator.reallocate = &ValidatedAllocatorRealloc;
+	callbacks.heap_allocator.user_data  = &heap_allocator;
 	
 	if (options.clod) {
 		MdtContinuousLodBuildInputs inputs = {};

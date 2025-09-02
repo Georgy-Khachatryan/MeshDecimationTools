@@ -32,6 +32,10 @@
 #define always_inline_function
 #endif // !defined(_MSC_VER)
 
+#if !defined(MDT_UNUSED_VARIABLE)
+#define MDT_UNUSED_VARIABLE(name) (void)(name)
+#endif // !defined(MDT_UNUSED_VARIABLE)
+
 #define compile_const constexpr static const
 
 
@@ -46,7 +50,6 @@ static_assert(sizeof(u8)  == 1, "Invalid u8 size.");
 static_assert(sizeof(u32) == 4, "Invalid u32 size.");
 static_assert(sizeof(u64) == 8, "Invalid u64 size.");
 
-compile_const u8  u8_max  = (u8)0xFF;
 compile_const u32 u32_max = (u32)0xFFFF'FFFF;
 compile_const u64 u64_max = (u64)0xFFFF'FFFF'FFFF'FFFF;
 
@@ -143,13 +146,8 @@ struct Face {
 };
 
 struct Edge {
-	union {
-		struct {
-			VertexID vertex_0;
-			VertexID vertex_1;
-		};
-		u64 edge_key = 0;
-	};
+	VertexID vertex_0;
+	VertexID vertex_1;
 	
 	CornerID corner_list_base; // Corner list around an edge.
 };
@@ -206,10 +204,14 @@ static u64 PackEdgeKey(VertexID vertex_id_0, VertexID vertex_id_1) {
 		((u64)vertex_id_0.index << 32) | (u64)vertex_id_1.index;
 }
 
+static u64 LoadEdgeKey(const Edge& edge) {
+	return (u64)edge.vertex_0.index | ((u64)edge.vertex_1.index << 32);
+}
+
 template<typename ElementID> ElementID GetElementID(const Corner& corner);
-template<> VertexID GetElementID<VertexID>(const Corner& corner) { return corner.vertex_id; }
-template<> EdgeID GetElementID<EdgeID>(const Corner& corner) { return corner.edge_id; }
-template<> FaceID GetElementID<FaceID>(const Corner& corner) { return corner.face_id; }
+template<> always_inline_function VertexID GetElementID<VertexID>(const Corner& corner) { return corner.vertex_id; }
+template<> always_inline_function EdgeID GetElementID<EdgeID>(const Corner& corner) { return corner.edge_id; }
+template<> always_inline_function FaceID GetElementID<FaceID>(const Corner& corner) { return corner.face_id; }
 
 template<typename ElementID>
 static void CornerListInsert(MeshView mesh, ElementID element_id, CornerID new_corner_id) {
@@ -282,7 +284,7 @@ always_inline_function static void PatchReferencesToElement(MeshView mesh, Verte
 	});
 }
 
-always_inline_function static void PatchReferencesToElement(MeshView mesh, EdgeID element_0, EdgeID element_1, CornerID corner_id) {
+always_inline_function static void PatchReferencesToElement(MeshView mesh, EdgeID element_0, EdgeID /*element_1*/, CornerID corner_id) {
 	mesh[corner_id].edge_id = element_0;
 }
 
@@ -337,7 +339,7 @@ static void* AllocateMemoryBlock(Allocator& allocator, void* old_memory_block, u
 	MDT_ASSERT(old_memory_block == nullptr || allocator.memory_block_count > 0);
 	MDT_ASSERT(old_memory_block == nullptr || allocator.memory_blocks[allocator.memory_block_count - 1] == old_memory_block);
 	
-	void* memory_block = allocator.callbacks.realloc(old_memory_block, size_bytes, allocator.callbacks.user_data);
+	void* memory_block = allocator.callbacks.reallocate(old_memory_block, size_bytes, allocator.callbacks.user_data);
 	u32 memory_block_index = old_memory_block ? allocator.memory_block_count - 1 : allocator.memory_block_count++;
 	
 	allocator.memory_blocks[memory_block_index] = memory_block;
@@ -349,13 +351,21 @@ static void InitializeAllocator(Allocator& allocator, const MdtAllocatorCallback
 	if (callbacks) {
 		allocator.callbacks = *callbacks;
 	} else {
-		allocator.callbacks.realloc = [](void* old_memory_block, u64 size_bytes, void*) { return realloc(old_memory_block, size_bytes); };
+		allocator.callbacks.reallocate = [](void* old_memory_block, u64 size_bytes, void*) {
+			void* result = nullptr;
+			if (size_bytes == 0) {
+				free(old_memory_block);
+			} else {
+				result = realloc(old_memory_block, size_bytes);
+			}
+			return result;
+		};
 	}
 }
 
 static void AllocatorFreeMemoryBlocks(Allocator& allocator, u32 last_memory_block_index = 0) {
 	for (u32 i = allocator.memory_block_count; i > last_memory_block_index; i -= 1) {
-		allocator.callbacks.realloc(allocator.memory_blocks[i - 1], 0, allocator.callbacks.user_data);
+		allocator.callbacks.reallocate(allocator.memory_blocks[i - 1], 0, allocator.callbacks.user_data);
 	}
 	allocator.memory_block_count = last_memory_block_index;
 }
@@ -451,7 +461,7 @@ template<typename T>
 never_inline_function static void ArrayGrow(Array<T>& array, Allocator& allocator, u32 new_capacity) {
 	u32 old_memory_block_index = AllocatorFindMemoryBlock(allocator, array.data);
 	
-	void* memory_block = allocator.callbacks.realloc(array.data, new_capacity * sizeof(T), allocator.callbacks.user_data);
+	void* memory_block = allocator.callbacks.reallocate(array.data, new_capacity * sizeof(T), allocator.callbacks.user_data);
 	u32 memory_block_index = old_memory_block_index != u32_max ? old_memory_block_index : allocator.memory_block_count++;
 	
 	allocator.memory_blocks[memory_block_index] = memory_block;
@@ -521,7 +531,8 @@ static VertexID HashTableAddOrFind(VertexHashTable& table, Array<Vertex>& vertic
 			return new_vertex_id;
 		}
 		
-		if (vertices[vertex_id.index].position == position) {
+		auto existing_position = vertices[vertex_id.index].position;
+		if (existing_position.x == position.x && existing_position.y == position.y && existing_position.z == position.z) {
 			return vertex_id;
 		}
 		
@@ -550,14 +561,15 @@ static EdgeID HashTableAddOrFind(EdgeHashTable& table, Array<Edge>& edges, u64 e
 			table.edge_ids[index] = new_edge_id;
 			
 			Edge edge;
-			edge.edge_key = edge_key;
+			edge.vertex_0.index = (u32)(edge_key >> 0);
+			edge.vertex_1.index = (u32)(edge_key >> 32);
 			edge.corner_list_base.index = u32_max;
 			ArrayAppend(edges, edge);
 			
 			return new_edge_id;
 		}
 		
-		if (edges[edge_id.index].edge_key == edge_key) {
+		if (LoadEdgeKey(edges[edge_id.index]) == edge_key) {
 			return edge_id;
 		}
 		
@@ -594,7 +606,7 @@ never_inline_function static void HashTableGrow(EdgeDuplicateMap& table, Allocat
 	u32 old_memory_block_index = AllocatorFindMemoryBlock(heap_allocator, old_keys_values);
 	
 	u32 old_capacity = table.capacity;
-	void* memory_block = heap_allocator.callbacks.realloc(nullptr, new_capacity * sizeof(EdgeDuplicateMap::KeyValue), heap_allocator.callbacks.user_data);
+	void* memory_block = heap_allocator.callbacks.reallocate(nullptr, new_capacity * sizeof(EdgeDuplicateMap::KeyValue), heap_allocator.callbacks.user_data);
 	u32 memory_block_index = old_memory_block_index != u32_max ? old_memory_block_index : heap_allocator.memory_block_count++;
 	
 	heap_allocator.memory_blocks[memory_block_index] = memory_block;
@@ -608,7 +620,7 @@ never_inline_function static void HashTableGrow(EdgeDuplicateMap& table, Allocat
 		if (key_value.edge_key != u64_max) HashTableAddOrFind(table, heap_allocator, key_value.edge_key, key_value.edge_id);
 	}
 	
-	heap_allocator.callbacks.realloc(old_keys_values, 0, heap_allocator.callbacks.user_data);
+	heap_allocator.callbacks.reallocate(old_keys_values, 0, heap_allocator.callbacks.user_data);
 }
 
 static EdgeID HashTableAddOrFind(EdgeDuplicateMap& table, Allocator& heap_allocator, u64 edge_key, EdgeID edge_id) {
@@ -694,7 +706,7 @@ static MeshView BuildEditableMesh(Allocator& allocator, const MdtTriangleGeometr
 	mesh.edge_count      = edges.capacity;
 	mesh.vertex_count    = vertices.capacity;
 	mesh.corner_count    = corners.count;
-	mesh.attribute_count = attributes.count / attribute_stride_dwords;
+	mesh.attribute_count = vertices_count;
 	mesh.attribute_stride_dwords = attribute_stride_dwords;
 	
 	u32 allocator_high_water = allocator.memory_block_count;
@@ -800,13 +812,10 @@ static EdgeCollapseResult PerformEdgeCollapse(MeshView mesh, EdgeID edge_id, All
 	auto& edge = mesh[edge_id];
 	
 	MDT_ASSERT(edge.vertex_0.index != edge.vertex_1.index);
-	auto& vertex_0 = mesh[edge.vertex_0];
-	auto& vertex_1 = mesh[edge.vertex_1];
-
 	MDT_ASSERT(edge.corner_list_base.index != u32_max);
-	MDT_ASSERT(vertex_0.corner_list_base.index != u32_max);
-	MDT_ASSERT(vertex_1.corner_list_base.index != u32_max);
-	MDT_ASSERT(vertex_0.corner_list_base.index != vertex_1.corner_list_base.index);
+	MDT_ASSERT(mesh[edge.vertex_0].corner_list_base.index != u32_max);
+	MDT_ASSERT(mesh[edge.vertex_1].corner_list_base.index != u32_max);
+	MDT_ASSERT(mesh[edge.vertex_0].corner_list_base.index != mesh[edge.vertex_1].corner_list_base.index);
 	
 	removed_edge_array.count = 0;
 	u32 removed_face_count = 0;
@@ -907,6 +916,8 @@ struct QuadricWithAttributes : Quadric {
 	QuadricAttributeGradient attributes[MDT_MAX_ATTRIBUTE_STRIDE_DWORDS]; // Note that this array is used as a 'flexible array'.
 	
 	// Quadric with attributes cannot be copied by value as it's variable size (i.e. it might be missing trailing attributes).
+	QuadricWithAttributes() { memset(this, 0, sizeof(QuadricWithAttributes)); }
+	QuadricWithAttributes(const QuadricWithAttributes&) = delete;
 	QuadricWithAttributes& operator= (const QuadricWithAttributes&) = delete;
 	QuadricWithAttributes& operator= (QuadricWithAttributes&&) = delete;
 #endif // MDT_ENABLE_ATTRIBUTE_SUPPORT
@@ -931,8 +942,9 @@ always_inline_function static Vector3 operator+ (const Vector3& lh, float rh) { 
 always_inline_function static Vector3 operator- (const Vector3& lh, float rh) { return Vector3{ lh.x - rh, lh.y - rh, lh.z - rh }; }
 always_inline_function static float DotProduct(const Vector3& lh, const Vector3& rh) { return lh.x * rh.x + lh.y * rh.y + lh.z * rh.z; }
 always_inline_function static float Length(const Vector3& v) { return sqrtf(DotProduct(v, v)); }
-always_inline_function static Vector3 Normalize(const Vector3& v) { float length = Length(v); return length < FLT_EPSILON ? v : v * (1.f / length); }
 always_inline_function static Vector3 CrossProduct(const Vector3& lh, const Vector3& rh) { return Vector3{ lh.y * rh.z - lh.z * rh.y, lh.z * rh.x - lh.x * rh.z, lh.x * rh.y - lh.y * rh.x }; }
+always_inline_function static float LoadElementByIndex(const Vector3& vector, u32 index) { return (&vector.x)[index]; }
+
 
 always_inline_function static Vector3 VectorMax(const Vector3& lh, const Vector3& rh) {
 	Vector3 result;
@@ -1369,7 +1381,7 @@ struct QuadricWithAttributesArray {
 never_inline_function static void ArrayGrow(QuadricWithAttributesArray& array, Allocator& allocator, u32 new_capacity) {
 	u32 old_memory_block_index = AllocatorFindMemoryBlock(allocator, array.data);
 	
-	void* memory_block = allocator.callbacks.realloc(array.data, new_capacity * array.data_stride_bytes + sizeof(QuadricWithAttributes), allocator.callbacks.user_data);
+	void* memory_block = allocator.callbacks.reallocate(array.data, new_capacity * array.data_stride_bytes + sizeof(QuadricWithAttributes), allocator.callbacks.user_data);
 	u32 memory_block_index = old_memory_block_index != u32_max ? old_memory_block_index : allocator.memory_block_count++;
 	
 	allocator.memory_blocks[memory_block_index] = memory_block;
@@ -1414,8 +1426,8 @@ struct alignas(MDT_CACHE_LINE_SIZE) MeshDecimationState {
 	Array<AttributesID> wedge_attributes_ids;
 	AttributeWedgeMap wedge_attribute_set;
 	
-	alignas(16) float attribute_weights[MDT_MAX_ATTRIBUTE_STRIDE_DWORDS];
-	alignas(16) float rcp_attribute_weights[MDT_MAX_ATTRIBUTE_STRIDE_DWORDS];
+	float attribute_weights[MDT_MAX_ATTRIBUTE_STRIDE_DWORDS];
+	float rcp_attribute_weights[MDT_MAX_ATTRIBUTE_STRIDE_DWORDS];
 	
 	float position_weight;
 	float rcp_position_weight;
@@ -1515,8 +1527,8 @@ static EdgeCollapseError ComputeEdgeCollapseError(MeshView mesh, Allocator& heap
 			error += ComputeQuadricError(edge_quadrics, p);
 			if (error > collapse_error.min_error) continue;
 			
-			for (u32 i = 0; i < wedge_count; i += 1) {
-				error += ComputeQuadricErrorWithAttributes(state.wedge_quadrics[i], p, attribute_stride_dwords);
+			for (u32 wedge_index = 0; wedge_index < wedge_count; wedge_index += 1) {
+				error += ComputeQuadricErrorWithAttributes(state.wedge_quadrics[wedge_index], p, attribute_stride_dwords);
 			}
 			if (error > collapse_error.min_error) continue;
 			
@@ -1771,7 +1783,7 @@ static void InitializeMeshDecimationState(MeshView mesh, const MdtTriangleMeshDe
 			auto p2 = mesh[v2].position * position_weight;
 			
 			Quadric quadric;
-			ComputeEdgeQuadric(quadric, p0, p1, p2, 1.f / edge_degree);
+			ComputeEdgeQuadric(quadric, p0, p1, p2, 1.f / (float)edge_degree);
 			
 			AccumulateQuadric(state.vertex_edge_quadrics[v0.index], quadric);
 			AccumulateQuadric(state.vertex_edge_quadrics[v1.index], quadric);
@@ -1821,8 +1833,8 @@ static float DecimateMeshFaceGroup(
 		auto collapse_result = PerformEdgeCollapse(mesh, edge_id, heap_allocator, state.edge_duplicate_map, state.removed_edge_array);
 		active_face_count -= collapse_result.removed_face_count;
 		
-		for (auto edge_id : state.removed_edge_array) {
-			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[edge_id.index];
+		for (auto removed_edge_id : state.removed_edge_array) {
+			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[removed_edge_id.index];
 			if (heap_index != u32_max) EdgeCollapseHeapRemove(edge_collapse_heap, heap_index);
 		}
 		
@@ -2066,35 +2078,36 @@ struct KdTree {
 // TODO: Experiment with splitting elements by geometry index. This would allow us to move element filtering higher up the tree.
 static u32 KdTreeSplit(const ArrayView<KdTreeElement>& elements, ArrayView<u32> indices, KdTreeNode& node) {
 	Vector3 sum = { 0.f, 0.f, 0.f };
-	Vector3 min = { +FLT_MAX, +FLT_MAX, +FLT_MAX };
-	Vector3 max = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+	float min[3] = { +FLT_MAX, +FLT_MAX, +FLT_MAX };
+	float max[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
 	float indices_count = 0.f;
 	
 	for (u32 i = 0; i < indices.count; i += 1) {
 		auto& element = elements[indices[i]];
 		
 		for (u32 j = 0; j < 3; j += 1) {
-			min[j] = min[j] < element.position[j] ? min[j] : element.position[j];
-			max[j] = max[j] > element.position[j] ? max[j] : element.position[j];
+			float position_j = LoadElementByIndex(element.position, j);
+			min[j] = min[j] < position_j ? min[j] : position_j;
+			max[j] = max[j] > position_j ? max[j] : position_j;
 		}
 		sum = sum + element.position;
 		indices_count += 1.f;
 	}
 	
 	auto mean = (indices_count > 0.f) ? sum * (1.f / indices_count) : sum;
-	auto extent = max - min;
+	float extent[3] = { max[0] - min[0], max[1] - min[1], max[2] - min[2] };
 	
 	u32 split_axis = 0;
 	for (u32 axis = 1; axis < 3; axis += 1) {
 		if (extent[axis] > extent[split_axis]) split_axis = axis;
 	}
-	float split_position = mean[split_axis];
+	float split_position = LoadElementByIndex(mean, split_axis);
 	
 	
 	u32 split_index = 0;
 	for (u32 i = 0; i < indices.count; i += 1) {
 		u32 index = indices[i];
-		float position = elements[index].position[split_axis];
+		float position = LoadElementByIndex(elements[index].position, split_axis);
 
 		// Swap(indices[i], indices[split_index]);
 		indices[i] = indices[split_index];
@@ -2109,7 +2122,7 @@ static u32 KdTreeSplit(const ArrayView<KdTreeElement>& elements, ArrayView<u32> 
 	return split_index;
 }
 
-static u32 KdTreeBuildLeafNode(Array<KdTreeNode>& nodes, ArrayView<KdTreeElement> elements, const ArrayView<u32>& indices) {
+static u32 KdTreeBuildLeafNode(Array<KdTreeNode>& nodes, const ArrayView<u32>& indices) {
 	u32 leaf_node_index = nodes.count;
 	
 	u32 indices_count = indices.count;
@@ -2126,7 +2139,7 @@ static u32 KdTreeBuildLeafNode(Array<KdTreeNode>& nodes, ArrayView<KdTreeElement
 
 static u32 KdTreeBuildNode(Array<KdTreeNode>& nodes, ArrayView<KdTreeElement> elements, ArrayView<u32> indices) {
 	if (indices.count <= KdTreeNode::leaf_size) {
-		return KdTreeBuildLeafNode(nodes, elements, indices);
+		return KdTreeBuildLeafNode(nodes, indices);
 	}
 	
 	KdTreeNode node;
@@ -2134,7 +2147,7 @@ static u32 KdTreeBuildNode(Array<KdTreeNode>& nodes, ArrayView<KdTreeElement> el
 	
 	// Faild to split the subtree. Create a single leaf to prevent infinite recursion.
 	if (split_index == 0 || split_index >= indices.count) {
-		return KdTreeBuildLeafNode(nodes, elements, indices);
+		return KdTreeBuildLeafNode(nodes, indices);
 	}
 	
 	u32 node_index = nodes.count;
@@ -2145,6 +2158,7 @@ static u32 KdTreeBuildNode(Array<KdTreeNode>& nodes, ArrayView<KdTreeElement> el
 	
 	MDT_ASSERT(node_index_0 == node_index + 1); // Left node is always the next node after the local root.
 	MDT_ASSERT(node_index_1 > node_index);      // Right node offset is non zero. Zero means branch is pruned.
+	MDT_UNUSED_VARIABLE(node_index_0);
 	
 	nodes[node_index].payload = node_index_1 - node_index;
 	
@@ -2209,7 +2223,7 @@ static bool KdTreeFindClosestActiveElement(KdTree& kd_tree, const Vector3& point
 		}
 	} else if (node.payload != 0) {
 		// Visit the closest node first.
-		float delta  = point[node.axis] - node.split;
+		float delta  = LoadElementByIndex(point, node.axis) - node.split;
 		u32 offset_0 = delta <= 0.f ? 1 : node.payload; // Left node is always the next node after the local root.
 		u32 offset_1 = delta <= 0.f ? node.payload : 1; // Right node offset is non zero. Zero means branch is pruned.
 		
@@ -2438,7 +2452,7 @@ static void BuildMeshletsForFaceGroup(
 			auto& corner = mesh[corner_id];
 			u8 vertex_index = vertex_usage_map[corner.attributes_id.index];
 			if (vertex_index == 0xFF) {
-				vertex_index = meshlet_vertex_count + new_vertex_count;
+				vertex_index = (u8)(meshlet_vertex_count + new_vertex_count);
 				vertex_usage_map[corner.attributes_id.index] = vertex_index;
 				
 				new_vertex_count += 1;
@@ -2746,7 +2760,7 @@ struct MeshletGroupBuildResult {
 	ArrayView<u32> prefix_sum;
 };
 
-static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allocator, ArrayView<MdtMeshlet> meshlets, MeshletAdjacency meshlet_adjacency, ArrayView<u32> meshlet_face_prefix_sum) {
+static MeshletGroupBuildResult BuildMeshletGroups(Allocator& allocator, ArrayView<MdtMeshlet> meshlets, MeshletAdjacency meshlet_adjacency) {
 	KdTree kd_tree;
 	KdTreeBuildElementsForMeshlets(meshlets, allocator, kd_tree.elements);
 	KdTreeBuild(kd_tree, allocator);
@@ -2789,9 +2803,6 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 				//
 				float shared_edge_count = CountMeshletGroupSharedEdges(meshlet_adjacency, kd_tree.elements, adjacency_info.meshlet_index, meshlet_group_prefix_sum.count);
 				
-				u32 begin_face_index = adjacency_info.meshlet_index ? meshlet_face_prefix_sum[adjacency_info.meshlet_index - 1] : 0;
-				u32 end_face_index   = meshlet_face_prefix_sum[adjacency_info.meshlet_index];
-
 				if (max_shared_edge_count < shared_edge_count) {
 					max_shared_edge_count = shared_edge_count;
 					best_candidate_meshlet_index = adjacency_info.meshlet_index;
@@ -2871,17 +2882,15 @@ static MeshletGroupBuildResult BuildMeshletGroups(MeshView mesh, Allocator& allo
 }
 
 static void ConvertMeshletGroupsToFaceGroups(
-	MeshView mesh,
-	Allocator& allocator,
 	MeshletBuildResult meshlet_build_result,
 	MeshletGroupBuildResult meshlet_group_build_result,
 	Array<FaceID>& meshlet_group_faces,
 	Array<u32>& meshlet_group_face_prefix_sum,
 	Array<MdtErrorMetric>& meshlet_group_error_metrics) {
 	
-	MDT_ASSERT(meshlet_group_faces.capacity           >= mesh.face_count);
-	MDT_ASSERT(meshlet_group_face_prefix_sum.capacity >= mesh.face_count);
-	MDT_ASSERT(meshlet_group_error_metrics.capacity   >= mesh.face_count);
+	MDT_ASSERT(meshlet_group_faces.capacity           >= meshlet_build_result.meshlet_faces.count);
+	MDT_ASSERT(meshlet_group_face_prefix_sum.capacity >= meshlet_build_result.meshlet_faces.count);
+	MDT_ASSERT(meshlet_group_error_metrics.capacity   >= meshlet_build_result.meshlet_faces.count);
 	
 	meshlet_group_faces.count           = 0;
 	meshlet_group_face_prefix_sum.count = 0;
@@ -3259,16 +3268,12 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 		
 		
 		auto meshlet_group_build_result = BuildMeshletGroups(
-			mesh,
 			allocator,
 			meshlet_build_result.meshlets,
-			meshlet_build_result.meshlet_adjacency,
-			meshlet_build_result.meshlet_face_prefix_sum
+			meshlet_build_result.meshlet_adjacency
 		);
 		
 		ConvertMeshletGroupsToFaceGroups(
-			mesh,
-			allocator,
 			meshlet_build_result,
 			meshlet_group_build_result,
 			meshlet_group_faces,
@@ -3533,13 +3538,13 @@ MdtSphereBounds MdtComputeSphereBoundsUnion(const MdtSphereBounds* source_sphere
 		auto max = source_bounds.center + source_bounds.radius;
 		
 		for (u32 axis = 0; axis < 3; axis += 1) {
-			if (aabb_min[axis] > min[axis]) {
-				aabb_min[axis] = min[axis];
+			if (aabb_min[axis] > LoadElementByIndex(min, axis)) {
+				aabb_min[axis] = LoadElementByIndex(min, axis);
 				aabb_min_index[axis] = i;
 			}
 			
-			if (aabb_max[axis] < max[axis]) {
-				aabb_max[axis] = max[axis];
+			if (aabb_max[axis] < LoadElementByIndex(max, axis)) {
+				aabb_max[axis] = LoadElementByIndex(max, axis);
 				aabb_max_index[axis] = i;
 			}
 		}

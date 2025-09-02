@@ -39,12 +39,6 @@ struct MdtVector3 {
 	float x;
 	float y;
 	float z;
-
-#if defined(__cplusplus)	
-	friend bool operator== (const MdtVector3& lh, const MdtVector3& rh) { return lh.x == rh.x && lh.y == rh.y && lh.z == rh.z; }
-	float& operator[] (uint32_t index) { MDT_ASSERT(index < 3); return (&x)[index]; }
-	float operator[] (uint32_t index) const { MDT_ASSERT(index < 3); return (&x)[index]; }
-#endif // defined(__cplusplus)	
 };
 
 struct MdtSphereBounds {
@@ -68,7 +62,7 @@ typedef void* (*MdtReallocCallback)(void* old_memory_block, uint64_t size_bytes,
 
 struct MdtAllocatorCallbacks {
 	// Reallocation callback, see definition of MdtReallocCallback for reference.
-	MdtReallocCallback realloc;
+	MdtReallocCallback reallocate;
 	
 	// User defined allocator state, passed to MdtReallocCallback as user_data argument.
 	void* user_data;
