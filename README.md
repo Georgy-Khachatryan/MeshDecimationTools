@@ -106,19 +106,19 @@ MdtFreeDiscreteLodBuildResult(&result, &callbacks);
 ```
 
 ### Memory allocation
-By default all memory is allocated via C `realloc`. This behavior can be overridden by providing custom `realloc` callbacks for temporary and/or heap allocators.
+By default all memory is allocated via C `realloc`. This behavior can be overridden by providing custom `reallocate` callbacks for temporary and/or heap allocators.
 ```
 MdtSystemCallbacks callbacks = {};
 ```
 Temporary allocator is used for most internal data structures. Library guarantees that allocations are freed in reverse order. This allows temporary allocator to be implemented as a stack.
 ```
-callbacks.temp_allocator.realloc   = &CustomTempAllocatorCallback;
-callbacks.temp_allocator.user_data = &custom_temp_allocator;
+callbacks.temp_allocator.reallocate = &CustomTempAllocatorCallback;
+callbacks.temp_allocator.user_data  = &custom_temp_allocator;
 ```
 Heap allocator is used for all output arrays as well as some internal data structures. Allocations might be freed in any order.
 ```
-callbacks.heap_allocator.realloc   = &CustomHeapAllocatorCallback;
-callbacks.heap_allocator.user_data = &custom_heap_allocator;
+callbacks.heap_allocator.reallocate = &CustomHeapAllocatorCallback;
+callbacks.heap_allocator.user_data  = &custom_heap_allocator;
 ```
 
 ## Continuous level of detail overview
