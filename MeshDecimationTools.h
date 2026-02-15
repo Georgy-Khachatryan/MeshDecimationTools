@@ -72,6 +72,18 @@ struct MdtAllocatorCallbacks {
 	void* user_data;
 };
 
+// MdtParallelForCallback should invoke MdtWorkItemCallback 'work_item_count' times with index and provided mdt_data.
+typedef void (*MdtWorkItemCallback)(void* mdt_data, uint32_t work_item_index);
+typedef void (*MdtParallelForCallback)(void* user_data, void* mdt_data, uint32_t work_item_count, MdtWorkItemCallback callback);
+
+// Optional parallel for callbacks. If they're not provided the system falls sequential execution.
+struct MdtParallelForCallbacks {
+	MdtParallelForCallback callback;
+	
+	// User defined parallel for state, passed to MdtParallelForCallback as user_data argument.
+	void* user_data;
+};
+
 // Optional memory allocation callbacks. If they're not provided the system falls back to C realloc().
 struct MdtSystemCallbacks {
 	//
@@ -85,6 +97,11 @@ struct MdtSystemCallbacks {
 	// Memory blocks are allocated and freed in arbitrary order.
 	//
 	struct MdtAllocatorCallbacks heap_allocator;
+	
+	//
+	// ParallelFor is used to decimate multiple independent sub meshes at the same time.
+	//
+	struct MdtParallelForCallbacks parallel_for;
 };
 
 

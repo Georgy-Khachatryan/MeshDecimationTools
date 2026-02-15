@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <vector>
 #include <chrono>
+#include <algorithm>
+#include <execution>
 
 #pragma warning(disable: 4996)
 
@@ -313,8 +315,13 @@ void WriteWavefrontObjFileCLOD(const MdtContinuousLodBuildResult& mesh, FILE* fi
 
 struct ValidatedAllocator {
 #if ENABLE_ALLOCATOR_VALIDATION
-	u32 allocation_count   = 0;
-	u32 deallocation_count = 0;
+	std::atomic<u32> allocation_count   = 0;
+	std::atomic<u32> deallocation_count = 0;
+	
+	ValidatedAllocator(const ValidatedAllocator&) = delete;
+	ValidatedAllocator(ValidatedAllocator&&) = delete;
+	ValidatedAllocator& operator=(const ValidatedAllocator&) = delete;
+	ValidatedAllocator& operator=(ValidatedAllocator&&) = delete;
 #endif // ENABLE_ALLOCATOR_VALIDATION
 };
 
@@ -322,12 +329,12 @@ static void* ValidatedAllocatorRealloc(void* old_memory_block, u64 size_bytes, v
 #if ENABLE_ALLOCATOR_VALIDATION
 	auto* allocator = (ValidatedAllocator*)user_data;
 	if (old_memory_block != nullptr && size_bytes != 0) { // Reallocate.
-		allocator->allocation_count   += 1;
-		allocator->deallocation_count += 1;
+		allocator->allocation_count.fetch_add(1);
+		allocator->deallocation_count.fetch_add(1);
 	} else if (old_memory_block && size_bytes == 0) { // Deallocate.
-		allocator->deallocation_count += 1;
+		allocator->deallocation_count.fetch_add(1);
 	} else if (old_memory_block == nullptr && size_bytes != 0) { // Allocate.
-		allocator->allocation_count += 1;
+		allocator->allocation_count.fetch_add(1);
 	} else {
 		MDT_ASSERT(old_memory_block == nullptr && size_bytes == 0); // No op.
 	}
@@ -340,6 +347,28 @@ static void* ValidatedAllocatorRealloc(void* old_memory_block, u64 size_bytes, v
 		result = realloc(old_memory_block, size_bytes);
 	}
 	return result;
+}
+
+static void ParallelForCallback(void* /*user_data*/, void* mdt_data, u32 work_item_count, MdtWorkItemCallback callback) {
+	struct Iterator {
+		int64_t index = 0;
+		
+		using value_type = double;
+		using difference_type = int64_t;
+		using pointer = int64_t*;
+		using reference = int64_t&;
+		using iterator_category = std::random_access_iterator_tag;
+		
+		Iterator& operator++ () { index += 1; return *this; }
+		Iterator operator+ (int64_t offset) const  { return { index + offset }; }
+		int64_t operator- (const Iterator& other) const { return index - other.index; }
+		bool operator!= (const Iterator& other) const { return index != other.index; }
+		int64_t operator* () { return index; };
+	};
+	
+	std::for_each(std::execution::par, Iterator{ 0 }, Iterator{ work_item_count }, [&](int64_t work_item_index) {
+		callback(mdt_data, (u32)work_item_index);
+	});
 }
 
 
@@ -409,6 +438,7 @@ int main(int argument_count, char** arguments) {
 	callbacks.temp_allocator.user_data  = &temp_allocator;
 	callbacks.heap_allocator.reallocate = &ValidatedAllocatorRealloc;
 	callbacks.heap_allocator.user_data  = &heap_allocator;
+	callbacks.parallel_for.callback     = &ParallelForCallback;
 	
 	if (options.clod) {
 		MdtContinuousLodBuildInputs inputs = {};
@@ -469,8 +499,8 @@ int main(int argument_count, char** arguments) {
 	}
 	
 #if ENABLE_ALLOCATOR_VALIDATION
-	printf("Temp Allocation Count: %u\n", temp_allocator.allocation_count);
-	printf("Heap Allocation Count: %u\n", heap_allocator.allocation_count);
+	printf("Temp Allocation Count: %u\n", temp_allocator.allocation_count.load());
+	printf("Heap Allocation Count: %u\n", heap_allocator.allocation_count.load());
 	MDT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count); // No live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 	
