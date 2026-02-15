@@ -2520,8 +2520,8 @@ static MeshletAdjacency BuildMeshletAdjacency(
 	Allocator& allocator,
 	ArrayView<u32> corner_list_around_vertex,
 	ArrayView<u32> corner_list_around_vertex_prefix_sum,
-	ArrayView<u32> meshlet_face_prefix_sum,
-	ArrayView<FaceID> meshlet_faces,
+	ArrayView<CornerID> meshlet_corners,
+	ArrayView<u32> meshlet_corner_prefix_sum,
 	ArrayView<KdTreeElement> kd_tree_elements);
 
 //
@@ -2927,8 +2927,8 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 		allocator,
 		CreateArrayView(corner_list_around_vertex),
 		CreateArrayView(corner_list_around_vertex_prefix_sum),
-		result.meshlet_face_prefix_sum,
-		result.meshlet_faces,
+		result.meshlet_corners,
+		result.meshlet_corner_prefix_sum,
 		CreateArrayView(kd_tree.elements)
 	);
 	
@@ -2940,24 +2940,30 @@ static MeshletAdjacency BuildMeshletAdjacency(
 	Allocator& allocator,
 	ArrayView<u32> corner_list_around_vertex,
 	ArrayView<u32> corner_list_around_vertex_prefix_sum,
-	ArrayView<u32> meshlet_face_prefix_sum,
-	ArrayView<FaceID> meshlet_faces,
+	ArrayView<CornerID> meshlet_corners,
+	ArrayView<u32> meshlet_corner_prefix_sum,
 	ArrayView<KdTreeElement> kd_tree_elements) {
 	
 	MDT_PROFILER_SCOPE("BuildMeshletAdjacency");
 	
+	FixedSizeArray<VertexID, meshlet_max_vertex_count> counted_vertex_ids;
+	
+	Array<u8> is_vertex_counted;
+	ArrayResizeMemset(is_vertex_counted, allocator, mesh.vertex_count, 0);
+	
 	Array<u32> meshlet_adjacency_info_indices;
-	ArrayResizeMemset(meshlet_adjacency_info_indices, allocator, meshlet_face_prefix_sum.count, 0xFF);
+	ArrayResizeMemset(meshlet_adjacency_info_indices, allocator, meshlet_corner_prefix_sum.count, 0xFF);
 	
 	Array<u32> meshlet_adjacency_prefix_sum;
 	Array<MeshletAdjacencyInfo> meshlet_adjacency_infos;
-	ArrayReserve(meshlet_adjacency_prefix_sum, allocator, meshlet_face_prefix_sum.count);
-	// Must be the last allocation on the memory block stack as it might grow.
-	ArrayReserve(meshlet_adjacency_infos, allocator, meshlet_face_prefix_sum.count * 8);
+	ArrayReserve(meshlet_adjacency_prefix_sum, allocator, meshlet_corner_prefix_sum.count);
 	
-	u32 begin_face_index = 0;
-	for (u32 meshlet_index = 0; meshlet_index < meshlet_face_prefix_sum.count; meshlet_index += 1) {
-		u32 end_face_index = meshlet_face_prefix_sum[meshlet_index];
+	// Must be the last allocation on the memory block stack as it might grow.
+	ArrayReserve(meshlet_adjacency_infos, allocator, meshlet_corner_prefix_sum.count * 8);
+	
+	u32 begin_corner_index = 0;
+	for (u32 meshlet_index = 0; meshlet_index < meshlet_corner_prefix_sum.count; meshlet_index += 1) {
+		u32 end_corner_index = meshlet_corner_prefix_sum[meshlet_index];
 		
 		// At least reserve one meshlet per face edge. Do this upfront instead of adding code in the inner loop to improve performance.
 		compile_const u32 reserve_size = meshlet_max_face_count * meshlet_max_face_degree;
@@ -2966,42 +2972,57 @@ static MeshletAdjacency BuildMeshletAdjacency(
 		}
 		
 		u32 begin_adjacency_info_index = meshlet_adjacency_infos.count;
-		for (u32 face_index = begin_face_index; face_index < end_face_index; face_index += 1) {
-			auto face_id = meshlet_faces[face_index];
+		for (u32 corner_index = begin_corner_index; corner_index < end_corner_index; corner_index += 1) {
+			auto corner_id = meshlet_corners[corner_index];
+			auto vertex_id = mesh.face_vertex_ids[corner_id.index];
 			
-			for (u32 corner_index = 0; corner_index < 3; corner_index += 1) {
-				u32  corner_id = face_id.index * 3 + corner_index;
-				auto vertex_id = mesh.face_vertex_ids[corner_id];
+			// Count each vertex at most once per meshlet.
+			if (is_vertex_counted[vertex_id.index] != 0) continue;
+			
+			is_vertex_counted[vertex_id.index] = 0xFF;
+			ArrayAppend(counted_vertex_ids, vertex_id);
+			
+			u32 corner_list_begin_index = corner_list_around_vertex_prefix_sum[vertex_id.index];
+			u32 corner_list_end_index   = corner_list_around_vertex_prefix_sum[vertex_id.index + 1];
+			
+			// At least approximately deduplicate meshlets within the corner list of the given vertex.
+			FixedSizeArray<u32, 16> other_meshlet_indices;
+			
+			for (u32 corner_list_index = corner_list_begin_index; corner_list_index < corner_list_end_index; corner_list_index += 1) {
+				u32 other_corner_id = corner_list_around_vertex[corner_list_index];
+				auto other_face_id = FaceID{ other_corner_id / 3 };
 				
-				u32 corner_list_begin_index = corner_list_around_vertex_prefix_sum[vertex_id.index];
-				u32 corner_list_end_index   = corner_list_around_vertex_prefix_sum[vertex_id.index + 1];
+				u32 other_meshlet_index = kd_tree_elements[other_face_id.index].partition_index;
+				if (other_meshlet_index == meshlet_index) continue;
 				
-				for (u32 corner_list_index = corner_list_begin_index; corner_list_index < corner_list_end_index; corner_list_index += 1) {
-					u32 other_corner_id = corner_list_around_vertex[corner_list_index];
-					auto other_face_id = FaceID{ other_corner_id / 3 };
+				bool meshlet_is_already_counted = false;
+				for (u32 i = 0; i < other_meshlet_indices.count && meshlet_is_already_counted == false; i += 1) {
+					meshlet_is_already_counted |= other_meshlet_indices[i] == other_meshlet_index;
+				}
+				if (meshlet_is_already_counted) continue;
+				
+				if (other_meshlet_indices.count < other_meshlet_indices.capacity) {
+					ArrayAppend(other_meshlet_indices, other_meshlet_index);
+				}
+				
+				MDT_ASSERT(kd_tree_elements[other_face_id.index].is_active_element == 0); // Face isn't a part of any meshlet.
+				
+				u32 adjacency_info_index = meshlet_adjacency_info_indices[other_meshlet_index];
+				if (adjacency_info_index == u32_max) {
+					adjacency_info_index = meshlet_adjacency_infos.count;
 					
-					u32 other_meshlet_index = kd_tree_elements[other_face_id.index].partition_index;
-					if (other_meshlet_index == meshlet_index) continue;
+					// Enough memory should be reserved upfront. Reserving directly in this loop
+					// slows down adjacency search by 40% even if we never need to grow the array.
+					if (meshlet_adjacency_infos.count >= meshlet_adjacency_infos.capacity) continue;
 					
-					MDT_ASSERT(kd_tree_elements[other_face_id.index].is_active_element == 0); // Face isn't a part of any meshlet.
+					meshlet_adjacency_info_indices[other_meshlet_index] = meshlet_adjacency_infos.count;
 					
-					u32 adjacency_info_index = meshlet_adjacency_info_indices[other_meshlet_index];
-					if (adjacency_info_index == u32_max) {
-						adjacency_info_index = meshlet_adjacency_infos.count;
-						
-						// Enough memory should be reserved upfront. Reserving directly in this loop
-						// slows down adjacency search by 40% even if we never need to grow the array.
-						if (meshlet_adjacency_infos.count >= meshlet_adjacency_infos.capacity) continue;
-						
-						meshlet_adjacency_info_indices[other_meshlet_index] = meshlet_adjacency_infos.count;
-						
-						MeshletAdjacencyInfo info;
-						info.meshlet_index     = other_meshlet_index;
-						info.shared_edge_count = 1;
-						ArrayAppend(meshlet_adjacency_infos, info);
-					} else {
-						meshlet_adjacency_infos[adjacency_info_index].shared_edge_count += 1;
-					}
+					MeshletAdjacencyInfo info;
+					info.meshlet_index     = other_meshlet_index;
+					info.shared_edge_count = 1;
+					ArrayAppend(meshlet_adjacency_infos, info);
+				} else {
+					meshlet_adjacency_infos[adjacency_info_index].shared_edge_count += 1;
 				}
 			}
 		}
@@ -3013,7 +3034,12 @@ static MeshletAdjacency BuildMeshletAdjacency(
 			meshlet_adjacency_info_indices[meshlet_adjacency_infos[adjacency_info_index].meshlet_index] = u32_max;
 		}
 		
-		begin_face_index = end_face_index;
+		for (auto vertex_id : counted_vertex_ids) {
+			is_vertex_counted[vertex_id.index] = 0;
+		}
+		counted_vertex_ids.count = 0;
+		
+		begin_corner_index = end_corner_index;
 	}
 	
 	MeshletAdjacency meshlet_adjacency;
