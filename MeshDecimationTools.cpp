@@ -290,11 +290,19 @@ static void IterateCornerList(EditableMeshView mesh, CornerID corner_list_base, 
 	} while (current_corner_id.index != corner_list_base.index && element.corner_list_base.index != u32_max);
 }
 
+template<typename Lambda>
+static void IterateIncomingAndOutgoingFaceCornerEdges(EditableMeshView mesh, CornerID corner_list_base, Lambda&& lambda) {
+	auto corner_id_0 = mesh[corner_list_base].corner_list_around[(u32)FaceID::element_type].prev;
+	auto corner_id_1 = corner_list_base;
+	
+	lambda(corner_id_0); // Incoming
+	lambda(corner_id_1); // Outgoing
+}
+
 always_inline_function static void PatchReferencesToElement(EditableMeshView mesh, VertexID element_0, VertexID element_1, CornerID corner_id) {
 	mesh[corner_id].vertex_id = element_0;
 	
-	// TODO: This can be iteration over just incoming and outgoing edges of a corner.
-	IterateCornerList<FaceID>(mesh, corner_id, [&](CornerID corner_id) {
+	IterateIncomingAndOutgoingFaceCornerEdges(mesh, corner_id, [&](CornerID corner_id) {
 		auto& edge = mesh[mesh[corner_id].edge_id];
 		if (edge.vertex_0.index == element_1.index) edge.vertex_0 = element_0;
 		if (edge.vertex_1.index == element_1.index) edge.vertex_1 = element_0;
@@ -843,8 +851,7 @@ static EdgeCollapseResult PerformEdgeCollapse(EditableMeshView mesh, EdgeID edge
 		auto remaining_base_id = mesh[remaining_vertex_id].corner_list_base;
 		
 		IterateCornerList<VertexID>(mesh, remaining_base_id, [&](CornerID corner_id) {
-			// TODO: This can be iteration over just incoming and outgoing edges of a corner.
-			IterateCornerList<FaceID>(mesh, corner_id, [&](CornerID corner_id) {
+			IterateIncomingAndOutgoingFaceCornerEdges(mesh, corner_id, [&](CornerID corner_id) {
 				auto edge_id_1 = mesh[corner_id].edge_id;
 				auto& edge_1 = mesh[edge_id_1];
 				
@@ -863,7 +870,7 @@ static EdgeCollapseResult PerformEdgeCollapse(EditableMeshView mesh, EdgeID edge
 				IterateCornerList<VertexID>(mesh, corner_id_1, [&](CornerID corner_id_2) {
 					if (corner_id_1.index == corner_id_2.index) return;
 					
-					IterateCornerList<FaceID>(mesh, corner_id_2, [&](CornerID corner_id) {
+					IterateIncomingAndOutgoingFaceCornerEdges(mesh, corner_id_2, [&](CornerID corner_id) {
 						auto edge_id = mesh[corner_id].edge_id;
 						auto& edge = mesh[edge_id];
 						
@@ -3328,6 +3335,7 @@ static ArrayView<FaceID> CreateMeshFaceRemap(IndexedMeshView& mesh, Allocator& a
 			
 			memcpy(&mesh.face_vertex_ids[new_face_id.index * 3], &mesh.face_vertex_ids[old_face_id.index * 3], 3 * sizeof(VertexID));
 			memcpy(&mesh.face_attribute_ids[new_face_id.index * 3], &mesh.face_attribute_ids[old_face_id.index * 3], 3 * sizeof(AttributesID));
+			mesh.face_geometry_indices[new_face_id.index] = mesh.face_geometry_indices[old_face_id.index];
 		}
 		old_face_id_to_new_face_id[old_face_id.index] = new_face_id;
 	}

@@ -353,7 +353,7 @@ static void ParallelForCallback(void* /*user_data*/, void* mdt_data, u32 work_it
 	struct Iterator {
 		int64_t index = 0;
 		
-		using value_type = double;
+		using value_type = int64_t;
 		using difference_type = int64_t;
 		using pointer = int64_t*;
 		using reference = int64_t&;
