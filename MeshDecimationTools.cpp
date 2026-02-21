@@ -36,6 +36,19 @@
 #define MDT_UNUSED_VARIABLE(name) (void)(name)
 #endif // !defined(MDT_UNUSED_VARIABLE)
 
+#if defined(__AVX__) && !defined(MDT_ENABLE_AVX)
+#define MDT_ENABLE_AVX 1
+#endif // defined(__AVX__) && !defined(MDT_ENABLE_AVX)
+
+// Using AVX + FMA gives a different result from scalar or just AVX. AVX and scalar match each other.
+#if !defined(MDT_ENABLE_FMA)
+#define MDT_ENABLE_FMA 0
+#endif // defined(MDT_ENABLE_FMA)
+
+#if defined(MDT_ENABLE_AVX)
+#include <immintrin.h>
+#endif // defined(MDT_ENABLE_AVX)
+
 #define compile_const constexpr static const
 
 
@@ -70,6 +83,9 @@ compile_const u32 continuous_lod_max_levels_of_details = MDT_MAX_CLOD_LEVEL_COUN
 
 compile_const float default_geometric_error_weight = 0.5f;
 compile_const float default_attribute_error_weight = 1.f;
+compile_const u32 edge_collapse_candidate_position_count = 3;
+compile_const u32 max_edge_collapse_validation_face_count = 32;
+
 
 // Based on [Kapoulkine 2025] and [Teschner 2003].
 static u32 ComputePositionHash(const Vector3& v) {
@@ -188,11 +204,11 @@ struct alignas(MDT_CACHE_LINE_SIZE) EditableMeshView {
 	u32 attribute_count = 0;
 	u32 attribute_stride_dwords = 0;
 	
-	Face&   operator[] (FaceID face_id)             { return faces[face_id.index]; }
-	Edge&   operator[] (EdgeID edge_id)             { return edges[edge_id.index]; }
-	Vertex& operator[] (VertexID vertex_id)         { return vertices[vertex_id.index]; }
-	Corner& operator[] (CornerID corner_id)         { return corners[corner_id.index]; }
-	float*  operator[] (AttributesID attributes_id) { return attributes + attributes_id.index * attribute_stride_dwords; }
+	Face&   operator[] (FaceID face_id) const             { return faces[face_id.index]; }
+	Edge&   operator[] (EdgeID edge_id) const             { return edges[edge_id.index]; }
+	Vertex& operator[] (VertexID vertex_id) const         { return vertices[vertex_id.index]; }
+	Corner& operator[] (CornerID corner_id) const         { return corners[corner_id.index]; }
+	float*  operator[] (AttributesID attributes_id) const { return attributes + attributes_id.index * attribute_stride_dwords; }
 };
 static_assert(sizeof(EditableMeshView) == 64, "Invalid EditableMeshView size.");
 
@@ -210,8 +226,8 @@ struct alignas(MDT_CACHE_LINE_SIZE) IndexedMeshView {
 	
 	u64 padding = 0;
 	
-	Vector3& operator[] (VertexID vertex_id)         { return vertices[vertex_id.index]; }
-	float*   operator[] (AttributesID attributes_id) { return attributes + attributes_id.index * attribute_stride_dwords; }
+	Vector3& operator[] (VertexID vertex_id) const         { return vertices[vertex_id.index]; }
+	float*   operator[] (AttributesID attributes_id) const { return attributes + attributes_id.index * attribute_stride_dwords; }
 };
 static_assert(sizeof(IndexedMeshView) == 64, "Invalid IndexedMeshView size.");
 
@@ -232,7 +248,7 @@ template<> always_inline_function EdgeID GetElementID<EdgeID>(const Corner& corn
 template<> always_inline_function FaceID GetElementID<FaceID>(const Corner& corner) { return corner.face_id; }
 
 template<typename ElementID>
-static void CornerListInsert(EditableMeshView mesh, ElementID element_id, CornerID new_corner_id) {
+static void CornerListInsert(const EditableMeshView& mesh, ElementID element_id, CornerID new_corner_id) {
 	auto& corner  = mesh[new_corner_id];
 	auto& element = mesh[element_id];
 	
@@ -252,7 +268,7 @@ static void CornerListInsert(EditableMeshView mesh, ElementID element_id, Corner
 }
 
 template<typename ElementID>
-static bool CornerListRemove(EditableMeshView mesh, CornerID corner_id) {
+static bool CornerListRemove(const EditableMeshView& mesh, CornerID corner_id) {
 	compile_const u32 element_type = (u32)ElementID::element_type;
 	
 	auto& corner = mesh[corner_id];
@@ -277,7 +293,7 @@ static bool CornerListRemove(EditableMeshView mesh, CornerID corner_id) {
 // Iterate linked list around a given element type starting with the base corner id. 
 // Removal while iterating is allowed.
 template<typename ElementID, typename Lambda>
-static void IterateCornerList(EditableMeshView mesh, CornerID corner_list_base, Lambda&& lambda) {
+static void IterateCornerList(const EditableMeshView& mesh, CornerID corner_list_base, Lambda&& lambda) {
 	auto& element = mesh[GetElementID<ElementID>(mesh[corner_list_base])];
 	
 	auto current_corner_id = corner_list_base;
@@ -291,7 +307,7 @@ static void IterateCornerList(EditableMeshView mesh, CornerID corner_list_base, 
 }
 
 template<typename Lambda>
-static void IterateIncomingAndOutgoingFaceCornerEdges(EditableMeshView mesh, CornerID corner_list_base, Lambda&& lambda) {
+static void IterateIncomingAndOutgoingFaceCornerEdges(const EditableMeshView& mesh, CornerID corner_list_base, Lambda&& lambda) {
 	auto corner_id_0 = mesh[corner_list_base].corner_list_around[(u32)FaceID::element_type].prev;
 	auto corner_id_1 = corner_list_base;
 	
@@ -299,7 +315,7 @@ static void IterateIncomingAndOutgoingFaceCornerEdges(EditableMeshView mesh, Cor
 	lambda(corner_id_1); // Outgoing
 }
 
-always_inline_function static void PatchReferencesToElement(EditableMeshView mesh, VertexID element_0, VertexID element_1, CornerID corner_id) {
+always_inline_function static void PatchReferencesToElement(const EditableMeshView& mesh, VertexID element_0, VertexID element_1, CornerID corner_id) {
 	mesh[corner_id].vertex_id = element_0;
 	
 	IterateIncomingAndOutgoingFaceCornerEdges(mesh, corner_id, [&](CornerID corner_id) {
@@ -310,14 +326,14 @@ always_inline_function static void PatchReferencesToElement(EditableMeshView mes
 	});
 }
 
-always_inline_function static void PatchReferencesToElement(EditableMeshView mesh, EdgeID element_0, EdgeID /*element_1*/, CornerID corner_id) {
+always_inline_function static void PatchReferencesToElement(const EditableMeshView& mesh, EdgeID element_0, EdgeID /*element_1*/, CornerID corner_id) {
 	mesh[corner_id].edge_id = element_0;
 }
 
 // Merge linked lists around element_0 and element_1 and remove element_1.
 // Patch up references to element_1 with a reference to element_0.
 template<typename ElementID>
-static ElementID CornerListMerge(EditableMeshView mesh, ElementID element_0, ElementID element_1) {
+static ElementID CornerListMerge(const EditableMeshView& mesh, ElementID element_0, ElementID element_1) {
 	auto base_id_0 = mesh[element_0].corner_list_base;
 	auto base_id_1 = mesh[element_1].corner_list_base;
 	
@@ -820,7 +836,7 @@ struct EdgeCollapseResult {
 	u32 removed_face_count = 0;
 };
 
-static EdgeCollapseResult PerformEdgeCollapse(EditableMeshView mesh, EdgeID edge_id, Allocator& heap_allocator, EdgeDuplicateMap& edge_duplicate_map, Array<EdgeID>& removed_edge_array) {
+static EdgeCollapseResult PerformEdgeCollapse(const EditableMeshView& mesh, EdgeID edge_id, Allocator& heap_allocator, EdgeDuplicateMap& edge_duplicate_map, Array<EdgeID>& removed_edge_array) {
 	auto& edge = mesh[edge_id];
 	
 	MDT_ASSERT(edge.vertex_0.index != edge.vertex_1.index);
@@ -979,6 +995,65 @@ always_inline_function T Clamp(T value, T min, T max) {
 	if (value > max) value = max;
 	return value;
 }
+
+
+#if MDT_ENABLE_AVX
+#define VectorLoadSimd(result, address, stride)\
+	auto result##x = _mm256_loadu_ps((address) + (stride) * 0);\
+	auto result##y = _mm256_loadu_ps((address) + (stride) * 1);\
+	auto result##z = _mm256_loadu_ps((address) + (stride) * 2)
+
+#define VectorLoadBroadcastSimd(result, address)\
+	auto result##x = _mm256_broadcast_ss(address + 0);\
+	auto result##y = _mm256_broadcast_ss(address + 1);\
+	auto result##z = _mm256_broadcast_ss(address + 2)
+
+#define VectorLoadConstantSimd(result, constant)\
+	auto result = _mm256_set1_ps(constant);
+
+#define VectorLoadZeroSimd(result)\
+	auto result = _mm256_setzero_ps();
+
+#define VectorSubSimd(result, lh, rh)\
+	auto result##x = _mm256_sub_ps(lh##x, rh##x);\
+	auto result##y = _mm256_sub_ps(lh##y, rh##y);\
+	auto result##z = _mm256_sub_ps(lh##z, rh##z)
+
+#if MDT_ENABLE_FMA
+#define CrossProductSimd(result, lh, rh)\
+	auto result##x = _mm256_fmsub_ps(lh##y, rh##z, _mm256_mul_ps(lh##z, rh##y));\
+	auto result##y = _mm256_fmsub_ps(lh##z, rh##x, _mm256_mul_ps(lh##x, rh##z));\
+	auto result##z = _mm256_fmsub_ps(lh##x, rh##y, _mm256_mul_ps(lh##y, rh##x))
+#else // !MDT_ENABLE_FMA
+#define CrossProductSimd(result, lh, rh)\
+	auto result##x = _mm256_sub_ps(_mm256_mul_ps(lh##y, rh##z), _mm256_mul_ps(lh##z, rh##y));\
+	auto result##y = _mm256_sub_ps(_mm256_mul_ps(lh##z, rh##x), _mm256_mul_ps(lh##x, rh##z));\
+	auto result##z = _mm256_sub_ps(_mm256_mul_ps(lh##x, rh##y), _mm256_mul_ps(lh##y, rh##x))
+#endif // !MDT_ENABLE_FMA
+
+#if MDT_ENABLE_FMA
+#define DotProductSimd(result, lh, rh)\
+	auto result = _mm256_fmadd_ps(lh##x, rh##x, _mm256_fmadd_ps(lh##y, rh##y, _mm256_mul_ps(lh##z, rh##z)))
+#else // !MDT_ENABLE_FMA
+#define DotProductSimd(result, lh, rh)\
+	auto result = _mm256_add_ps(_mm256_mul_ps(lh##x, rh##x), _mm256_add_ps(_mm256_mul_ps(lh##y, rh##y), _mm256_mul_ps(lh##z, rh##z)))
+#endif // !MDT_ENABLE_FMA
+
+#define CompareLessThanSimd(result, lh, rh)\
+	auto result = _mm256_movemask_ps(_mm256_cmp_ps(lh, rh, _CMP_LT_OS));
+
+#define CompareGreaterThanSimd(result, lh, rh)\
+	auto result = _mm256_movemask_ps(_mm256_cmp_ps(lh, rh, _CMP_GT_OS));
+
+#define GetSimdWidth() 8u
+#else // !MDT_ENABLE_AVX
+#define GetSimdWidth() 1u
+#endif // !MDT_ENABLE_AVX
+
+#define VectorStoreSOA(address, vector, stride)\
+	(address)[stride * 0] = vector.x;\
+	(address)[stride * 1] = vector.y;\
+	(address)[stride * 2] = vector.z;
 
 
 static void AccumulateQuadric(Quadric& accumulator, const Quadric& quadric) {
@@ -1307,51 +1382,74 @@ static bool ComputeOptimalVertexPosition(const QuadricWithAttributes& quadric, V
 	return true;
 }
 
-// Check if any triangle around the collapsed edge is flipped or becomes zero area, excluding collapsed triangles.
-static u32 ValidateEdgeCollapsePositions(EditableMeshView mesh, Edge edge, Vector3* candidate_positions, u32 candidate_position_count) {
-	u32 valid_position_mask = (1u << candidate_position_count) - 1u;
+// Check if any face normal around the collapsed edge is flipped or becomes zero area, excluding collapsed faces.
+static u32 ValidateEdgeCollapsePositions(const EditableMeshView& mesh, Vector3 candidate_positions[edge_collapse_candidate_position_count], float face_vertex_positions[max_edge_collapse_validation_face_count * 9], u32 face_count) {
+	u32 valid_position_mask = (1u << edge_collapse_candidate_position_count) - 1u;
 	
-	auto check_triangle_flip_for_vertex = [&](CornerID corner_id) {
-		auto& c1 = mesh[corner_id];
+#if GetSimdWidth() != 1
+	VectorLoadConstantSimd(eps, FLT_EPSILON);
+	VectorLoadZeroSimd(zero);
+	
+	compile_const u32 stride = max_edge_collapse_validation_face_count;
+	
+	u32 iteration_count = (face_count + GetSimdWidth() - 1) / GetSimdWidth();
+	for (u32 i = 0; i < iteration_count; i += 1) {
+		VectorLoadSimd(p0, face_vertex_positions + i * GetSimdWidth() + stride * 0, stride);
+		VectorLoadSimd(p1, face_vertex_positions + i * GetSimdWidth() + stride * 3, stride);
+		VectorLoadSimd(p2, face_vertex_positions + i * GetSimdWidth() + stride * 6, stride);
 		
-		auto v0 = mesh[c1.corner_list_around[(u32)ElementType::Face].prev].vertex_id;
-		auto v1 = c1.vertex_id;
-		auto v2 = mesh[c1.corner_list_around[(u32)ElementType::Face].next].vertex_id;
+		VectorSubSimd(p20, p2, p0);
+		VectorSubSimd(p21, p2, p1);
+		CrossProductSimd(n0, p21, p20);
 		
-		Vector3 p[3] = {
-			mesh[v0].position,
-			mesh[v1].position,
-			mesh[v2].position,
-		};
+		DotProductSimd(n0l, n0, n0);
+		CompareGreaterThanSimd(is_non_zero_area_old, n0l, eps);
 		
-		auto n0 = CrossProduct(p[1] - p[0], p[2] - p[0]);
+		u32 lane_count = (face_count - i * GetSimdWidth());
+		u32 active_lane_mask = lane_count > GetSimdWidth() ? ((1u << GetSimdWidth()) - 1) : ((1u << lane_count) - 1);
 		
-		u32 replaced_vertex_count = 0;
-		u32 replaced_vertex_index = 0;
-		if (v0.index == edge.vertex_0.index || v0.index == edge.vertex_1.index) { replaced_vertex_count += 1; replaced_vertex_index = 0; }
-		if (v1.index == edge.vertex_0.index || v1.index == edge.vertex_1.index) { replaced_vertex_count += 1; replaced_vertex_index = 1; }
-		if (v2.index == edge.vertex_0.index || v2.index == edge.vertex_1.index) { replaced_vertex_count += 1; replaced_vertex_index = 2; }
-		
-		// Replaced vertex count == 0 is impossible.
-		// Replaced vertex count == 2 is true for triangles that would get collapsed, we don't need to check if they flip.
-		if (replaced_vertex_count == 1) {
-			for (u32 i = 0; i < candidate_position_count; i += 1) {
-				p[replaced_vertex_index] = candidate_positions[i];
-				
-				auto n1 = CrossProduct(p[1] - p[0], p[2] - p[0]);
-				
-				// Prevent flipped or zero area triangles.
-				bool reject_edge_collapse = (DotProduct(n0, n1) < 0.f) || (DotProduct(n0, n0) > FLT_EPSILON && DotProduct(n1, n1) < FLT_EPSILON);
-				
-				if (reject_edge_collapse) {
-					valid_position_mask &= ~(1u << i);
-				}
+		for (u32 candidate_index = 0; candidate_index < edge_collapse_candidate_position_count; candidate_index += 1) {
+			VectorLoadBroadcastSimd(c, &candidate_positions[candidate_index].x);
+			
+			VectorSubSimd(p2c, p2, c);
+			CrossProductSimd(n1, p2c, p20); // p1 is replaced with the candidate vertex.
+			
+			DotProductSimd(n0n1, n0, n1);
+			CompareLessThanSimd(is_flipped, n0n1, zero);
+			
+			DotProductSimd(n1l, n1, n1);
+			CompareLessThanSimd(is_zero_area_new, n1l, eps);
+			
+			// Prevent flipped face normals and zero area faces.
+			bool reject_edge_collapse = ((is_flipped | (is_non_zero_area_old & is_zero_area_new)) & active_lane_mask) != 0;
+			
+			if (reject_edge_collapse) {
+				valid_position_mask &= ~(1u << candidate_index);
 			}
 		}
-	};
-	
-	if (valid_position_mask) IterateCornerList<VertexID>(mesh, mesh[edge.vertex_0].corner_list_base, check_triangle_flip_for_vertex);
-	if (valid_position_mask) IterateCornerList<VertexID>(mesh, mesh[edge.vertex_1].corner_list_base, check_triangle_flip_for_vertex);
+	}
+#else // GetSimdWidth() == 1
+	for (u32 i = 0; i < face_count; i += 1) {
+		auto p0 = Vector3{ face_vertex_positions[i * 9 + 0], face_vertex_positions[i * 9 + 1], face_vertex_positions[i * 9 + 2] };
+		auto p1 = Vector3{ face_vertex_positions[i * 9 + 3], face_vertex_positions[i * 9 + 4], face_vertex_positions[i * 9 + 5] };
+		auto p2 = Vector3{ face_vertex_positions[i * 9 + 6], face_vertex_positions[i * 9 + 7], face_vertex_positions[i * 9 + 8] };
+		
+		auto p20 = p2 - p0;
+		auto n0 = CrossProduct(p2 - p1, p20);
+		
+		bool is_non_zero_area = DotProduct(n0, n0) > FLT_EPSILON;
+		for (u32 i = 0; i < edge_collapse_candidate_position_count; i += 1) {
+			auto n1 = CrossProduct(p2 - candidate_positions[i], p20); // p1 is replaced with the candidate vertex.
+			
+			// Prevent flipped face normals and zero area faces.
+			bool reject_edge_collapse = (DotProduct(n0, n1) < 0.f) || (is_non_zero_area && DotProduct(n1, n1) < FLT_EPSILON);
+			
+			if (reject_edge_collapse) {
+				valid_position_mask &= ~(1u << i);
+			}
+		}
+	}
+#endif // GetSimdWidth() == 1
 	
 	return valid_position_mask;
 }
@@ -1442,7 +1540,7 @@ struct EdgeCollapseError {
 	Vector3 new_position;
 };
 
-static EdgeCollapseError ComputeEdgeCollapseError(EditableMeshView mesh, Allocator& heap_allocator, MeshDecimationState& state, EdgeID edge_id) {
+static EdgeCollapseError ComputeEdgeCollapseError(const EditableMeshView& mesh, Allocator& heap_allocator, MeshDecimationState& state, EdgeID edge_id) {
 	state.wedge_quadrics.count       = 0;
 	state.wedge_attributes_ids.count = 0;
 	state.wedge_attribute_set.count  = 0;
@@ -1477,13 +1575,46 @@ static EdgeCollapseError ComputeEdgeCollapseError(EditableMeshView mesh, Allocat
 		}
 	});
 	
+	alignas(MDT_CACHE_LINE_SIZE) float face_vertex_positions[max_edge_collapse_validation_face_count * 9];
+	u32 face_index = 0;
+	
 	auto accumulate_quadrics = [&](CornerID corner_id) {
-		auto attribute_id = mesh[corner_id].attributes_id;
+		auto& corner = mesh[corner_id];
+		auto attribute_id = corner.attributes_id;
 		
 		if (AttributeWedgeMapFind(state.wedge_attribute_set, attribute_id) == u32_max) {
 			AttributeWedgeMapAdd(state.wedge_attribute_set,  attribute_id,   state.wedge_quadrics.count);
 			ArrayAppendMaybeGrow(state.wedge_quadrics,       heap_allocator, state.attribute_face_quadrics[attribute_id.index]);
 			ArrayAppendMaybeGrow(state.wedge_attributes_ids, heap_allocator, attribute_id);
+		}
+		
+		auto v0 = mesh[corner.corner_list_around[(u32)ElementType::Face].prev].vertex_id;
+		auto v1 = corner.vertex_id; // v1 is always the vertex being replaced with a candidate.
+		auto v2 = mesh[corner.corner_list_around[(u32)ElementType::Face].next].vertex_id;
+		
+		bool is_collapsed_face =
+			(v0.index == edge.vertex_0.index || v0.index == edge.vertex_1.index) ||
+			(v2.index == edge.vertex_0.index || v2.index == edge.vertex_1.index);
+		
+		if (is_collapsed_face == false && face_index < 32) {
+			auto p0 = mesh[v0].position;
+			auto p1 = mesh[v1].position;
+			auto p2 = mesh[v2].position;
+			
+#if GetSimdWidth() != 1
+			compile_const u32 stride = max_edge_collapse_validation_face_count;
+			auto* positions = face_vertex_positions + face_index;
+			VectorStoreSOA(positions + stride * 0, p0, stride);
+			VectorStoreSOA(positions + stride * 3, p1, stride);
+			VectorStoreSOA(positions + stride * 6, p2, stride);
+#else // GetSimdWidth() == 1
+			auto* positions = face_vertex_positions + face_index * 9;
+			VectorStoreSOA(positions + 0, p0, 1);
+			VectorStoreSOA(positions + 3, p1, 1);
+			VectorStoreSOA(positions + 6, p2, 1);
+#endif // GetSimdWidth() == 1
+			
+			face_index += 1;
 		}
 	};
 	
@@ -1500,8 +1631,7 @@ static EdgeCollapseError ComputeEdgeCollapseError(EditableMeshView mesh, Allocat
 		AccumulateQuadric(edge_quadrics, state.vertex_edge_quadrics[edge.vertex_1.index]);
 		
 		// Try a few different positions for the new vertex.
-		compile_const u32 candidate_position_count = 3;
-		Vector3 candidate_positions[candidate_position_count];
+		Vector3 candidate_positions[edge_collapse_candidate_position_count];
 		candidate_positions[0] = v0.position;
 		candidate_positions[1] = v1.position;
 		candidate_positions[2] = (candidate_positions[0] + candidate_positions[1]) * 0.5f;
@@ -1521,9 +1651,9 @@ static EdgeCollapseError ComputeEdgeCollapseError(EditableMeshView mesh, Allocat
 		}
 		
 		// ~30% of the execution time.
-		u32 valid_position_mask = ValidateEdgeCollapsePositions(mesh, edge, candidate_positions, candidate_position_count);
+		u32 valid_position_mask = ValidateEdgeCollapsePositions(mesh, candidate_positions, face_vertex_positions, face_index);
 		
-		for (u32 i = 0; i < candidate_position_count; i += 1) {
+		for (u32 i = 0; i < edge_collapse_candidate_position_count; i += 1) {
 			float error = valid_position_mask & (1u << i) ? 0.f : total_quadric.weight;
 			if (error > collapse_error.min_error) continue;
 			
@@ -1680,7 +1810,7 @@ static void AllocateMeshDecimationState(u32 vertex_count, u32 attribute_count, u
 	HashTableGrow(state.edge_duplicate_map,  heap_allocator, ComputeHashTableSize(128u));
 }
 
-static void InitializeMeshDecimationState(EditableMeshView mesh, const MdtTriangleMeshDesc& mesh_desc, MeshDecimationState& state) {
+static void InitializeMeshDecimationState(const EditableMeshView& mesh, const MdtTriangleMeshDesc& mesh_desc, MeshDecimationState& state) {
 	MDT_PROFILER_SCOPE("InitializeMeshDecimationState");
 	
 	state.vertex_edge_quadrics.count = mesh.vertex_count;
@@ -1814,7 +1944,7 @@ static void InitializeMeshDecimationState(EditableMeshView mesh, const MdtTriang
 }
 
 static float DecimateMeshFaceGroup(
-	EditableMeshView mesh,
+	const EditableMeshView& mesh,
 	Allocator& heap_allocator,
 	MeshDecimationState& state,
 	EdgeCollapseHeap& edge_collapse_heap,
@@ -1937,7 +2067,7 @@ struct DecimationThreadContext {
 	Array<u8> sub_mesh_changed_vertex_mask;
 };
 
-static void AllocateDecimationThreadContext(DecimationThreadContext& context, IndexedMeshView mesh, Allocator& allocator, Allocator& heap_allocator) {
+static void AllocateDecimationThreadContext(DecimationThreadContext& context, const IndexedMeshView& mesh, Allocator& allocator, Allocator& heap_allocator) {
 	compile_const u32 max_vertex_count = meshlet_group_max_meshlet_count * meshlet_max_vertex_count;
 	compile_const u32 max_face_count = meshlet_group_max_meshlet_count * meshlet_max_face_count;
 	compile_const u32 max_corner_count = max_face_count * meshlet_max_face_degree;
@@ -1983,7 +2113,7 @@ static void DeallocateDecimationThreadContext(DecimationThreadContext& context) 
 }
 
 static void DecimateMeshFaceGroups(
-	IndexedMeshView mesh,
+	const IndexedMeshView& mesh,
 	Allocator& allocator,
 	Allocator& heap_allocator,
 	const MdtTriangleMeshDesc& mesh_desc,
@@ -2039,11 +2169,11 @@ static void DecimateMeshFaceGroups(
 	ParallelFor(parallel_for, meshlet_group_face_prefix_sum.count, [&](u32 group_index) {
 		MDT_PROFILER_SCOPE("ProcessFaceGroup");
 		
-		DecimationThreadContext context;
+		DecimationThreadContext thread_context;
+		auto& context = use_per_thread_context ? thread_context : shared_context;
+		
 		if (use_per_thread_context) {
 			AllocateDecimationThreadContext(context, mesh, allocator, heap_allocator);
-		} else {
-			context = shared_context;
 		}
 		
 		u32 begin_face_index = group_index ? meshlet_group_face_prefix_sum[group_index - 1] : 0;
@@ -2462,7 +2592,7 @@ static bool KdTreeFindClosestActiveElement(KdTree& kd_tree, const Vector3& point
 	return should_prune;
 }
 
-static void KdTreeBuildElementsForFaces(IndexedMeshView mesh, Allocator& allocator, Array<KdTreeElement>& elements) {
+static void KdTreeBuildElementsForFaces(const IndexedMeshView& mesh, Allocator& allocator, Array<KdTreeElement>& elements) {
 	MDT_PROFILER_SCOPE("KdTreeBuildElementsForFaces");
 	
 	ArrayResize(elements, allocator, mesh.face_count);
@@ -2523,7 +2653,7 @@ struct MeshletBuildResult {
 };
 
 static MeshletAdjacency BuildMeshletAdjacency(
-	IndexedMeshView mesh,
+	const IndexedMeshView& mesh,
 	Allocator& allocator,
 	ArrayView<u32> corner_list_around_vertex,
 	ArrayView<u32> corner_list_around_vertex_prefix_sum,
@@ -2535,7 +2665,7 @@ static MeshletAdjacency BuildMeshletAdjacency(
 // Based on [Kapoulkine 2025].
 //
 static void BuildMeshletsForFaceGroup(
-	IndexedMeshView mesh,
+	const IndexedMeshView& mesh,
 	KdTree kd_tree,
 	u32 meshlet_target_face_count,
 	u32 meshlet_target_vertex_count,
@@ -2752,7 +2882,7 @@ static void BuildMeshletsForFaceGroup(
 
 // Note that FaceIDs inside groups are going to be scrambled inside groups during KdTree build. This leaves prefix sum in a valid, but different state.
 static MeshletBuildResult BuildMeshletsForFaceGroups(
-	IndexedMeshView mesh,
+	const IndexedMeshView& mesh,
 	Allocator& allocator,
 	Array<FaceID> meshlet_group_faces,
 	Array<u32> meshlet_group_face_prefix_sum,
@@ -2943,7 +3073,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 }
 
 static MeshletAdjacency BuildMeshletAdjacency(
-	IndexedMeshView mesh,
+	const IndexedMeshView& mesh,
 	Allocator& allocator,
 	ArrayView<u32> corner_list_around_vertex,
 	ArrayView<u32> corner_list_around_vertex_prefix_sum,
@@ -3370,7 +3500,7 @@ static void CompactMeshletGroupFaces(ArrayView<FaceID> old_face_id_to_new_face_i
 
 // TODO: We could write this data directly into the output buffers from BuildMeshletsForFaceGroups.
 static void BuildMeshletVertexAndIndexBuffers(
-	IndexedMeshView mesh,
+	const IndexedMeshView& mesh,
 	Allocator& heap_allocator,
 	MeshletBuildResult meshlet_build_result,
 	Array<u32> attributes_id_to_vertex_index,
@@ -3436,7 +3566,7 @@ static void BuildMeshletVertexAndIndexBuffers(
 }
 
 static void AppendChangedVertices(
-	IndexedMeshView mesh,
+	const IndexedMeshView& mesh,
 	Allocator& allocator,
 	Allocator& heap_allocator,
 	Array<u8> changed_vertex_mask,
