@@ -991,6 +991,7 @@ always_inline_function static float DotProduct(const Vector3& lh, const Vector3&
 always_inline_function static float Length(const Vector3& v) { return sqrtf(DotProduct(v, v)); }
 always_inline_function static Vector3 CrossProduct(const Vector3& lh, const Vector3& rh) { return Vector3{ lh.y * rh.z - lh.z * rh.y, lh.z * rh.x - lh.x * rh.z, lh.x * rh.y - lh.y * rh.x }; }
 always_inline_function static float LoadElementByIndex(const Vector3& vector, u32 index) { return (&vector.x)[index]; }
+always_inline_function static void StoreElementByIndex(Vector3& vector, u32 index, float value) { (&vector.x)[index] = value; }
 
 
 always_inline_function static Vector3 VectorMax(const Vector3& lh, const Vector3& rh) {
@@ -3424,8 +3425,7 @@ static void BuildInitialFaceGroupsRecursive(Array<u32>& meshlet_group_face_prefi
 	
 	// Larger groups generally give higher quality results, but since there are less
 	// of them they don't get distrubuted across threads as well as smaller groups.
-	compile_const u32 group_size_scale = 4;
-	compile_const u32 max_initial_group_size = meshlet_group_max_meshlet_count * meshlet_max_face_count * 4;
+	compile_const u32 max_initial_group_size = meshlet_group_max_meshlet_count * meshlet_max_face_count;
 	
 	if (end_index - begin_index <= max_initial_group_size || current_bit == 0) {
 		ArrayAppend(meshlet_group_face_prefix_sum, end_index);
@@ -3477,21 +3477,43 @@ static void BuildInitialFaceGroups(const IndexedMeshView& mesh, Array<u32>& mesh
 	auto aabb_scale  = Vector3{ aabb_extent.x == 0.f ? 0.f : 1.f / aabb_extent.x, aabb_extent.y == 0.f ? 0.f : 1.f / aabb_extent.y, aabb_extent.z == 0.f ? 0.f : 1.f / aabb_extent.z };
 	auto aabb_offset = Vector3{ -aabb_min.x * aabb_scale.x, -aabb_min.y * aabb_scale.y, -aabb_min.z * aabb_scale.z };
 	
+	u32  deposit_masks[3] = { 0, 0, 0 };
+	auto axis_float_to_u32 = Vector3{ 1.f, 1.f, 1.f };
+	
 	compile_const u32 morton_code_bit_count = 30;
+	for (u32 i = 0; i < morton_code_bit_count; i += 1) {
+		u32   axis_index  = 0;
+		float axis_length = LoadElementByIndex(aabb_extent, 0);
+		
+		for (u32 axis = 1; axis < 3; axis += 1) {
+			if (axis_length < LoadElementByIndex(aabb_extent, axis)) {
+				axis_length = LoadElementByIndex(aabb_extent, axis);
+				axis_index  = axis;
+			}
+		}
+		
+		// Split along the longest axis.
+		u32 bit_index = morton_code_bit_count - 1 - i;
+		deposit_masks[axis_index] |= (1u << bit_index);
+		
+		StoreElementByIndex(aabb_extent, axis_index, axis_length * 0.5f);
+		StoreElementByIndex(axis_float_to_u32, axis_index, LoadElementByIndex(axis_float_to_u32, axis_index) * 2.f);
+	}
+	
 	for (u32 i = 0; i < mesh.face_count; i += 1) {
 		auto& p0 = mesh[mesh.face_vertex_ids[i * 3 + 0]];
 		auto& p1 = mesh[mesh.face_vertex_ids[i * 3 + 1]];
 		auto& p2 = mesh[mesh.face_vertex_ids[i * 3 + 2]];
 		
 		auto normalized_position = (p0 + p1 + p2) * (1.f / 3.f) * aabb_scale + aabb_offset;
-		u32 x = (u32)(normalized_position.x * 1023.f);
-		u32 y = (u32)(normalized_position.y * 1023.f);
-		u32 z = (u32)(normalized_position.z * 1023.f);
+		u32 x = (u32)(normalized_position.x * axis_float_to_u32.x);
+		u32 y = (u32)(normalized_position.y * axis_float_to_u32.y);
+		u32 z = (u32)(normalized_position.z * axis_float_to_u32.z);
 		
 		u32 encoded = 0;
-		encoded |= _pdep_u32(x, 0x49249249);
-		encoded |= _pdep_u32(y, 0x92492492);
-		encoded |= _pdep_u32(z, 0x24924924);
+		encoded |= _pdep_u32(x, deposit_masks[0]);
+		encoded |= _pdep_u32(y, deposit_masks[1]);
+		encoded |= _pdep_u32(z, deposit_masks[2]);
 		
 		face_morton_codes[i] = encoded;
 		face_indices[i] = i;
