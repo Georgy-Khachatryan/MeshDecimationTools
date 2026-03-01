@@ -1810,7 +1810,7 @@ static void EdgeCollapseHeapUpdate(EdgeCollapseHeap& heap, u32 node_index, float
 static void EdgeCollapseHeapInitialize(EdgeCollapseHeap& heap) {
 	MDT_PROFILER_SCOPE("EdgeCollapseHeapInitialize");
 	
-	if (heap.edge_collapse_errors.count == 0) return;
+	if (heap.edge_collapse_errors.count <= 1) return;
 	
 	u32 node_index = HeapParentIndex(heap.edge_collapse_errors.count - 1);
 	
