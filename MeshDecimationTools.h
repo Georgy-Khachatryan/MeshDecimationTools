@@ -82,6 +82,9 @@ struct MdtParallelForCallbacks {
 	
 	// User defined parallel for state, passed to MdtParallelForCallback as user_data argument.
 	void* user_data;
+	
+	// The maximum number of threads that could run at the same time.
+	uint32_t thread_count;
 };
 
 // Optional memory allocation callbacks. If they're not provided the system falls back to C realloc().

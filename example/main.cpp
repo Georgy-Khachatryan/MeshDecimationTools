@@ -439,6 +439,7 @@ int main(int argument_count, char** arguments) {
 	callbacks.heap_allocator.reallocate = &ValidatedAllocatorRealloc;
 	callbacks.heap_allocator.user_data  = &heap_allocator;
 	callbacks.parallel_for.callback     = &ParallelForCallback;
+	callbacks.parallel_for.thread_count = std::thread::hardware_concurrency();
 	
 	if (options.clod) {
 		MdtContinuousLodBuildInputs inputs = {};
