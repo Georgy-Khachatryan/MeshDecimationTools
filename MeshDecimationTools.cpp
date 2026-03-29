@@ -86,6 +86,10 @@ compile_const float default_attribute_error_weight = 1.f;
 compile_const u32 edge_collapse_candidate_position_count = 3;
 compile_const u32 max_edge_collapse_validation_face_count = 32;
 
+// Larger groups generally give higher quality results, but since there are less
+// of them they don't get distrubuted across threads as well as smaller groups.
+compile_const u32 max_initial_group_size = meshlet_group_max_meshlet_count * meshlet_max_face_count;
+
 compile_const u32 hash_table_max_occupancy_percent = 75;
 
 
@@ -1056,6 +1060,11 @@ always_inline_function T Clamp(T value, T min, T max) {
 template<typename T>
 always_inline_function T Min(T value, T min) {
 	return value < min ? value : min;
+}
+
+template<typename T>
+always_inline_function T Max(T value, T max) {
+	return value > max ? value : max;
 }
 
 
@@ -2929,10 +2938,10 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 	
 	MDT_PROFILER_SCOPE("BuildMeshletsForFaceGroups");
 	
-	KdTree kd_tree_allocations;
-	ArrayResize(kd_tree_allocations.elements, allocator, mesh.face_count);
-	ArrayReserve(kd_tree_allocations.nodes, allocator, kd_tree_allocations.elements.count * 2);
-	ArrayResize(kd_tree_allocations.element_indices, allocator, kd_tree_allocations.elements.count);
+	auto temp_allocator = CopyAllocator(allocator);
+	
+	Array<KdTreeElement> kd_tree_elements;
+	ArrayResize(kd_tree_elements, temp_allocator, mesh.face_count);
 	
 	Array<u32> corner_list_around_vertex_prefix_sum;
 	Array<u32> corner_list_around_vertex;
@@ -2940,8 +2949,8 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 	{
 		MDT_PROFILER_SCOPE("BuildVertexCornerLists");
 		
-		ArrayResizeMemset(corner_list_around_vertex_prefix_sum, allocator, mesh.vertex_count + 1, 0);
-		ArrayResize(corner_list_around_vertex, allocator, mesh.face_count * 3);
+		ArrayResizeMemset(corner_list_around_vertex_prefix_sum, temp_allocator, mesh.vertex_count + 1, 0);
+		ArrayResize(corner_list_around_vertex, temp_allocator, mesh.face_count * 3);
 		
 		for (u32 corner_index = 0; corner_index < mesh.face_count * 3; corner_index += 1) {
 			auto vertex_id = mesh.face_vertex_ids[corner_index];
@@ -2983,23 +2992,34 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 	ParallelFor(parallel_for, meshlet_work_item_count, [&](u32 work_item_index) {
 		MDT_PROFILER_SCOPE("BuildMeshletsForFaceGroup");
 		
-		Allocator temp_allocator = CopyAllocator(allocator);
+		u32 begin_group_index = work_item_index * face_groups_per_thread;
+		u32 end_group_index   = Min(begin_group_index + face_groups_per_thread, meshlet_group_face_prefix_sum.count);
+		
+		u32 max_element_count = 0;
+		u32 begin_element_index = begin_group_index ? meshlet_group_face_prefix_sum[begin_group_index - 1] : 0;
+		for (u32 group_index = begin_group_index; group_index < end_group_index; group_index += 1) {
+			u32 end_element_index = meshlet_group_face_prefix_sum[group_index];
+			max_element_count = Max(max_element_count, end_element_index - begin_element_index);
+			begin_element_index = end_element_index;
+		}
+		
+		auto temp_allocator = CopyAllocator(allocator);
 		
 		Array<u8> vertex_usage_map;
 		ArrayResizeMemset(vertex_usage_map, temp_allocator, mesh.attribute_count, 0xFF);
 		
-		u32 begin_group_index = work_item_index * face_groups_per_thread;
-		u32 end_group_index   = Min(begin_group_index + face_groups_per_thread, meshlet_group_face_prefix_sum.count);
+		KdTree kd_tree;
+		ArrayReserve(kd_tree.nodes, temp_allocator, max_element_count * 2);
+		ArrayResize(kd_tree.element_indices, temp_allocator, max_element_count);
 		
-		u32 begin_element_index = begin_group_index ? meshlet_group_face_prefix_sum[begin_group_index - 1] : 0;
+		begin_element_index = begin_group_index ? meshlet_group_face_prefix_sum[begin_group_index - 1] : 0;
 		for (u32 group_index = begin_group_index; group_index < end_group_index; group_index += 1) {
 			u32 end_element_index = meshlet_group_face_prefix_sum[group_index];
 			u32 element_count     = end_element_index - begin_element_index;
 			
-			KdTree kd_tree;
-			kd_tree.elements        = { kd_tree_allocations.elements.data        + begin_element_index, element_count, element_count };
-			kd_tree.element_indices = { kd_tree_allocations.element_indices.data + begin_element_index, element_count, element_count };
-			kd_tree.nodes           = { kd_tree_allocations.nodes.data           + begin_element_index * 2, 0, element_count * 2 };
+			kd_tree.elements = { kd_tree_elements.data + begin_element_index, element_count, element_count };
+			kd_tree.element_indices.count = element_count;
+			kd_tree.nodes.count = 0;
 			
 			KdTreeBuildElementsForFaces(mesh, kd_tree, begin_element_index, end_element_index);
 			KdTreeBuildNode(kd_tree.nodes, CreateArrayView(kd_tree.elements), CreateArrayView(kd_tree.element_indices));
@@ -3058,7 +3078,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 		
 		for (u32 i = begin_element_index; i < end_element_index; i += 1) {
 			// Translate meshlet index within the group to a global meshlet index.
-			kd_tree_allocations.elements[i].partition_index += meshlet_prefix_sum;
+			kd_tree_elements[i].partition_index += meshlet_prefix_sum;
 		}
 		
 		for (u32 i = 0; i < meshlet_count; i += 1, meshlet_prefix_sum += 1) {
@@ -3152,7 +3172,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 		CreateArrayView(corner_list_around_vertex_prefix_sum),
 		result.meshlet_corners,
 		result.meshlet_corner_prefix_sum,
-		CreateArrayView(kd_tree_allocations.elements)
+		CreateArrayView(kd_tree_elements)
 	);
 	
 	return result;
@@ -3169,13 +3189,15 @@ static MeshletAdjacency BuildMeshletAdjacency(
 	
 	MDT_PROFILER_SCOPE("BuildMeshletAdjacency");
 	
+	auto temp_allocator = CopyAllocator(allocator);
+	
 	FixedSizeArray<VertexID, meshlet_max_vertex_count> counted_vertex_ids;
 	
 	Array<u8> is_vertex_counted;
-	ArrayResizeMemset(is_vertex_counted, allocator, mesh.vertex_count, 0);
+	ArrayResizeMemset(is_vertex_counted, temp_allocator, mesh.vertex_count, 0);
 	
 	Array<u32> meshlet_adjacency_info_indices;
-	ArrayResizeMemset(meshlet_adjacency_info_indices, allocator, meshlet_corner_prefix_sum.count, 0xFF);
+	ArrayResizeMemset(meshlet_adjacency_info_indices, temp_allocator, meshlet_corner_prefix_sum.count, 0xFF);
 	
 	Array<u32> meshlet_adjacency_prefix_sum;
 	ArrayReserve(meshlet_adjacency_prefix_sum, allocator, meshlet_corner_prefix_sum.count);
@@ -3190,7 +3212,7 @@ static MeshletAdjacency BuildMeshletAdjacency(
 		// At least reserve one meshlet per face edge. Do this upfront instead of adding code in the inner loop to improve performance.
 		compile_const u32 reserve_size = meshlet_max_face_count * meshlet_max_face_degree;
 		if (meshlet_adjacency_infos.count + reserve_size >= meshlet_adjacency_infos.capacity) {
-			ArrayReserve(meshlet_adjacency_infos, allocator, ArrayComputeNewCapacity(meshlet_adjacency_infos.capacity, meshlet_adjacency_infos.capacity + reserve_size));
+			ArrayGrow(meshlet_adjacency_infos, allocator, ArrayComputeNewCapacity(meshlet_adjacency_infos.capacity, meshlet_adjacency_infos.capacity + reserve_size));
 		}
 		
 		u32 begin_adjacency_info_index = meshlet_adjacency_infos.count;
@@ -3300,9 +3322,11 @@ struct MeshletGroupBuildResult {
 static MeshletGroupBuildResult BuildMeshletGroups(Allocator& allocator, ArrayView<MdtMeshlet> meshlets, MeshletAdjacency meshlet_adjacency) {
 	MDT_PROFILER_SCOPE("BuildMeshletGroups");
 	
+	auto temp_allocator = CopyAllocator(allocator);
+	
 	KdTree kd_tree;
-	KdTreeBuildElementsForMeshlets(meshlets, allocator, kd_tree.elements);
-	KdTreeBuild(kd_tree, allocator);
+	KdTreeBuildElementsForMeshlets(meshlets, temp_allocator, kd_tree.elements);
+	KdTreeBuild(kd_tree, temp_allocator);
 	
 	FixedSizeArray<u32, meshlet_group_max_meshlet_count> meshlet_group;
 	
@@ -3420,17 +3444,13 @@ static MeshletGroupBuildResult BuildMeshletGroups(Allocator& allocator, ArrayVie
 	return result;
 }
 
-static void BuildInitialFaceGroupsRecursive(Array<u32>& meshlet_group_face_prefix_sum, ArrayView<u32> face_morton_codes, u32 current_bit, u32 begin_index, u32 end_index) {
+static void BuildInitialFaceGroupsRecursive(Array<u32>& meshlet_group_face_prefix_sum, Allocator& allocator, ArrayView<u32> face_morton_codes, u32 current_bit, u32 begin_index, u32 end_index) {
 	MDT_PROFILER_SCOPE("BuildInitialFaceGroupsRecursive");
 	
-	// Larger groups generally give higher quality results, but since there are less
-	// of them they don't get distrubuted across threads as well as smaller groups.
-	compile_const u32 max_initial_group_size = meshlet_group_max_meshlet_count * meshlet_max_face_count;
-	
 	if (end_index - begin_index <= max_initial_group_size || current_bit == 0) {
-		ArrayAppend(meshlet_group_face_prefix_sum, end_index);
+		ArrayAppendMaybeGrow(meshlet_group_face_prefix_sum, allocator, end_index);
 	} else if ((face_morton_codes[begin_index] & current_bit) == (face_morton_codes[end_index - 1] & current_bit)) {
-		BuildInitialFaceGroupsRecursive(meshlet_group_face_prefix_sum, face_morton_codes, current_bit >> 1, begin_index, end_index);
+		BuildInitialFaceGroupsRecursive(meshlet_group_face_prefix_sum, allocator, face_morton_codes, current_bit >> 1, begin_index, end_index);
 	} else {
 		u32 l0 = begin_index;
 		u32 l1 = end_index - 1;
@@ -3446,8 +3466,8 @@ static void BuildInitialFaceGroupsRecursive(Array<u32>& meshlet_group_face_prefi
 			}
 		}
 		
-		BuildInitialFaceGroupsRecursive(meshlet_group_face_prefix_sum, face_morton_codes, current_bit >> 1, begin_index, l0);
-		BuildInitialFaceGroupsRecursive(meshlet_group_face_prefix_sum, face_morton_codes, current_bit >> 1, l0, end_index);
+		BuildInitialFaceGroupsRecursive(meshlet_group_face_prefix_sum, allocator, face_morton_codes, current_bit >> 1, begin_index, l0);
+		BuildInitialFaceGroupsRecursive(meshlet_group_face_prefix_sum, allocator, face_morton_codes, current_bit >> 1, l0, end_index);
 	}
 }
 
@@ -3553,7 +3573,7 @@ static void BuildInitialFaceGroups(const IndexedMeshView& mesh, Array<u32>& mesh
 		face_morton_codes.data = face_morton_codes_swap_data;
 	}
 	
-	BuildInitialFaceGroupsRecursive(meshlet_group_face_prefix_sum, CreateArrayView(face_morton_codes), 1u << (morton_code_bit_count - 1), 0, face_morton_codes.count);
+	BuildInitialFaceGroupsRecursive(meshlet_group_face_prefix_sum, allocator, CreateArrayView(face_morton_codes), 1u << (morton_code_bit_count - 1), 0, face_morton_codes.count);
 	
 	{
 		MDT_PROFILER_SCOPE("ReorderFaces");
@@ -3589,11 +3609,16 @@ static void ConvertMeshletGroupsToFaceGroups(
 	
 	MDT_PROFILER_SCOPE("ConvertMeshletGroupsToFaceGroups");
 	
-	MDT_ASSERT(meshlet_group_face_prefix_sum.capacity >= meshlet_build_result.meshlet_faces.count);
-	MDT_ASSERT(meshlet_group_error_metrics.capacity   >= meshlet_build_result.meshlet_faces.count);
-	
 	meshlet_group_face_prefix_sum.count = 0;
 	meshlet_group_error_metrics.count   = 0;
+	
+	if (meshlet_group_face_prefix_sum.capacity < meshlet_build_result.meshlet_faces.count) {
+		ArrayGrow(meshlet_group_face_prefix_sum, allocator, meshlet_build_result.meshlet_faces.count);
+	}
+	
+	if (meshlet_group_error_metrics.capacity < meshlet_build_result.meshlet_faces.count) {
+		ArrayGrow(meshlet_group_error_metrics, allocator, meshlet_build_result.meshlet_faces.count);
+	}
 	
 	{
 		MDT_PROFILER_SCOPE("ReorderFaces");
@@ -3737,11 +3762,13 @@ static void AppendNewMeshletsAndMeshletGroups(
 }
 
 
-static ArrayView<FaceID> CreateMeshFaceRemap(IndexedMeshView& mesh, Allocator& allocator) {
-	MDT_PROFILER_SCOPE("CreateMeshFaceRemap");
+static void CompactMeshletGroupFaces(IndexedMeshView& mesh, Allocator& allocator, Array<u32>& meshlet_group_face_prefix_sum) {
+	MDT_PROFILER_SCOPE("CompactMeshletGroupFaces");
+	
+	auto temp_allocator = CopyAllocator(allocator);
 	
 	Array<FaceID> old_face_id_to_new_face_id;
-	ArrayResize(old_face_id_to_new_face_id, allocator, mesh.face_count);
+	ArrayResize(old_face_id_to_new_face_id, temp_allocator, mesh.face_count);
 	
 	u32 old_face_count = old_face_id_to_new_face_id.count;
 	u32 new_face_count = 0;
@@ -3762,14 +3789,7 @@ static ArrayView<FaceID> CreateMeshFaceRemap(IndexedMeshView& mesh, Allocator& a
 	}
 	mesh.face_count = new_face_count;
 	
-	return CreateArrayView(old_face_id_to_new_face_id);
-}
-
-static void CompactMeshletGroupFaces(ArrayView<FaceID> old_face_id_to_new_face_id, Array<u32>& meshlet_group_face_prefix_sum) {
-	MDT_PROFILER_SCOPE("CompactMeshletGroupFaces");
-	
 	u32 new_prefix_sum = 0;
-	
 	u32 begin_face_index = 0;
 	for (u32 group_index = 0; group_index < meshlet_group_face_prefix_sum.count; group_index += 1) {
 		u32 end_face_index = meshlet_group_face_prefix_sum[group_index];
@@ -3925,8 +3945,8 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 	
 	Array<u32> meshlet_group_face_prefix_sum;
 	Array<MdtErrorMetric> meshlet_group_error_metrics;
-	ArrayReserve(meshlet_group_face_prefix_sum, allocator, mesh.face_count);
-	ArrayReserve(meshlet_group_error_metrics, allocator, mesh.face_count);
+	ArrayReserve(meshlet_group_face_prefix_sum, allocator, DivideAndRoundUp(mesh.face_count, max_initial_group_size));
+	ArrayReserve(meshlet_group_error_metrics,   allocator, DivideAndRoundUp(mesh.face_count, max_initial_group_size));
 	
 	// Note that we're not adding an initial error metric to meshlet_group_error_metrics.
 	// Meshlets built from the initial groups will use current_level_error_metric.bounds set to the geometric_sphere_bounds with zero error.
@@ -3994,7 +4014,7 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 			mesh,
 			meshlet_build_result,
 			meshlet_group_build_result,
-			temp_allocator,
+			allocator,
 			meshlet_group_face_prefix_sum,
 			meshlet_group_error_metrics
 		);
@@ -4017,8 +4037,7 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 			AppendChangedVertices(mesh, output_allocator, changed_vertex_mask, attributes_id_to_vertex_index, vertices);
 			
 			// Compact the mesh after decimation to remove unused faces and edges.
-			auto remap = CreateMeshFaceRemap(mesh, temp_allocator);
-			CompactMeshletGroupFaces(remap, meshlet_group_face_prefix_sum);
+			CompactMeshletGroupFaces(mesh, temp_allocator, meshlet_group_face_prefix_sum);
 		} else {
 			// There is no coarser version of the mesh. Set meshlet group errors to FLT_MAX to make sure LOD
 			// culling test always succeeds for last level meshlets (i.e. coarser level is always too coarse).
