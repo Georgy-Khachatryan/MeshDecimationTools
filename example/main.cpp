@@ -430,12 +430,9 @@ int main(int argument_count, char** arguments) {
 	mesh_desc.attribute_weights   = attribute_weights;
 	mesh_desc.normalize_vertex_attributes = &NormalizeObjVertexAttributes;
 	
-	ValidatedAllocator temp_allocator = {};
 	ValidatedAllocator heap_allocator = {};
 	
 	MdtSystemCallbacks callbacks = {};
-	callbacks.temp_allocator.reallocate = &ValidatedAllocatorRealloc;
-	callbacks.temp_allocator.user_data  = &temp_allocator;
 	callbacks.heap_allocator.reallocate = &ValidatedAllocatorRealloc;
 	callbacks.heap_allocator.user_data  = &heap_allocator;
 	callbacks.parallel_for.callback     = &ParallelForCallback;
@@ -456,7 +453,6 @@ int main(int argument_count, char** arguments) {
 		printf("CLOD Build Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 		
 #if ENABLE_ALLOCATOR_VALIDATION
-		MDT_ASSERT(temp_allocator.allocation_count == temp_allocator.deallocation_count); // No live temp allocations.
 		MDT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 6); // 6 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 		
@@ -491,7 +487,6 @@ int main(int argument_count, char** arguments) {
 		printf("DLOD Build Time: %llums\n", std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
 		
 #if ENABLE_ALLOCATOR_VALIDATION
-		MDT_ASSERT(temp_allocator.allocation_count == temp_allocator.deallocation_count); // No live temp allocations.
 		MDT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count + 4); // 4 live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION
 		
@@ -500,7 +495,6 @@ int main(int argument_count, char** arguments) {
 	}
 	
 #if ENABLE_ALLOCATOR_VALIDATION
-	printf("Temp Allocation Count: %u\n", temp_allocator.allocation_count.load());
 	printf("Heap Allocation Count: %u\n", heap_allocator.allocation_count.load());
 	MDT_ASSERT(heap_allocator.allocation_count == heap_allocator.deallocation_count); // No live heap allocations.
 #endif // ENABLE_ALLOCATOR_VALIDATION

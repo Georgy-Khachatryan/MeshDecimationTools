@@ -90,12 +90,6 @@ struct MdtParallelForCallbacks {
 // Optional memory allocation callbacks. If they're not provided the system falls back to C realloc().
 struct MdtSystemCallbacks {
 	//
-	// Temporary allocator that is used as a stack. Falls back to C realloc() if not provided.
-	// Memory blocks are allocated and freed from the end.
-	//
-	struct MdtAllocatorCallbacks temp_allocator;
-	
-	//
 	// Heap allocator used for small number of growable arrays and all output allocations. Falls back to C realloc() if not provided.
 	// Memory blocks are allocated and freed in arbitrary order.
 	//
