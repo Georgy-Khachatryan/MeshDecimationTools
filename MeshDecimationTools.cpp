@@ -378,13 +378,25 @@ static ElementID CornerListMerge(const EditableMeshView& mesh, ElementID element
 }
 
 struct Allocator {
-	compile_const u32 max_memory_block_count = 64;
+	compile_const u32 max_memory_block_count = 24;
 	
 	MdtAllocatorCallbacks callbacks;
 	
 	u32 memory_block_count = 0;
 	void* memory_blocks[max_memory_block_count] = {};
+	
+	~Allocator() {
+		for (u32 i = memory_block_count; i > 0; i -= 1) {
+			callbacks.reallocate(memory_blocks[i - 1], 0, callbacks.user_data);
+		}
+	}
 };
+
+static Allocator CopyAllocator(Allocator& allocator) {
+	Allocator new_allocator;
+	new_allocator.callbacks = allocator.callbacks;
+	return new_allocator;
+}
 
 static void* AllocateMemoryBlock(Allocator& allocator, void* old_memory_block, u64 size_bytes) {
 	MDT_ASSERT(old_memory_block != nullptr || allocator.memory_block_count < Allocator::max_memory_block_count);
@@ -399,9 +411,11 @@ static void* AllocateMemoryBlock(Allocator& allocator, void* old_memory_block, u
 	return memory_block;
 }
 
-static void InitializeAllocator(Allocator& allocator, const MdtAllocatorCallbacks* callbacks) {
-	if (callbacks && callbacks->reallocate) {
-		allocator.callbacks = *callbacks;
+static Allocator InitializeAllocator(const MdtSystemCallbacks* callbacks) {
+	Allocator allocator;
+	
+	if (callbacks && callbacks->heap_allocator.reallocate) {
+		allocator.callbacks = callbacks->heap_allocator;
 	} else {
 		allocator.callbacks.reallocate = [](void* old_memory_block, u64 size_bytes, void*) {
 			void* result = nullptr;
@@ -413,13 +427,8 @@ static void InitializeAllocator(Allocator& allocator, const MdtAllocatorCallback
 			return result;
 		};
 	}
-}
-
-static void AllocatorFreeMemoryBlocks(Allocator& allocator, u32 last_memory_block_index = 0) {
-	for (u32 i = allocator.memory_block_count; i > last_memory_block_index; i -= 1) {
-		allocator.callbacks.reallocate(allocator.memory_blocks[i - 1], 0, allocator.callbacks.user_data);
-	}
-	allocator.memory_block_count = last_memory_block_index;
+	
+	return allocator;
 }
 
 static u32 AllocatorFindMemoryBlock(Allocator& allocator, void* old_memory_block) {
@@ -722,6 +731,7 @@ always_inline_function static void ArrayAppend(ArrayT& array, const typename Arr
 template<typename T>
 never_inline_function static void ArrayGrow(Array<T>& array, Allocator& allocator, u32 new_capacity) {
 	u32 old_memory_block_index = AllocatorFindMemoryBlock(allocator, array.data);
+	MDT_ASSERT(old_memory_block_index != u32_max || allocator.memory_block_count < Allocator::max_memory_block_count);
 	
 	void* memory_block = allocator.callbacks.reallocate(array.data, new_capacity * sizeof(T), allocator.callbacks.user_data);
 	u32 memory_block_index = old_memory_block_index != u32_max ? old_memory_block_index : allocator.memory_block_count++;
@@ -804,13 +814,13 @@ static IndexedMeshView BuildIndexedMesh(Allocator& allocator, const MdtTriangleG
 	mesh.attribute_count       = vertices_count;
 	mesh.attribute_stride_dwords = attribute_stride_dwords;
 	
-	u32 allocator_high_water = allocator.memory_block_count;
+	auto temp_allocator = CopyAllocator(allocator);
 	
 	Array<VertexID> src_vertex_index_to_vertex_id;
-	ArrayResize(src_vertex_index_to_vertex_id, allocator, vertices_count);
+	ArrayResize(src_vertex_index_to_vertex_id, temp_allocator, vertices_count);
 	
 	ReindexingHashTable<VertexID, Vector3> vertex_table;
-	HashTableReserve(vertex_table, allocator, vertices);
+	HashTableReserve(vertex_table, temp_allocator, vertices);
 	HashTableClear(vertex_table);
 	
 	{
@@ -872,8 +882,6 @@ static IndexedMeshView BuildIndexedMesh(Allocator& allocator, const MdtTriangleG
 	}
 	mesh.face_count = face_geometry_indices.count;
 	
-	AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
-	
 	return mesh;
 }
 
@@ -909,7 +917,7 @@ static EdgeCollapseResult PerformEdgeCollapse(const EditableMeshView& mesh, Edge
 	});
 	
 	auto remaining_vertex_id = CornerListMerge<VertexID>(mesh, edge.vertex_0, edge.vertex_1);
-
+	
 	if (remaining_vertex_id.index != u32_max) {
 		auto remaining_base_id = mesh[remaining_vertex_id].corner_list_base;
 		
@@ -1543,6 +1551,7 @@ struct QuadricWithAttributesArray {
 // TODO: Reuse existing array functions.
 never_inline_function static void ArrayGrow(QuadricWithAttributesArray& array, Allocator& allocator, u32 new_capacity) {
 	u32 old_memory_block_index = AllocatorFindMemoryBlock(allocator, array.data);
+	MDT_ASSERT(old_memory_block_index != u32_max || allocator.memory_block_count < Allocator::max_memory_block_count);
 	
 	void* memory_block = allocator.callbacks.reallocate(array.data, new_capacity * array.data_stride_bytes + sizeof(QuadricWithAttributes), allocator.callbacks.user_data);
 	u32 memory_block_index = old_memory_block_index != u32_max ? old_memory_block_index : allocator.memory_block_count++;
@@ -1854,14 +1863,14 @@ static void EdgeCollapseHeapInitialize(EdgeCollapseHeap& heap) {
 	EdgeCollapseHeapSiftDown(heap, 0);
 }
 
-static void AllocateMeshDecimationState(u32 vertex_count, u32 attribute_count, u32 attribute_stride_dwords, Allocator& allocator, Allocator& heap_allocator, MeshDecimationState& state) {
+static void AllocateMeshDecimationState(u32 vertex_count, u32 attribute_count, u32 attribute_stride_dwords, Allocator& allocator, MeshDecimationState& state) {
 	ArrayReserve(state.vertex_edge_quadrics, allocator, vertex_count);
 	ArrayReserve(state.attribute_face_quadrics, allocator, attribute_count, attribute_stride_dwords);
 	
-	ArrayReserve(state.wedge_quadrics,       heap_allocator, 64, attribute_stride_dwords);
-	ArrayReserve(state.wedge_attributes_ids, heap_allocator, 64);
-	ArrayReserve(state.removed_edge_ids,     heap_allocator, 64);
-	HashTableReserve(state.edge_hash_table,  heap_allocator, 64);
+	ArrayReserve(state.wedge_quadrics,       allocator, 64, attribute_stride_dwords);
+	ArrayReserve(state.wedge_attributes_ids, allocator, 64);
+	ArrayReserve(state.removed_edge_ids,     allocator, 64);
+	HashTableReserve(state.edge_hash_table,  allocator, 64);
 	HashTableClear(state.edge_hash_table);
 }
 
@@ -2099,7 +2108,6 @@ struct DecimationThreadContext {
 	EditableMeshView sub_mesh;
 	MeshDecimationState state;
 	
-	Allocator heap_allocator;
 	Allocator allocator;
 	
 	Array<Face>   sub_mesh_faces;
@@ -2122,14 +2130,13 @@ struct DecimationThreadContext {
 	Array<u8> sub_mesh_changed_vertex_mask;
 };
 
-static void AllocateDecimationThreadContext(DecimationThreadContext& context, const IndexedMeshView& mesh, Allocator& allocator, Allocator& heap_allocator) {
+static void AllocateDecimationThreadContext(DecimationThreadContext& context, const IndexedMeshView& mesh, Allocator& allocator) {
 	compile_const u32 max_vertex_count = meshlet_group_max_meshlet_count * meshlet_max_vertex_count;
 	compile_const u32 max_face_count = meshlet_group_max_meshlet_count * meshlet_max_face_count;
 	compile_const u32 max_corner_count = max_face_count * meshlet_max_face_degree;
 	compile_const u32 max_edge_count = max_face_count * meshlet_max_face_degree;
 	
-	context.heap_allocator.callbacks = heap_allocator.callbacks;
-	context.allocator.callbacks = allocator.callbacks;
+	context.allocator = CopyAllocator(allocator);
 	
 	ArrayReserve(context.sub_mesh_vertices, context.allocator, max_vertex_count);
 	ArrayReserve(context.sub_mesh_corners, context.allocator, max_corner_count);
@@ -2159,18 +2166,12 @@ static void AllocateDecimationThreadContext(DecimationThreadContext& context, co
 	ArrayResize(context.sub_mesh_vertex_is_locked, context.allocator, max_vertex_count);
 	ArrayResizeMemset(context.sub_mesh_changed_vertex_mask, context.allocator, max_vertex_count, 0);
 	
-	AllocateMeshDecimationState(max_vertex_count, max_corner_count, mesh.attribute_stride_dwords, context.allocator, context.heap_allocator, context.state);
-}
-
-static void DeallocateDecimationThreadContext(DecimationThreadContext& context) {
-	AllocatorFreeMemoryBlocks(context.allocator, 0);
-	AllocatorFreeMemoryBlocks(context.heap_allocator, 0);
+	AllocateMeshDecimationState(max_vertex_count, max_corner_count, mesh.attribute_stride_dwords, context.allocator, context.state);
 }
 
 static void DecimateMeshFaceGroups(
 	const IndexedMeshView& mesh,
 	Allocator& allocator,
-	Allocator& heap_allocator,
 	const MdtTriangleMeshDesc& mesh_desc,
 	const MdtParallelForCallbacks* parallel_for,
 	Array<u32> meshlet_group_face_prefix_sum,
@@ -2179,13 +2180,12 @@ static void DecimateMeshFaceGroups(
 	
 	MDT_PROFILER_SCOPE("DecimateMeshFaceGroups");
 	
-	u32 allocator_high_water = allocator.memory_block_count;
-	u32 heap_allocator_high_water = heap_allocator.memory_block_count;
+	auto temp_allocator = CopyAllocator(allocator);
 	
 	compile_const u32 vertex_group_index_locked = u32_max - 1;
 	
 	Array<u32> vertex_group_indices;
-	ArrayResizeMemset(vertex_group_indices, allocator, mesh.vertex_count, 0xFF);
+	ArrayResizeMemset(vertex_group_indices, temp_allocator, mesh.vertex_count, 0xFF);
 	
 	{
 		MDT_PROFILER_SCOPE("FindSharedVertices");
@@ -2217,7 +2217,7 @@ static void DecimateMeshFaceGroups(
 	
 	ParallelFor(parallel_for, work_item_count, [&](u32 work_item_index) {
 		DecimationThreadContext context;
-		AllocateDecimationThreadContext(context, mesh, allocator, heap_allocator);
+		AllocateDecimationThreadContext(context, mesh, temp_allocator);
 		
 		u32 begin_group_index = work_item_index * face_groups_per_thread;
 		u32 end_group_index   = Min(begin_group_index + face_groups_per_thread, meshlet_group_face_prefix_sum.count);
@@ -2336,7 +2336,7 @@ static void DecimateMeshFaceGroups(
 					bool edge_is_locked = context.sub_mesh_vertex_is_locked[edge.vertex_0.index] || context.sub_mesh_vertex_is_locked[edge.vertex_1.index];
 					
 					if (edge_is_locked == false) {
-						auto collapse_error = ComputeEdgeCollapseError(context.sub_mesh, context.heap_allocator, context.state, edge_id);
+						auto collapse_error = ComputeEdgeCollapseError(context.sub_mesh, context.allocator, context.state, edge_id);
 						
 						context.edge_collapse_heap.edge_collapse_errors[local_edge_index]  = collapse_error.min_error;
 						context.edge_collapse_heap.edge_id_to_heap_index[edge_id.index]    = local_edge_index;
@@ -2359,7 +2359,7 @@ static void DecimateMeshFaceGroups(
 			u32 active_face_count = face_count;
 			float decimation_error = DecimateMeshFaceGroup(
 				context.sub_mesh,
-				context.heap_allocator,
+				context.allocator,
 				context.state,
 				context.edge_collapse_heap,
 				mesh_desc.normalize_vertex_attributes,
@@ -2416,12 +2416,7 @@ static void DecimateMeshFaceGroups(
 			
 			begin_face_index = end_face_index;
 		}
-		
-		DeallocateDecimationThreadContext(context);
 	});
-	
-	AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
-	AllocatorFreeMemoryBlocks(heap_allocator, heap_allocator_high_water);
 }
 
 //
@@ -2988,11 +2983,10 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 	ParallelFor(parallel_for, meshlet_work_item_count, [&](u32 work_item_index) {
 		MDT_PROFILER_SCOPE("BuildMeshletsForFaceGroup");
 		
-		Allocator thread_allocator;
-		thread_allocator.callbacks = allocator.callbacks;
+		Allocator temp_allocator = CopyAllocator(allocator);
 		
 		Array<u8> vertex_usage_map;
-		ArrayResizeMemset(vertex_usage_map, thread_allocator, mesh.attribute_count, 0xFF);
+		ArrayResizeMemset(vertex_usage_map, temp_allocator, mesh.attribute_count, 0xFF);
 		
 		u32 begin_group_index = work_item_index * face_groups_per_thread;
 		u32 end_group_index   = Min(begin_group_index + face_groups_per_thread, meshlet_group_face_prefix_sum.count);
@@ -3037,8 +3031,6 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 			meshlet_group_meshlet_prefix_sum[group_index] = group_meshlet_face_prefix_sum.count;
 			begin_element_index = end_element_index;
 		}
-		
-		AllocatorFreeMemoryBlocks(thread_allocator, 0);
 	});
 	
 	MDT_ASSERT(meshlet_faces.count == mesh.face_count);
@@ -3461,17 +3453,18 @@ static void BuildInitialFaceGroupsRecursive(Array<u32>& meshlet_group_face_prefi
 
 static void BuildInitialFaceGroups(const IndexedMeshView& mesh, Array<u32>& meshlet_group_face_prefix_sum, Allocator& allocator) {
 	MDT_PROFILER_SCOPE("BuildInitialFaceGroups");
-	u32 allocator_high_water = allocator.memory_block_count;
+	
+	auto temp_allocator = CopyAllocator(allocator);
 	
 	Array<u32> face_morton_codes;
 	Array<u32> face_morton_codes_swap;
 	Array<u32> face_indices;
 	Array<u32> face_indices_swap;
 	
-	ArrayResize(face_indices, allocator, mesh.face_count);
-	ArrayResize(face_indices_swap, allocator, mesh.face_count);
-	ArrayResize(face_morton_codes, allocator, mesh.face_count);
-	ArrayResize(face_morton_codes_swap, allocator, mesh.face_count);
+	ArrayResize(face_indices, temp_allocator, mesh.face_count);
+	ArrayResize(face_indices_swap, temp_allocator, mesh.face_count);
+	ArrayResize(face_morton_codes, temp_allocator, mesh.face_count);
+	ArrayResize(face_morton_codes_swap, temp_allocator, mesh.face_count);
 	
 	auto aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
 	auto aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
@@ -3568,9 +3561,9 @@ static void BuildInitialFaceGroups(const IndexedMeshView& mesh, Array<u32>& mesh
 		Array<VertexID> face_vertex_ids;
 		Array<AttributesID> face_attribute_ids;
 		Array<u32> face_geometry_indices;
-		ArrayResize(face_vertex_ids, allocator, face_indices.count * 3);
-		ArrayResize(face_attribute_ids, allocator, face_indices.count * 3);
-		ArrayResize(face_geometry_indices, allocator, face_indices.count);
+		ArrayResize(face_vertex_ids, temp_allocator, face_indices.count * 3);
+		ArrayResize(face_attribute_ids, temp_allocator, face_indices.count * 3);
+		ArrayResize(face_geometry_indices, temp_allocator, face_indices.count);
 		
 		for (u32 output_face_index = 0; output_face_index < face_indices.count; output_face_index += 1) {
 			u32 src_face_index = face_indices[output_face_index];
@@ -3584,8 +3577,6 @@ static void BuildInitialFaceGroups(const IndexedMeshView& mesh, Array<u32>& mesh
 		memcpy(mesh.face_attribute_ids, face_attribute_ids.data, face_attribute_ids.count * sizeof(AttributesID));
 		memcpy(mesh.face_geometry_indices, face_geometry_indices.data, face_geometry_indices.count * sizeof(u32));
 	}
-	
-	AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 }
 
 static void ConvertMeshletGroupsToFaceGroups(
@@ -3604,17 +3595,17 @@ static void ConvertMeshletGroupsToFaceGroups(
 	meshlet_group_face_prefix_sum.count = 0;
 	meshlet_group_error_metrics.count   = 0;
 	
-	u32 allocator_high_water = allocator.memory_block_count;
-	
 	{
 		MDT_PROFILER_SCOPE("ReorderFaces");
+		
+		auto temp_allocator = CopyAllocator(allocator);
 		
 		Array<VertexID> face_vertex_ids;
 		Array<AttributesID> face_attribute_ids;
 		Array<u32> face_geometry_indices;
-		ArrayResize(face_vertex_ids, allocator, meshlet_build_result.meshlet_faces.count * 3);
-		ArrayResize(face_attribute_ids, allocator, meshlet_build_result.meshlet_faces.count * 3);
-		ArrayResize(face_geometry_indices, allocator, meshlet_build_result.meshlet_faces.count);
+		ArrayResize(face_vertex_ids, temp_allocator, meshlet_build_result.meshlet_faces.count * 3);
+		ArrayResize(face_attribute_ids, temp_allocator, meshlet_build_result.meshlet_faces.count * 3);
+		ArrayResize(face_geometry_indices, temp_allocator, meshlet_build_result.meshlet_faces.count);
 		
 		u32 group_meshlet_begin_index = 0;
 		for (u32 group_index = 0, output_face_index = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
@@ -3642,8 +3633,6 @@ static void ConvertMeshletGroupsToFaceGroups(
 		memcpy(mesh.face_attribute_ids, face_attribute_ids.data, face_attribute_ids.count * sizeof(AttributesID));
 		memcpy(mesh.face_geometry_indices, face_geometry_indices.data, face_geometry_indices.count * sizeof(u32));
 	}
-	
-	AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 	
 	
 	u32 group_meshlet_begin_index = 0;
@@ -3683,15 +3672,23 @@ static void ConvertMeshletGroupsToFaceGroups(
 	}
 }
 
-static void AppendNewMeshletsAndMeshletGroups(Allocator& heap_allocator, MeshletBuildResult meshlet_build_result, MeshletGroupBuildResult meshlet_group_build_result, Array<MdtErrorMetric> meshlet_group_error_metrics, Array<MdtMeshletGroup>& meshlet_groups, Array<MdtMeshlet>& meshlets, u32 level_index) {
+static void AppendNewMeshletsAndMeshletGroups(
+	Allocator& output_allocator,
+	MeshletBuildResult meshlet_build_result,
+	MeshletGroupBuildResult meshlet_group_build_result,
+	Array<MdtErrorMetric> meshlet_group_error_metrics,
+	Array<MdtMeshletGroup>& meshlet_groups,
+	Array<MdtMeshlet>& meshlets,
+	u32 level_index) {
+	
 	MDT_PROFILER_SCOPE("AppendNewMeshletsAndMeshletGroups");
 	
 	if (meshlet_groups.capacity == 0) {
-		ArrayReserve(meshlet_groups, heap_allocator, meshlet_group_build_result.prefix_sum.count * 4);
+		ArrayReserve(meshlet_groups, output_allocator, meshlet_group_build_result.prefix_sum.count * 4);
 	}
 	
 	if (meshlets.capacity == 0) {
-		ArrayReserve(meshlets, heap_allocator, meshlet_build_result.meshlets.count * 4);
+		ArrayReserve(meshlets, output_allocator, meshlet_build_result.meshlets.count * 4);
 	}
 	
 	u32 meshlet_group_base_index = meshlet_groups.count;
@@ -3719,7 +3716,7 @@ static void AppendNewMeshletsAndMeshletGroups(Allocator& heap_allocator, Meshlet
 			
 			ArrayAppend(meshlet_sphere_bounds, meshlet.geometric_sphere_bounds);
 			
-			ArrayAppendMaybeGrow(meshlets, heap_allocator, meshlet);
+			ArrayAppendMaybeGrow(meshlets, output_allocator, meshlet);
 		}
 		u32 end_meshlet_index = meshlets.count;
 		
@@ -3733,7 +3730,7 @@ static void AppendNewMeshletsAndMeshletGroups(Allocator& heap_allocator, Meshlet
 		meshlet_group.end_meshlet_index       = end_meshlet_index;
 		meshlet_group.level_of_detail_index   = level_index;
 		
-		ArrayAppendMaybeGrow(meshlet_groups, heap_allocator, meshlet_group);
+		ArrayAppendMaybeGrow(meshlet_groups, output_allocator, meshlet_group);
 		
 		group_meshlet_begin_index = group_meshlet_end_index;
 	}
@@ -3790,7 +3787,7 @@ static void CompactMeshletGroupFaces(ArrayView<FaceID> old_face_id_to_new_face_i
 // TODO: We could write this data directly into the output buffers from BuildMeshletsForFaceGroups.
 static void BuildMeshletVertexAndIndexBuffers(
 	const IndexedMeshView& mesh,
-	Allocator& heap_allocator,
+	Allocator& output_allocator,
 	MeshletBuildResult meshlet_build_result,
 	Array<u32> attributes_id_to_vertex_index,
 	Array<u32>& meshlet_vertex_indices,
@@ -3800,12 +3797,12 @@ static void BuildMeshletVertexAndIndexBuffers(
 	auto meshlet_corner_prefix_sum = meshlet_build_result.meshlet_corner_prefix_sum;
 	
 	if (meshlet_vertex_indices.count + meshlet_build_result.meshlet_corners.count > meshlet_vertex_indices.capacity) {
-		ArrayGrow(meshlet_vertex_indices, heap_allocator, ArrayComputeNewCapacity(meshlet_vertex_indices.capacity, meshlet_vertex_indices.count + meshlet_build_result.meshlet_corners.count));
+		ArrayGrow(meshlet_vertex_indices, output_allocator, ArrayComputeNewCapacity(meshlet_vertex_indices.capacity, meshlet_vertex_indices.count + meshlet_build_result.meshlet_corners.count));
 	}
 	
 	u32 new_meshlets_triangle_count = (meshlet_build_result.meshlet_triangles.count / 3);
 	if (meshlet_triangles.count + new_meshlets_triangle_count > meshlet_triangles.capacity) {
-		ArrayGrow(meshlet_triangles, heap_allocator, ArrayComputeNewCapacity(meshlet_triangles.capacity, meshlet_triangles.count + new_meshlets_triangle_count));
+		ArrayGrow(meshlet_triangles, output_allocator, ArrayComputeNewCapacity(meshlet_triangles.capacity, meshlet_triangles.count + new_meshlets_triangle_count));
 	}
 	
 	u32 begin_corner_index = 0;
@@ -3821,7 +3818,7 @@ static void BuildMeshletVertexAndIndexBuffers(
 			ArrayAppend(meshlet_vertex_indices, vertex_index);
 		}
 		u32 end_vertex_indices_index = meshlet_vertex_indices.count;
-
+		
 		auto& meshlet = meshlet_build_result.meshlets[meshlet_index];
 		meshlet.begin_vertex_indices_index = begin_vertex_indices_index;
 		meshlet.end_vertex_indices_index   = end_vertex_indices_index;
@@ -3841,7 +3838,7 @@ static void BuildMeshletVertexAndIndexBuffers(
 			triangle.i0 = meshlet_build_result.meshlet_triangles[face_index * 3 + 0];
 			triangle.i1 = meshlet_build_result.meshlet_triangles[face_index * 3 + 1];
 			triangle.i2 = meshlet_build_result.meshlet_triangles[face_index * 3 + 2];
-
+			
 			ArrayAppend(meshlet_triangles, triangle);
 		}
 		u32 end_meshlet_triangles_index = meshlet_triangles.count;
@@ -3856,25 +3853,26 @@ static void BuildMeshletVertexAndIndexBuffers(
 
 static void AppendChangedVertices(
 	const IndexedMeshView& mesh,
-	Allocator& allocator,
-	Allocator& heap_allocator,
+	Allocator& output_allocator,
 	Array<u8> changed_vertex_mask,
 	Array<u32> attributes_id_to_vertex_index,
 	Array<float>& vertices) {
 	MDT_PROFILER_SCOPE("AppendChangedVertices");
 	
+	auto temp_allocator = CopyAllocator(output_allocator);
+	
 	Array<VertexID> attributes_id_to_vertex_id;
-	ArrayResizeMemset(attributes_id_to_vertex_id, allocator, mesh.attribute_count, 0xFF);
-
+	ArrayResizeMemset(attributes_id_to_vertex_id, temp_allocator, mesh.attribute_count, 0xFF);
+	
 	for (u32 corner_index = 0; corner_index < mesh.face_count * 3; corner_index += 1) {
 		auto vertex_id = mesh.face_vertex_ids[corner_index];
 		if (vertex_id.index == u32_max || changed_vertex_mask[vertex_id.index] == 0) continue;
-
+		
 		auto attributes_id = mesh.face_attribute_ids[corner_index];
 		attributes_id_to_vertex_id[attributes_id.index] = vertex_id;
 	}
 	memset(changed_vertex_mask.data, 0, changed_vertex_mask.count);
-
+	
 	u32 changed_vertex_count = 0;
 	for (AttributesID attributes_id = { 0 }; attributes_id.index < mesh.attribute_count; attributes_id.index += 1) {
 		auto vertex_id = attributes_id_to_vertex_id[attributes_id.index];
@@ -3886,7 +3884,7 @@ static void AppendChangedVertices(
 	u32 new_array_size          = vertices.count + changed_vertex_count * vertex_stride_dwords;
 	
 	if (new_array_size > vertices.capacity) {
-		ArrayGrow(vertices, heap_allocator, new_array_size * 3 / 2);
+		ArrayGrow(vertices, output_allocator, new_array_size * 3 / 2);
 	}
 	
 	u32 output_vertex_index = vertices.count / vertex_stride_dwords;
@@ -3903,7 +3901,7 @@ static void AppendChangedVertices(
 		memcpy(vertex + 3, mesh[attributes_id], attribute_stride_dwords * sizeof(u32));
 		output_vertex_index += 1;
 	}
-
+	
 	MDT_ASSERT(vertices.count == output_vertex_index * vertex_stride_dwords);
 }
 
@@ -3917,11 +3915,8 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 	MDT_ASSERT(inputs);
 	MDT_ASSERT(result);
 	
-	Allocator allocator;
-	InitializeAllocator(allocator, callbacks ? &callbacks->heap_allocator : nullptr);
-
-	Allocator heap_allocator;
-	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
+	auto allocator = InitializeAllocator(callbacks);
+	auto output_allocator = CopyAllocator(allocator);
 	
 	auto mesh = BuildIndexedMesh(allocator, inputs->mesh.geometry_descs, inputs->mesh.geometry_desc_count, inputs->mesh.vertex_stride_bytes);
 	
@@ -3954,10 +3949,10 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 	ArrayResizeMemset(changed_vertex_mask, allocator, mesh.attribute_count, 0xFF);
 	
 	Array<float> vertices;
-	AppendChangedVertices(mesh, allocator, heap_allocator, changed_vertex_mask, attributes_id_to_vertex_index, vertices);
+	AppendChangedVertices(mesh, output_allocator, changed_vertex_mask, attributes_id_to_vertex_index, vertices);
 	
 	Array<MdtContinuousLodLevel> levels;
-	ArrayReserve(levels, heap_allocator, continuous_lod_max_levels_of_details);
+	ArrayReserve(levels, output_allocator, continuous_lod_max_levels_of_details);
 	
 	Array<MdtMeshletGroup> meshlet_groups;
 	Array<MdtMeshlet>      meshlets;
@@ -3966,12 +3961,12 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 	Array<MdtMeshletTriangle> meshlet_triangles;
 	
 	for (u32 level_index = 0; level_index < continuous_lod_max_levels_of_details; level_index += 1) {
-		u32 allocator_high_water = allocator.memory_block_count;
+		auto temp_allocator = CopyAllocator(allocator);
 		
 		auto meshlet_build_result = BuildMeshletsForFaceGroups(
 			mesh,
 			callbacks ? &callbacks->parallel_for : nullptr,
-			allocator,
+			temp_allocator,
 			meshlet_group_face_prefix_sum,
 			meshlet_group_error_metrics,
 			meshlet_target_face_count,
@@ -3981,7 +3976,7 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 		
 		BuildMeshletVertexAndIndexBuffers(
 			mesh,
-			heap_allocator,
+			output_allocator,
 			meshlet_build_result,
 			attributes_id_to_vertex_index,
 			meshlet_vertex_indices,
@@ -3990,7 +3985,7 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 		
 		
 		auto meshlet_group_build_result = BuildMeshletGroups(
-			allocator,
+			temp_allocator,
 			meshlet_build_result.meshlets,
 			meshlet_build_result.meshlet_adjacency
 		);
@@ -3999,7 +3994,7 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 			mesh,
 			meshlet_build_result,
 			meshlet_group_build_result,
-			allocator,
+			temp_allocator,
 			meshlet_group_face_prefix_sum,
 			meshlet_group_error_metrics
 		);
@@ -4011,8 +4006,7 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 		if (is_last_level == false) {
 			DecimateMeshFaceGroups(
 				mesh,
-				allocator,
-				heap_allocator,
+				temp_allocator,
 				inputs->mesh,
 				callbacks ? &callbacks->parallel_for : nullptr,
 				meshlet_group_face_prefix_sum,
@@ -4020,10 +4014,10 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 				changed_vertex_mask
 			);
 			
-			AppendChangedVertices(mesh, allocator, heap_allocator, changed_vertex_mask, attributes_id_to_vertex_index, vertices);
+			AppendChangedVertices(mesh, output_allocator, changed_vertex_mask, attributes_id_to_vertex_index, vertices);
 			
 			// Compact the mesh after decimation to remove unused faces and edges.
-			auto remap = CreateMeshFaceRemap(mesh, allocator);
+			auto remap = CreateMeshFaceRemap(mesh, temp_allocator);
 			CompactMeshletGroupFaces(remap, meshlet_group_face_prefix_sum);
 		} else {
 			// There is no coarser version of the mesh. Set meshlet group errors to FLT_MAX to make sure LOD
@@ -4037,7 +4031,7 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 		
 		meshlet_group_base_index = meshlet_groups.count;
 		AppendNewMeshletsAndMeshletGroups(
-			heap_allocator,
+			output_allocator,
 			meshlet_build_result,
 			meshlet_group_build_result,
 			meshlet_group_error_metrics,
@@ -4049,8 +4043,6 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 		level.end_meshlet_groups_index = meshlet_groups.count;
 		level.end_meshlets_index  = meshlets.count;
 		ArrayAppend(levels, level);
-		
-		AllocatorFreeMemoryBlocks(allocator, allocator_high_water);
 		
 		if (is_last_level) break;
 	}
@@ -4067,24 +4059,21 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 	result->meshlet_triangle_count = meshlet_triangles.count;
 	result->vertex_count           = vertices.count / (inputs->mesh.vertex_stride_bytes / sizeof(u32));
 	result->level_count            = levels.count;
-	MDT_ASSERT(heap_allocator.memory_block_count == 6);
 	
-	AllocatorFreeMemoryBlocks(allocator);
+	MDT_ASSERT(output_allocator.memory_block_count == 6);
+	output_allocator.memory_block_count = 0;
 }
 
 void MdtFreeContinuousLodBuildResult(const MdtContinuousLodBuildResult* result, const MdtSystemCallbacks* callbacks) {
 	using namespace MeshDecimationTools;
 	
-	Allocator heap_allocator;
-	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
-	
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->meshlet_groups;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->meshlets;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->meshlet_vertex_indices;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->meshlet_triangles;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->vertices;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->levels;
-	AllocatorFreeMemoryBlocks(heap_allocator);
+	auto allocator = InitializeAllocator(callbacks);
+	allocator.memory_blocks[allocator.memory_block_count++] = result->meshlet_groups;
+	allocator.memory_blocks[allocator.memory_block_count++] = result->meshlets;
+	allocator.memory_blocks[allocator.memory_block_count++] = result->meshlet_vertex_indices;
+	allocator.memory_blocks[allocator.memory_block_count++] = result->meshlet_triangles;
+	allocator.memory_blocks[allocator.memory_block_count++] = result->vertices;
+	allocator.memory_blocks[allocator.memory_block_count++] = result->levels;
 }
 
 
@@ -4233,14 +4222,11 @@ void MdtBuildDiscreteLod(const MdtDiscreteLodBuildInputs* /*inputs*/, MdtDiscret
 void MdtFreeDiscreteLodBuildResult(const MdtDiscreteLodBuildResult* result, const MdtSystemCallbacks* callbacks) {
 	using namespace MeshDecimationTools;
 	
-	Allocator heap_allocator;
-	InitializeAllocator(heap_allocator, callbacks ? &callbacks->heap_allocator : nullptr);
-	
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->level_of_detail_descs;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->geometry_descs;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->indices;
-	heap_allocator.memory_blocks[heap_allocator.memory_block_count++] = result->vertices;
-	AllocatorFreeMemoryBlocks(heap_allocator);
+	auto allocator = InitializeAllocator(callbacks);
+	allocator.memory_blocks[allocator.memory_block_count++] = result->level_of_detail_descs;
+	allocator.memory_blocks[allocator.memory_block_count++] = result->geometry_descs;
+	allocator.memory_blocks[allocator.memory_block_count++] = result->indices;
+	allocator.memory_blocks[allocator.memory_block_count++] = result->vertices;
 }
 
 
