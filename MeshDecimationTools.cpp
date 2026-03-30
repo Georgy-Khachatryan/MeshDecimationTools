@@ -3,11 +3,11 @@
 //
 // References:
 // - Michael Garland, Paul S. Heckbert. 1997. Surface Simplification Using Quadric Error Metrics.
-// - Thomas Wang. 1997. Integer Hash Function.
 // - Hugues Hoppe. 1999. New Quadric Metric for Simplifying Meshes with Appearance Attributes.
 // - Hugues Hoppe, Steve Marschner. 2000. Efficient Minimization of New Quadric Metric for Simplifying Meshes with Appearance Attributes.
 // - Matthias Teschner, Bruno Heidelberger, Matthias Muller, Danat Pomeranets, Markus Gross. 2003. Optimized Spatial Hashing for Collision Detection of Deformable Objects.
 // - Brian Karis, Rune Stubbe, Graham Wihlidal. 2021. Nanite A Deep Dive.
+// - Wang Yi. 2021. wyhash32 https://github.com/wangyi-fudan/wyhash/blob/master/wyhash32.h (public domain).
 // - HSUEH-TI DEREK LIU, XIAOTING ZHANG, CEM YUKSEL. 2024. Simplifying Triangle Meshes in the Wild.
 // - Arseny Kapoulkine. 2025. Meshoptimizer library. https://github.com/zeux/meshoptimizer. See license in THIRD_PARTY_LICENSES.md.
 //
@@ -93,40 +93,32 @@ compile_const u32 max_initial_group_size = meshlet_group_max_meshlet_count * mes
 compile_const u32 hash_table_max_occupancy_percent = 75;
 
 
-// Based on [Kapoulkine 2025] and [Teschner 2003].
-static u32 ComputePositionHash(const Vector3& v) {
-	const u32* key = (const u32*)&v;
-	
-	u32 x = key[0];
-	u32 y = key[1];
-	u32 z = key[2];
-	
-	// Replace negative zero with zero.
-	x = (x == 0x80000000) ? 0 : x;
-	y = (y == 0x80000000) ? 0 : y;
-	z = (z == 0x80000000) ? 0 : z;
-	
-	// Scramble bits to make sure that integer coordinates have entropy in lower bits.
-	x ^= x >> 17;
-	y ^= y >> 17;
-	z ^= z >> 17;
-	
-	// Optimized Spatial Hashing for Collision Detection of Deformable Objects.
-	return (x * 73856093) ^ (y * 19349663) ^ (z * 83492791);
+//
+// Based on wyhash32 by Wang Yi (public domain).
+// https://github.com/wangyi-fudan/wyhash/blob/master/wyhash32.h
+//
+always_inline_function static void WyMix32(u32& a, u32& b) {
+	u64 c = (u64)(a ^ 0x53C5CA59u) * (u64)(b ^ 0x74743C1Bu);
+	a = (u32)(c >>  0);
+	b = (u32)(c >> 32);
 }
 
-// Based on [Wang 1997]. 64 bit to 32 bit Hash Functions.
-static u32 ComputeEdgeKeyHash(u64 key) {
-	key = (~key) + (key << 18); // key = (key << 18) - key - 1;
-	key = key ^ (key >> 31);
-	key = key * 21; // key = (key + (key << 2)) + (key << 4);
-	key = key ^ (key >> 11);
-	key = key + (key << 6);
-	key = key ^ (key >> 22);
-	
-	return (u32)key;
+// Unrolled version of wyhash32 has two mixes at the end, but for speed there is only one.
+// During testing both versions were competitive on hash collisions with real world meshes.
+always_inline_function static u32 WyHash32x3(u32 a, u32 b, u32 c) {
+	WyMix32(a, b);
+	a ^= c;
+	b ^= c;
+	WyMix32(a, b);
+	// WyMix32(a, b);
+	return a ^ b;
 }
 
+always_inline_function static u32 WyHash32x2(u32 a, u32 b = 0) {
+	WyMix32(a, b);
+	WyMix32(a, b);
+	return a ^ b;
+}
 
 enum struct ElementType : u32 {
 	Vertex = 0,
@@ -237,6 +229,7 @@ struct alignas(MDT_CACHE_LINE_SIZE) IndexedMeshView {
 };
 static_assert(sizeof(IndexedMeshView) == 64, "Invalid IndexedMeshView size.");
 
+
 static u64 PackEdgeKey(VertexID vertex_id_0, VertexID vertex_id_1) {
 	// Always pack VertexIDs in ascending order to ensure that PackEdgeKey(A, B) == PackEdgeKey(B, A) and they hash to the same value.
 	return vertex_id_1.index > vertex_id_0.index ?
@@ -245,16 +238,25 @@ static u64 PackEdgeKey(VertexID vertex_id_0, VertexID vertex_id_1) {
 }
 
 static bool operator==(const Vector3& lh, const Vector3& rh) { return lh.x == rh.x && lh.y == rh.y && lh.z == rh.z; }
-static bool operator==(const Edge& lh, const Edge& rh) { return lh.vertex_0.index == rh.vertex_0.index && lh.vertex_1.index == rh.vertex_1.index; }
-static bool operator==(VertexID lh, VertexID rh) { return lh.index == rh.index; }
-static bool operator==(AttributesID lh, AttributesID rh) { return lh.index == rh.index; }
-static bool IsValidKey(u64 v) { return v != u64_max; }
+static bool operator==(const Edge& lh, const Edge& rh)       { return lh.vertex_0.index == rh.vertex_0.index && lh.vertex_1.index == rh.vertex_1.index; }
+static bool operator==(VertexID lh, VertexID rh)             { return lh.index == rh.index; }
+static bool operator==(AttributesID lh, AttributesID rh)     { return lh.index == rh.index; }
+static bool IsValidKey(u64 v)                                { return v != u64_max; }
 
-static u32 ComputeHash(const Vector3& v) { return ComputePositionHash(v); }
-static u32 ComputeHash(const Edge& v) { return ComputeEdgeKeyHash((u64)v.vertex_0.index | ((u64)v.vertex_1.index << 32)); }
-static u32 ComputeHash(VertexID v) { return ComputeEdgeKeyHash(v.index); }
-static u32 ComputeHash(AttributesID v) { return ComputeEdgeKeyHash(v.index); }
-static u32 ComputeHash(u64 v) { return ComputeEdgeKeyHash(v); }
+static u32 ComputeHash(const Vector3& v) {
+	u32* components = (u32*)&v;
+	u32 x = components[0];
+	u32 y = components[1];
+	u32 z = components[2];
+	
+	compile_const u32 minus_zero = 1u << 31;
+	return WyHash32x3(x == minus_zero ? 0 : x, y == minus_zero ? 0 : y, z == minus_zero ? 0 : z);
+}
+static u32 ComputeHash(const Edge& v)  { return WyHash32x2(v.vertex_0.index, v.vertex_1.index); }
+static u32 ComputeHash(VertexID v)     { return WyHash32x2(v.index); }
+static u32 ComputeHash(AttributesID v) { return WyHash32x2(v.index); }
+static u32 ComputeHash(u64 v)          { return WyHash32x2((u32)v, (u32)(v >> 32u)); }
+
 
 template<typename ElementID> ElementID GetElementID(const Corner& corner);
 template<> always_inline_function VertexID GetElementID<VertexID>(const Corner& corner) { return corner.vertex_id; }
@@ -3030,7 +3032,7 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 			Array<u32>       group_meshlet_face_prefix_sum   = { meshlet_face_prefix_sum.data   + begin_element_index,     0, element_count };
 			Array<u32>       group_meshlet_corner_prefix_sum = { meshlet_corner_prefix_sum.data + begin_element_index,     0, element_count };
 			
-			BuildMeshletsForFaceGroup(
+			if (element_count != 0) BuildMeshletsForFaceGroup(
 				mesh,
 				kd_tree,
 				begin_element_index,
@@ -3060,6 +3062,8 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 	u32 corner_prefix_sum  = 0;
 	for (u32 group_index = 0; group_index < meshlet_group_face_prefix_sum.count; group_index += 1) {
 		u32 meshlet_count = meshlet_group_meshlet_prefix_sum[group_index];
+		meshlet_group_meshlet_prefix_sum[group_index] = meshlet_prefix_sum + meshlet_count;
+		if (meshlet_count == 0) continue;
 		
 		u32 begin_element_index = group_index ? meshlet_group_face_prefix_sum[group_index - 1] : 0;
 		u32 end_element_index   = meshlet_group_face_prefix_sum[group_index];
@@ -3076,21 +3080,21 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 		
 		u32 corner_count = group_meshlet_corner_prefix_sum[meshlet_count - 1];
 		
-		for (u32 i = begin_element_index; i < end_element_index; i += 1) {
+		for (u32 element_index = begin_element_index; element_index < end_element_index; element_index += 1) {
 			// Translate meshlet index within the group to a global meshlet index.
-			kd_tree_elements[i].partition_index += meshlet_prefix_sum;
+			kd_tree_elements[element_index].partition_index += meshlet_prefix_sum;
 		}
 		
-		for (u32 i = 0; i < meshlet_count; i += 1, meshlet_prefix_sum += 1) {
-			meshlet_face_prefix_sum[meshlet_prefix_sum]   = group_meshlet_face_prefix_sum[i]   + face_prefix_sum;
-			meshlet_corner_prefix_sum[meshlet_prefix_sum] = group_meshlet_corner_prefix_sum[i] + corner_prefix_sum;
+		for (u32 meshlet_index = 0; meshlet_index < meshlet_count; meshlet_index += 1) {
+			meshlet_face_prefix_sum[meshlet_prefix_sum   + meshlet_index] = group_meshlet_face_prefix_sum[meshlet_index]   + face_prefix_sum;
+			meshlet_corner_prefix_sum[meshlet_prefix_sum + meshlet_index] = group_meshlet_corner_prefix_sum[meshlet_index] + corner_prefix_sum;
 		}
-		meshlet_group_meshlet_prefix_sum[group_index] = meshlet_prefix_sum;
 		
 		memmove(meshlet_corners.data + corner_prefix_sum, group_meshlet_corners.data, corner_count * sizeof(CornerID));
 		
-		face_prefix_sum   += face_count;
-		corner_prefix_sum += corner_count;
+		face_prefix_sum    += face_count;
+		corner_prefix_sum  += corner_count;
+		meshlet_prefix_sum += meshlet_count;
 	}
 	meshlet_face_prefix_sum.count   = meshlet_prefix_sum;
 	meshlet_corner_prefix_sum.count = meshlet_prefix_sum;
