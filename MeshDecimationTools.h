@@ -23,10 +23,6 @@
 #define MDT_MESHLET_GROUP_SIZE 32
 #endif // !defined(MDT_MESHLET_GROUP_SIZE)
 
-#if !defined(MDT_ENABLE_ATTRIBUTE_SUPPORT)
-#define MDT_ENABLE_ATTRIBUTE_SUPPORT 1
-#endif // !defined(MDT_ENABLE_ATTRIBUTE_SUPPORT)
-
 #if !defined(MDT_PROFILER_SCOPE)
 #define MDT_PROFILER_SCOPE(name) do {} while (0)
 #endif // !defined(MDT_PROFILER_SCOPE)
