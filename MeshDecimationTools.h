@@ -27,9 +27,18 @@
 #define MDT_PROFILER_SCOPE(name) do {} while (0)
 #endif // !defined(MDT_PROFILER_SCOPE)
 
+#if !defined(MDT_MAX_MESHLET_VERTEX_COUNT)
 #define MDT_MAX_MESHLET_VERTEX_COUNT 254
+#endif // !defined(MDT_MAX_MESHLET_VERTEX_COUNT)
+
+#if !defined(MDT_MAX_MESHLET_FACE_COUNT)
 #define MDT_MAX_MESHLET_FACE_COUNT 128
+#endif // !defined(MDT_MAX_MESHLET_FACE_COUNT)
+
+#if !defined(MDT_MAX_CLOD_LEVEL_COUNT)
 #define MDT_MAX_CLOD_LEVEL_COUNT 16
+#endif // !defined(MDT_MAX_CLOD_LEVEL_COUNT)
+
 
 #if defined(__cplusplus)
 extern "C" {

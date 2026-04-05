@@ -110,15 +110,18 @@ By default all memory is allocated via C `realloc`. This behavior can be overrid
 ```
 MdtSystemCallbacks callbacks = {};
 ```
-Temporary allocator is used for most internal data structures. Library guarantees that allocations are freed in reverse order. This allows temporary allocator to be implemented as a stack.
-```
-callbacks.temp_allocator.reallocate = &CustomTempAllocatorCallback;
-callbacks.temp_allocator.user_data  = &custom_temp_allocator;
-```
-Heap allocator is used for all output arrays as well as some internal data structures. Allocations might be freed in any order.
+Heap allocator is used for output arrays as well as internal data structures. Allocations might be freed in any order.
 ```
 callbacks.heap_allocator.reallocate = &CustomHeapAllocatorCallback;
 callbacks.heap_allocator.user_data  = &custom_heap_allocator;
+```
+
+### Threading
+By default all algorithms run in a single threaded mode. Continuous level of detail builds supports multi threaded meshlet generation as well as meshlet group decimation via `MdtParallelForCallbacks`.
+```
+callbacks.parallel_for.callback     = &ParallelForCallback;
+callbacks.parallel_for.user_data    = &thread_pool;
+callbacks.parallel_for.thread_count = 32;
 ```
 
 ## Continuous level of detail overview
@@ -182,10 +185,9 @@ By default asserts are handled via C `assert`. You can set a custom assertion ha
 ```
 
 ## Limitations and further work
-- Performance. Mesh decimation algorithm is significantly slower than it could be. Most of the time is spent computing and recomputing edge collapse errors (on average around 50 edge collapse errors are recomputed after each performed edge collapse). This results in poor throughput of around 67k triangles/s for DLOD build and 87k triangles/s for CLOD build on Ryzen 9 9950x. Threading can significantly speed up CLOD build times, but there are opportunities for improving single threaded performance too.
+- Performance. Mesh decimation algorithm is significantly slower than it could be. Most of the time is spent computing and recomputing edge collapse errors.
 - Meshlet generation quality. Overall meshlet generation quality at lower LODs is relatively good, but at higher LODs meshlets might have enclaves of other meshlets. The same is true for meshlet group generation. As a workaround you can set `meshlet_min_face_count` and `meshlet_group_min_meshlet_count` to 1.
-- Mesh decimation quality improvements. Volume preservation quadrics. Higher quality quadric minimization. Virtual edge insertion. Per meshlet group error scaling.
-- Transient memory usage. There is a large amount of transient allocations which may not be necessary.
+- Mesh decimation quality. Volume preservation quadrics. Higher quality quadric minimization. Virtual edge insertion. Per meshlet group error scaling.
 - Lack of mesh skinning support.
 
 
@@ -200,8 +202,7 @@ Mesh Decimation References:
 - HSUEH-TI DEREK LIU, XIAOTING ZHANG, CEM YUKSEL. 2024. Simplifying Triangle Meshes in the Wild.
 
 Other References:
-- Thomas Wang. 1997. Integer Hash Function.
-- Matthias Teschner, Bruno Heidelberger, Matthias Muller, Danat Pomeranets, Markus Gross. 2003. Optimized Spatial Hashing for Collision Detection of Deformable Objects.
+- Wang Yi. 2021. wyhash32.
 - Arseny Kapoulkine. 2025. Meshoptimizer library.
 
 ## Third Party

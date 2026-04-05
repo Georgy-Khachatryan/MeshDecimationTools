@@ -5,7 +5,6 @@
 // - Michael Garland, Paul S. Heckbert. 1997. Surface Simplification Using Quadric Error Metrics.
 // - Hugues Hoppe. 1999. New Quadric Metric for Simplifying Meshes with Appearance Attributes.
 // - Hugues Hoppe, Steve Marschner. 2000. Efficient Minimization of New Quadric Metric for Simplifying Meshes with Appearance Attributes.
-// - Matthias Teschner, Bruno Heidelberger, Matthias Muller, Danat Pomeranets, Markus Gross. 2003. Optimized Spatial Hashing for Collision Detection of Deformable Objects.
 // - Brian Karis, Rune Stubbe, Graham Wihlidal. 2021. Nanite A Deep Dive.
 // - Wang Yi. 2021. wyhash32 https://github.com/wangyi-fudan/wyhash/blob/master/wyhash32.h (public domain).
 // - HSUEH-TI DEREK LIU, XIAOTING ZHANG, CEM YUKSEL. 2024. Simplifying Triangle Meshes in the Wild.
