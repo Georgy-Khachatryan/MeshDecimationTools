@@ -2747,10 +2747,6 @@ static void KdTreeBuildElementsForMeshlets(ArrayView<MdtMeshlet> meshlets, Alloc
 	}
 }
 
-static MdtSphereBounds ComputeSphereBoundsUnion(ArrayView<MdtSphereBounds> source_sphere_bounds) {
-	return MdtComputeSphereBoundsUnion(source_sphere_bounds.data, source_sphere_bounds.count);
-}
-
 struct MeshletAdjacencyInfo {
 	u32 meshlet_index     = 0;
 	u32 shared_edge_count = 0;
@@ -3195,9 +3191,6 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 		auto meshlet_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
 		auto meshlet_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 		
-		FixedSizeArray<MdtSphereBounds, meshlet_max_vertex_count> vertex_sphere_bounds;
-		MDT_ASSERT(end_corner_index - begin_corner_index <= meshlet_max_vertex_count);
-		
 		for (u32 corner_index = begin_corner_index; corner_index < end_corner_index; corner_index += 1) {
 			auto corner_id = meshlet_corners[corner_index];
 			auto vertex_id = mesh.face_vertex_ids[corner_id.index];
@@ -3205,25 +3198,18 @@ static MeshletBuildResult BuildMeshletsForFaceGroups(
 			auto position = mesh[vertex_id];
 			meshlet_aabb_min = VectorMin(meshlet_aabb_min, position);
 			meshlet_aabb_max = VectorMax(meshlet_aabb_max, position);
-			
-			MdtSphereBounds bounds;
-			bounds.center = position;
-			bounds.radius = 0.f;
-			ArrayAppend(vertex_sphere_bounds, bounds);
 		}
 		
 		auto& meshlet = meshlets[meshlet_index];
 		meshlet.aabb_min = meshlet_aabb_min;
 		meshlet.aabb_max = meshlet_aabb_max;
 		
-		auto meshlet_sphere_bounds = ComputeSphereBoundsUnion(CreateArrayView(vertex_sphere_bounds));
-		meshlet.geometric_sphere_bounds = meshlet_sphere_bounds;
-		
 		// Will be overridden in the loop below if we have source meshlet_group_error_metrics.
 		// For the level zero we don't have them, so this error metric will be kept as is.
-		meshlet.current_level_error_metric.bounds = meshlet_sphere_bounds;
-		meshlet.current_level_error_metric.error  = 0.f;
-		meshlet.current_level_meshlet_group_index = u32_max;
+		meshlet.current_level_error_metric.aabb_min = meshlet_aabb_min;
+		meshlet.current_level_error_metric.aabb_max = meshlet_aabb_max;
+		meshlet.current_level_error_metric.error    = 0.f;
+		meshlet.current_level_meshlet_group_index   = u32_max;
 		
 		// All meshlets faces are guaranteed to come from the same geometry.
 		meshlet.geometry_index = mesh.face_geometry_indices[meshlet_corners[begin_corner_index].index / 3];
@@ -3750,7 +3736,8 @@ static void ConvertMeshletGroupsToFaceGroups(
 	for (u32 group_index = 0, meshlet_group_face_count = 0; group_index < meshlet_group_build_result.prefix_sum.count; group_index += 1) {
 		u32 group_meshlet_end_index = meshlet_group_build_result.prefix_sum[group_index];
 		
-		FixedSizeArray<MdtSphereBounds, meshlet_group_max_meshlet_count> meshlet_error_sphere_bounds;
+		auto meshlet_error_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
+		auto meshlet_error_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 		float max_error = 0.f;
 		
 		for (u32 group_meshlet_index = group_meshlet_begin_index; group_meshlet_index < group_meshlet_end_index; group_meshlet_index += 1) {
@@ -3763,7 +3750,8 @@ static void ConvertMeshletGroupsToFaceGroups(
 			meshlet_group_face_count += meshlet_face_count;
 			
 			auto& meshlet = meshlet_build_result.meshlets[meshlet_index];
-			ArrayAppend(meshlet_error_sphere_bounds, meshlet.current_level_error_metric.bounds);
+			meshlet_error_aabb_min = VectorMin(meshlet_error_aabb_min, meshlet.current_level_error_metric.aabb_min);
+			meshlet_error_aabb_max = VectorMax(meshlet_error_aabb_max, meshlet.current_level_error_metric.aabb_max);
 			max_error = meshlet.current_level_error_metric.error > max_error ? meshlet.current_level_error_metric.error : max_error;
 		}
 		ArrayAppend(meshlet_group_face_prefix_sum, meshlet_group_face_count);
@@ -3775,8 +3763,9 @@ static void ConvertMeshletGroupsToFaceGroups(
 		// See [Karis 2021] for reference on monotonic error metric.
 		//
 		MdtErrorMetric meshlet_group_minimum_error_metric;
-		meshlet_group_minimum_error_metric.bounds = ComputeSphereBoundsUnion(CreateArrayView(meshlet_error_sphere_bounds));
-		meshlet_group_minimum_error_metric.error  = max_error;
+		meshlet_group_minimum_error_metric.aabb_min = meshlet_error_aabb_min;
+		meshlet_group_minimum_error_metric.aabb_max = meshlet_error_aabb_max;
+		meshlet_group_minimum_error_metric.error    = max_error;
 		ArrayAppend(meshlet_group_error_metrics, meshlet_group_minimum_error_metric);
 		
 		group_meshlet_begin_index = group_meshlet_end_index;
@@ -3811,7 +3800,6 @@ static void AppendNewMeshletsAndMeshletGroups(
 		auto meshlet_group_aabb_min = Vector3{ +FLT_MAX, +FLT_MAX, +FLT_MAX };
 		auto meshlet_group_aabb_max = Vector3{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
 		
-		FixedSizeArray<MdtSphereBounds, meshlet_group_max_meshlet_count> meshlet_sphere_bounds;
 		auto meshlet_group_error_metric = meshlet_group_error_metrics[group_index];
 		
 		u32 begin_meshlet_index = meshlets.count;
@@ -3825,21 +3813,17 @@ static void AppendNewMeshletsAndMeshletGroups(
 			meshlet_group_aabb_min = VectorMin(meshlet_group_aabb_min, meshlet.aabb_min);
 			meshlet_group_aabb_max = VectorMax(meshlet_group_aabb_max, meshlet.aabb_max);
 			
-			ArrayAppend(meshlet_sphere_bounds, meshlet.geometric_sphere_bounds);
-			
 			ArrayAppendMaybeGrow(meshlets, output_allocator, meshlet);
 		}
 		u32 end_meshlet_index = meshlets.count;
 		
 		MdtMeshletGroup meshlet_group;
-		meshlet_group.aabb_min = meshlet_group_aabb_min;
-		meshlet_group.aabb_max = meshlet_group_aabb_max;
-		
-		meshlet_group.geometric_sphere_bounds = ComputeSphereBoundsUnion(CreateArrayView(meshlet_sphere_bounds));
-		meshlet_group.error_metric            = meshlet_group_error_metric;
-		meshlet_group.begin_meshlet_index     = begin_meshlet_index;
-		meshlet_group.end_meshlet_index       = end_meshlet_index;
-		meshlet_group.level_of_detail_index   = level_index;
+		meshlet_group.aabb_min              = meshlet_group_aabb_min;
+		meshlet_group.aabb_max              = meshlet_group_aabb_max;
+		meshlet_group.error_metric          = meshlet_group_error_metric;
+		meshlet_group.begin_meshlet_index   = begin_meshlet_index;
+		meshlet_group.end_meshlet_index     = end_meshlet_index;
+		meshlet_group.level_of_detail_index = level_index;
 		
 		ArrayAppendMaybeGrow(meshlet_groups, output_allocator, meshlet_group);
 		
@@ -4099,7 +4083,7 @@ void MdtBuildContinuousLod(const MdtContinuousLodBuildInputs* inputs, MdtContinu
 	ArrayReserve(meshlet_group_error_metrics,   allocator, DivideAndRoundUp(mesh.face_count, target_initial_group_size));
 	
 	// Note that we're not adding an initial error metric to meshlet_group_error_metrics.
-	// Meshlets built from the initial groups will use current_level_error_metric.bounds set to the geometric_sphere_bounds with zero error.
+	// Meshlets built from the initial groups will use current_level_error_metric.aabb_min/aabb_max set to the geometric aabb_min/aabb_max with zero error.
 	bool split_into_initial_groups_for_threading = ParallelForThreadCount(callbacks ? &callbacks->parallel_for : nullptr) >= 2;
 	if (split_into_initial_groups_for_threading) {
 		// Build initial groups so we can parallelize the initial meshlet generation across them.
@@ -4391,69 +4375,4 @@ void MdtFreeDiscreteLodBuildResult(const MdtDiscreteLodBuildResult* result, cons
 	allocator.memory_blocks[allocator.memory_block_count++] = result->geometry_descs;
 	allocator.memory_blocks[allocator.memory_block_count++] = result->indices;
 	allocator.memory_blocks[allocator.memory_block_count++] = result->vertices;
-}
-
-
-//
-// Based on [Kapoulkine 2025].
-//
-MdtSphereBounds MdtComputeSphereBoundsUnion(const MdtSphereBounds* source_sphere_bounds, uint32_t source_sphere_bounds_count) {
-	using namespace MeshDecimationTools;
-	
-	u32 aabb_min_index[3] = { 0, 0, 0 };
-	u32 aabb_max_index[3] = { 0, 0, 0 };
-	
-	float aabb_min[3] = { +FLT_MAX, +FLT_MAX, +FLT_MAX };
-	float aabb_max[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
-	
-	for (u32 i = 0; i < source_sphere_bounds_count; i += 1) {
-		auto source_bounds = source_sphere_bounds[i];
-		
-		auto min = source_bounds.center - source_bounds.radius;
-		auto max = source_bounds.center + source_bounds.radius;
-		
-		for (u32 axis = 0; axis < 3; axis += 1) {
-			if (aabb_min[axis] > LoadElementByIndex(min, axis)) {
-				aabb_min[axis] = LoadElementByIndex(min, axis);
-				aabb_min_index[axis] = i;
-			}
-			
-			if (aabb_max[axis] < LoadElementByIndex(max, axis)) {
-				aabb_max[axis] = LoadElementByIndex(max, axis);
-				aabb_max_index[axis] = i;
-			}
-		}
-	}
-	
-	float max_axis_length = -FLT_MAX;
-	u32 max_axis_length_index = 0;
-	
-	for (u32 axis = 0; axis < 3; axis += 1) {
-		auto min_bounds = source_sphere_bounds[aabb_min_index[axis]];
-		auto max_bounds = source_sphere_bounds[aabb_max_index[axis]];
-		
-		float axis_length = Length(max_bounds.center - min_bounds.center) + min_bounds.radius + max_bounds.radius;
-		if (max_axis_length < axis_length) {
-			max_axis_length = axis_length;
-			max_axis_length_index = axis;
-		}
-	}
-	
-	MdtSphereBounds result_bounds;
-	result_bounds.center = (source_sphere_bounds[aabb_min_index[max_axis_length_index]].center + source_sphere_bounds[aabb_max_index[max_axis_length_index]].center) * 0.5f;
-	result_bounds.radius = max_axis_length * 0.5f;
-	
-	for (u32 i = 0; i < source_sphere_bounds_count; i += 1) {
-		auto source_bounds = source_sphere_bounds[i];
-		
-		float distance = Length(source_bounds.center - result_bounds.center);
-		if (distance + source_bounds.radius > result_bounds.radius) {
-			float shift_t = distance > 0.f ? ((source_bounds.radius - result_bounds.radius) / distance) * 0.5f + 0.5f : 0.f;
-			
-			result_bounds.center = (result_bounds.center * (1.f - shift_t) + source_bounds.center * shift_t);
-			result_bounds.radius = (result_bounds.radius + source_bounds.radius + distance) * 0.5f;
-		}
-	}
-	
-	return result_bounds;
 }

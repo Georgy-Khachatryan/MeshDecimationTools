@@ -50,14 +50,10 @@ struct MdtVector3 {
 	float z;
 };
 
-struct MdtSphereBounds {
-	struct MdtVector3 center;
-	float             radius;
-};
-
 struct MdtErrorMetric {
-	struct MdtSphereBounds bounds;
-	float                  error;
+	struct MdtVector3 aabb_min;
+	struct MdtVector3 aabb_max;
+	float                error;
 };
 
 
@@ -206,9 +202,6 @@ struct MdtMeshlet {
 	struct MdtVector3 aabb_min;
 	struct MdtVector3 aabb_max;
 	
-	// Bounding sphere over meshlet vertex positions.
-	struct MdtSphereBounds geometric_sphere_bounds;
-	
 	//
 	// Error metric of this meshlet. Transferred from the group this meshlet was built from.
 	// For the first level meshlets the error is set to 0.
@@ -273,9 +266,6 @@ struct MdtMeshletGroup {
 	// Bounding box over source meshlet bounding boxes.
 	struct MdtVector3 aabb_min;
 	struct MdtVector3 aabb_max;
-	
-	// Bounding sphere over source meshlet bounding spheres.
-	struct MdtSphereBounds geometric_sphere_bounds;
 	
 	//
 	// Union of source meshlet current_level_error_metrics and decimation error for this meshlet group.
@@ -418,8 +408,6 @@ void MdtBuildDiscreteLod(const struct MdtDiscreteLodBuildInputs* inputs, struct 
 
 void MdtFreeContinuousLodBuildResult(const struct MdtContinuousLodBuildResult* result, const struct MdtSystemCallbacks* callbacks);
 void MdtFreeDiscreteLodBuildResult(const struct MdtDiscreteLodBuildResult* result, const struct MdtSystemCallbacks* callbacks);
-
-struct MdtSphereBounds MdtComputeSphereBoundsUnion(const struct MdtSphereBounds* source_sphere_bounds, uint32_t source_sphere_bounds_count);
 
 #if defined(__cplusplus)
 } // extern "C"
