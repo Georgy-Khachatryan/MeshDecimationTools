@@ -185,9 +185,9 @@ By default asserts are handled via C `assert`. You can set a custom assertion ha
 ```
 
 ## Limitations and further work
-- Performance. Mesh decimation algorithm is significantly slower than it could be. Most of the time is spent computing and recomputing edge collapse errors.
+- Performance. Mesh decimation algorithm is significantly slower than it could be.
 - Meshlet generation quality. Overall meshlet generation quality at lower LODs is relatively good, but at higher LODs meshlets might have enclaves of other meshlets. The same is true for meshlet group generation. As a workaround you can set `meshlet_min_face_count` and `meshlet_group_min_meshlet_count` to 1.
-- Mesh decimation quality. Volume preservation quadrics. Higher quality quadric minimization. Virtual edge insertion. Per meshlet group error scaling.
+- Mesh decimation quality. Volume preservation quadrics. Higher quality quadric minimization. Virtual edge insertion.
 - Lack of mesh skinning support.
 
 

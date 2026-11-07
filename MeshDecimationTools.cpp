@@ -78,6 +78,9 @@ compile_const u32 meshlet_group_max_meshlet_count = MDT_MESHLET_GROUP_SIZE;
 compile_const u32 meshlet_group_min_meshlet_count = meshlet_group_max_meshlet_count / 2;
 compile_const float discontinuous_meshlet_group_max_expansion = 4.f; // Sqrt of the maximum AABB expansion when adding a discontinuous meshlet to a group.
 
+// Allow edge collapses if their square error is up to 4x larger than initially estimated.
+compile_const float lazy_heap_update_allowed_squared_error_scale = 4.f;
+
 compile_const u32 continuous_lod_max_levels_of_details = MDT_MAX_CLOD_LEVEL_COUNT;
 
 compile_const float default_geometric_error_weight = 0.5f;
@@ -288,7 +291,7 @@ static void CornerListInsert(const EditableMeshView& mesh, ElementID element_id,
 }
 
 template<typename ElementID>
-static bool CornerListRemove(const EditableMeshView& mesh, CornerID corner_id) {
+static void CornerListRemove(const EditableMeshView& mesh, CornerID corner_id) {
 	compile_const u32 element_type = (u32)ElementID::element_type;
 	
 	auto& corner = mesh[corner_id];
@@ -306,8 +309,6 @@ static bool CornerListRemove(const EditableMeshView& mesh, CornerID corner_id) {
 	
 	corner.corner_list_around[element_type].prev.index = u32_max;
 	corner.corner_list_around[element_type].next.index = u32_max;
-	
-	return is_last_reference;
 }
 
 // Iterate linked list around a given element type starting with the base corner id. 
@@ -1151,7 +1152,7 @@ struct EdgeCollapseResult {
 	u32 removed_face_count = 0;
 };
 
-static EdgeCollapseResult PerformEdgeCollapse(const EditableMeshView& mesh, EdgeID edge_id, Allocator& heap_allocator, HashTable<u64, EdgeID>& edge_hash_table, Array<EdgeID>& removed_edge_ids) {
+static EdgeCollapseResult PerformEdgeCollapse(const EditableMeshView& mesh, EdgeID edge_id, Allocator& heap_allocator, HashTable<u64, EdgeID>& edge_hash_table) {
 	auto& edge = mesh[edge_id];
 	
 	MDT_ASSERT(edge.vertex_0.index != edge.vertex_1.index);
@@ -1160,7 +1161,6 @@ static EdgeCollapseResult PerformEdgeCollapse(const EditableMeshView& mesh, Edge
 	MDT_ASSERT(mesh[edge.vertex_1].corner_list_base.index != u32_max);
 	MDT_ASSERT(mesh[edge.vertex_0].corner_list_base.index != mesh[edge.vertex_1].corner_list_base.index);
 	
-	removed_edge_ids.count = 0;
 	u32 removed_face_count = 0;
 	IterateCornerList<EdgeID>(mesh, edge.corner_list_base, [&](CornerID corner_id) {
 		auto& corner = mesh[corner_id];
@@ -1168,12 +1168,10 @@ static EdgeCollapseResult PerformEdgeCollapse(const EditableMeshView& mesh, Edge
 		
 		IterateCornerList<FaceID>(mesh, face.corner_list_base, [&](CornerID corner_id) {
 			CornerListRemove<VertexID>(mesh, corner_id);
-			bool edge_removed = CornerListRemove<EdgeID>(mesh, corner_id);
-			bool face_removed = CornerListRemove<FaceID>(mesh, corner_id);
-			
-			if (edge_removed) ArrayAppendMaybeGrow(removed_edge_ids, heap_allocator, mesh[corner_id].edge_id);
-			removed_face_count += (u32)face_removed;
+			CornerListRemove<EdgeID>(mesh, corner_id);
+			CornerListRemove<FaceID>(mesh, corner_id);
 		});
+		removed_face_count += 1u;
 	});
 	
 	auto remaining_vertex_id = CornerListMerge<VertexID>(mesh, edge.vertex_0, edge.vertex_1);
@@ -1181,6 +1179,7 @@ static EdgeCollapseResult PerformEdgeCollapse(const EditableMeshView& mesh, Edge
 	if (remaining_vertex_id.index != u32_max) {
 		auto remaining_base_id = mesh[remaining_vertex_id].corner_list_base;
 		
+		HashTableClear(edge_hash_table);
 		IterateCornerList<VertexID>(mesh, remaining_base_id, [&](CornerID corner_id) {
 			IterateIncomingAndOutgoingFaceCornerEdges(mesh, corner_id, [&](CornerID corner_id) {
 				auto edge_id_1 = mesh[corner_id].edge_id;
@@ -1189,25 +1188,7 @@ static EdgeCollapseResult PerformEdgeCollapse(const EditableMeshView& mesh, Edge
 				auto edge_id_0 = *HashTableAddOrFind(edge_hash_table, heap_allocator, PackEdgeKey(edge_1.vertex_0, edge_1.vertex_1), edge_id_1);
 				if (edge_id_0.index != edge_id_1.index) {
 					CornerListMerge<EdgeID>(mesh, edge_id_0, edge_id_1);
-					ArrayAppendMaybeGrow(removed_edge_ids, heap_allocator, edge_id_1);
 				}
-			});
-		});
-		
-		IterateCornerList<VertexID>(mesh, remaining_base_id, [&](CornerID corner_id_0) {
-			IterateCornerList<FaceID>(mesh, corner_id_0, [&](CornerID corner_id_1) {
-				if (remaining_base_id.index == corner_id_1.index) return;
-				
-				IterateCornerList<VertexID>(mesh, corner_id_1, [&](CornerID corner_id_2) {
-					if (corner_id_1.index == corner_id_2.index) return;
-					
-					IterateIncomingAndOutgoingFaceCornerEdges(mesh, corner_id_2, [&](CornerID corner_id) {
-						auto edge_id = mesh[corner_id].edge_id;
-						auto& edge = mesh[edge_id];
-						
-						HashTableAddOrFind(edge_hash_table, heap_allocator, PackEdgeKey(edge.vertex_0, edge.vertex_1), edge_id);
-					});
-				});
 			});
 		});
 	}
@@ -1838,7 +1819,6 @@ struct alignas(MDT_CACHE_LINE_SIZE) MeshDecimationState {
 	QuadricWithAttributesArray attribute_face_quadrics;
 	
 	HashTable<u64, EdgeID> edge_hash_table;
-	Array<EdgeID> removed_edge_ids;
 	
 	QuadricWithAttributesArray wedge_quadrics;
 	Array<AttributesID> wedge_attributes_ids;
@@ -2016,18 +1996,6 @@ static void EdgeCollapseHeapSwapElements(EdgeCollapseHeap& heap, u32 node_index_
 	heap.edge_id_to_heap_index[node_0_edge_id.index] = node_index_1;
 }
 
-static void EdgeCollapseHeapSiftUp(EdgeCollapseHeap& heap, u32 node_index) {
-	while (node_index) {
-		u32 parent_node_index = HeapParentIndex(node_index);
-		
-		if (heap.edge_collapse_errors[node_index] < heap.edge_collapse_errors[parent_node_index]) {
-			EdgeCollapseHeapSwapElements(heap, node_index, parent_node_index);
-		}
-		
-		node_index = parent_node_index;
-	}
-}
-
 static void EdgeCollapseHeapSiftDown(EdgeCollapseHeap& heap, u32 node_index) {
 	u32 element_count = heap.edge_collapse_errors.count;
 	while (HeapChildIndex0(node_index) < element_count) {
@@ -2044,7 +2012,7 @@ static void EdgeCollapseHeapSiftDown(EdgeCollapseHeap& heap, u32 node_index) {
 	}
 }
 
-static EdgeID EdgeCollapseHeapPop(EdgeCollapseHeap& heap) {
+static void EdgeCollapseHeapPop(EdgeCollapseHeap& heap) {
 	MDT_ASSERT(heap.edge_collapse_errors.count != 0);
 	
 	auto edge_id = heap.heap_index_to_edge_id[0];
@@ -2059,47 +2027,12 @@ static EdgeID EdgeCollapseHeapPop(EdgeCollapseHeap& heap) {
 	heap.heap_index_to_edge_id.count -= 1;
 	
 	EdgeCollapseHeapSiftDown(heap, 0);
-	
-	return edge_id;
 }
 
-static void EdgeCollapseHeapRemove(EdgeCollapseHeap& heap, u32 heap_index) {
-	auto edge_id = heap.heap_index_to_edge_id[heap_index];
-	
-	bool sift_up = true;
-	if (heap.edge_collapse_errors.count > heap_index) {
-		float prev_error = heap.edge_collapse_errors[heap_index];
-		
-		heap.edge_collapse_errors[heap_index]  = ArrayLastElement(heap.edge_collapse_errors);
-		heap.heap_index_to_edge_id[heap_index] = ArrayLastElement(heap.heap_index_to_edge_id);
-		
-		float new_error = heap.edge_collapse_errors[heap_index];
-		sift_up = new_error < prev_error;
-	}
-	
-	heap.edge_id_to_heap_index[heap.heap_index_to_edge_id[heap_index].index] = heap_index;
-	heap.edge_id_to_heap_index[edge_id.index] = u32_max;
-	
-	heap.edge_collapse_errors.count  -= 1;
-	heap.heap_index_to_edge_id.count -= 1;
-	
-	if (sift_up) {
-		EdgeCollapseHeapSiftUp(heap, heap_index);
-	} else {
-		EdgeCollapseHeapSiftDown(heap, heap_index);
-	}
-}
-
-static void EdgeCollapseHeapUpdate(EdgeCollapseHeap& heap, u32 node_index, float error) {
-	bool sift_up = error < heap.edge_collapse_errors[node_index];
-	
-	heap.edge_collapse_errors[node_index] = error;
-	
-	if (sift_up) {
-		EdgeCollapseHeapSiftUp(heap, node_index);
-	} else {
-		EdgeCollapseHeapSiftDown(heap, node_index);
-	}
+static void EdgeCollapseHeapUpdate(EdgeCollapseHeap& heap, float error) {
+	MDT_ASSERT(error > heap.edge_collapse_errors[0]);
+	heap.edge_collapse_errors[0] = error;
+	EdgeCollapseHeapSiftDown(heap, 0);
 }
 
 static void EdgeCollapseHeapInitialize(EdgeCollapseHeap& heap) {
@@ -2121,9 +2054,7 @@ static void AllocateMeshDecimationState(u32 vertex_count, u32 attribute_count, u
 	
 	ArrayReserve(state.wedge_quadrics,       allocator, 64, attribute_stride_dwords);
 	ArrayReserve(state.wedge_attributes_ids, allocator, 64);
-	ArrayReserve(state.removed_edge_ids,     allocator, 64);
 	HashTableReserve(state.edge_hash_table,  allocator, 64);
-	HashTableClear(state.edge_hash_table);
 }
 
 static void InitializeMeshDecimationState(const EditableMeshView& mesh, const MdtTriangleMeshDesc& mesh_desc, MeshDecimationState& state) {
@@ -2276,33 +2207,29 @@ static float DecimateMeshFaceGroup(
 	
 	float max_error = 0.f;
 	while (active_face_count > target_face_count && edge_collapse_heap.edge_collapse_errors.count) {
-		for (auto& element : state.edge_hash_table) {
-			if (IsValidKey(element.key) == false) continue;
-			
-			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[element.value.index];
-			if (heap_index == u32_max) continue;
-			
-			auto collapse_error = ComputeEdgeCollapseError(mesh, heap_allocator, state, element.value);
-			
-			EdgeCollapseHeapUpdate(edge_collapse_heap, heap_index, collapse_error.min_error);
+		auto edge_id = edge_collapse_heap.heap_index_to_edge_id[0];
+		if (mesh[edge_id].corner_list_base.index == u32_max) {
+			EdgeCollapseHeapPop(edge_collapse_heap);
+			continue;
 		}
-		HashTableClear(state.edge_hash_table);
-		
-		
-		auto edge_id = EdgeCollapseHeapPop(edge_collapse_heap);
 		
 		auto collapse_error = ComputeEdgeCollapseError(mesh, heap_allocator, state, edge_id);
-		if (collapse_error.min_error > target_error_limit) break;
+		if (collapse_error.min_error > edge_collapse_heap.edge_collapse_errors[0] * lazy_heap_update_allowed_squared_error_scale) {
+			EdgeCollapseHeapUpdate(edge_collapse_heap, collapse_error.min_error);
+			continue;
+		}
+		
+		EdgeCollapseHeapPop(edge_collapse_heap);
+		if (collapse_error.min_error > target_error_limit) {
+			break;
+		}
 		
 		max_error = max_error < collapse_error.min_error ? collapse_error.min_error : max_error;
 		
-		auto collapse_result = PerformEdgeCollapse(mesh, edge_id, heap_allocator, state.edge_hash_table, state.removed_edge_ids);
+		
+		auto collapse_result = PerformEdgeCollapse(mesh, edge_id, heap_allocator, state.edge_hash_table);
 		active_face_count -= collapse_result.removed_face_count;
 		
-		for (auto removed_edge_id : state.removed_edge_ids) {
-			u32 heap_index = edge_collapse_heap.edge_id_to_heap_index[removed_edge_id.index];
-			if (heap_index != u32_max) EdgeCollapseHeapRemove(edge_collapse_heap, heap_index);
-		}
 		
 		// Update vertices.
 		{
@@ -2344,9 +2271,6 @@ static float DecimateMeshFaceGroup(
 			});
 		}
 	}
-	
-	HashTableClear(state.edge_hash_table);
-	state.removed_edge_ids.count = 0;
 	
 	return sqrtf(max_error) * state.rcp_position_weight;
 }
